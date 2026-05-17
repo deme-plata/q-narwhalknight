@@ -1,0 +1,139 @@
+# Q-NarwhalKnight Phase 1 Production Configuration
+# Post-Quantum Cryptography Deployment Configuration
+
+[general]
+name = "Q-NarwhalKnight Phase 1"
+version = "0.1.0"
+network_id = "qnk-mainnet-phase1"
+phase = "Phase1"
+
+[consensus]
+# DAG-Knight consensus with post-quantum signatures
+algorithm = "DAG-Knight"
+round_timeout = "2.5s"
+block_time = "500ms"
+max_transactions_per_block = 10000
+
+[cryptography]
+# Phase 1: Post-Quantum Cryptographic Suite
+signature_scheme = "Dilithium5"
+kem_scheme = "Kyber1024" 
+hash_function = "SHA3_256"
+crypto_agility = true
+
+# Hybrid mode: Support both classical and post-quantum
+hybrid_mode = true
+fallback_signature = "Ed25519"
+fallback_kem = "X25519"
+
+# Performance targets for Phase 1
+signature_timeout_ms = 10
+key_exchange_timeout_ms = 5
+verification_batch_size = 100
+
+[network]
+# Networking configuration for Phase 1
+listen_port = 9000
+max_connections = 1000
+enable_mdns = false
+enable_tor = true
+tor_control_port = 9051
+
+# Post-quantum TLS configuration  
+tls_version = "1.3"
+pq_ciphersuites = [
+    "TLS_KYBER1024_AES_256_GCM_SHA384",
+    "TLS_DILITHIUM5_AES_256_GCM_SHA384"
+]
+
+# Peer discovery
+bootstrap_peers = [
+    "/ip4/127.0.0.1/tcp/9001/p2p/12D3KooWExample1",
+    "/ip4/127.0.0.1/tcp/9002/p2p/12D3KooWExample2"
+]
+
+[api]
+# REST API and WebSocket configuration
+bind_address = "0.0.0.0"
+port = 8080
+enable_cors = true
+max_request_size = "10MB"
+
+# Real-time features
+websocket_enabled = true
+sse_enabled = true
+streaming_buffer_size = 1000
+
+[storage]
+# Quantum-resistant storage configuration
+database_path = "./data/qnk-phase1"
+enable_encryption_at_rest = true
+backup_interval = "1h"
+retention_period = "30d"
+
+# RocksDB optimization for post-quantum signatures
+large_signature_optimization = true
+compression = "lz4"
+
+[monitoring]
+# Performance monitoring for Phase 1
+metrics_enabled = true
+metrics_port = 9090
+log_level = "info"
+
+# Phase 1 specific metrics
+track_signature_performance = true
+track_key_exchange_latency = true
+track_hybrid_mode_usage = true
+
+[security]
+# Enhanced security for Phase 1
+quantum_resistance_required = true
+minimum_signature_strength = "Dilithium5"
+minimum_kem_strength = "Kyber1024"
+
+# Audit and compliance
+audit_log_enabled = true
+compliance_mode = "strict"
+reject_classical_only_peers = false # Allow gradual migration
+
+[performance]
+# Performance tuning for Phase 1
+worker_threads = 8
+signature_verification_threads = 4
+network_io_threads = 2
+
+# Memory limits
+max_memory_usage = "8GB"
+signature_cache_size = 10000
+peer_cache_size = 1000
+
+[migration]
+# Migration settings for Phase 0 → Phase 1
+migration_mode = "gradual"
+support_phase0_peers = true
+auto_upgrade_threshold = 0.8 # 80% of peers must support Phase 1
+
+# Rollback capability
+enable_rollback = true
+rollback_trigger_failure_rate = 0.1 # 10% failure rate
+
+[experimental]
+# Phase 2+ features (disabled by default)
+quantum_randomness = false
+lattice_vrf = false
+zk_snark_proofs = false
+qkd_integration = false
+
+[tor]
+# Tor integration for enhanced privacy
+enabled = true
+control_port = 9051
+socks_port = 9050
+circuit_count = 4
+circuit_rotation_interval = "1h"
+
+# Onion service configuration
+onion_service_enabled = true
+onion_service_port = 8080
+onion_key_rotation = "24h"

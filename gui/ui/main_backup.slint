@@ -1,0 +1,1053 @@
+import { Colors } from "colors.slint";
+// Q-NarwhalKnight Quantum Consensus Interface
+// The world's first quantum-enhanced blockchain GUI
+
+import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView } from "std-widgets.slint";
+import { QuantumCanvasIntegration, CanvasDAGNetwork, CanvasEntropyStream } from "canvas_visualizations.slint";
+import { VDFProgressTracker, VDFConsensusIntegration } from "vdf_progress.slint";
+
+export component MainWindow inherits Window {
+    title: "Q-NarwhalKnight - Quantum Consensus Interface";
+    preferred-width: 1400px;
+    preferred-height: 900px;
+    background: #0a0e17; // Deep space background
+    
+    // ========== PROPERTIES ==========
+    // Wallet properties (support multiple wallets)
+    in-out property <string> wallet-id: "Not created";
+    in-out property <float> balance: 0.0;
+    in-out property <string> precision-balance: "0.000000000000000000000000000000000000";
+    in-out property <string> wallet-status: "";
+    in-out property <string> mnemonic-phrase: "";
+    in-out property <bool> show-mnemonic-dialog: false;
+    in-out property <bool> show-restore-dialog: false;
+    in-out property <[{name: string, balance: string, precise-balance: string}]> wallets: [];
+    in-out property <int> active-wallet-index: 0;
+    in-out property <bool> show-add-wallet-dialog: false;
+    
+    // Transaction properties
+    in-out property <string> recipient: "";
+    in-out property <float> amount: 0.0;
+    in-out property <string> tx-status-unknown: "";
+    in-out property <string> tx-status-pending: "";
+    
+    // System properties
+    in-out property <string> log: "🌌 Quantum Consensus Interface Loading...\n";
+    in-out property <int> active-tab: 0;
+    
+    // Quantum metrics
+    in-out property <float> entropy-quality: 0.97;
+    in-out property <float> consensus-latency: 2.3;
+    in-out property <int> active-peers: 12;
+    in-out property <string> current-phase: "Phase 2";
+    in-out property <int> tor-circuits: 4;
+    in-out property <float> network-health: 0.75;
+    
+    // ========== CALLBACKS ==========
+    callback create-wallet();
+    callback create-additional-wallet(string); // name parameter
+    callback switch-wallet(int); // wallet index
+    callback submit-tx(string, float);
+    callback append-log(string);
+    callback refresh-metrics();
+    callback show-mnemonic();
+    callback restore-wallet(string);
+    callback export-wallet();
+    callback show-add-wallet-ui();
+    
+    // ========== MAIN LAYOUT ==========
+    VerticalBox {
+        spacing: 0;
+        
+        // Quantum header with holographic effects
+        QuantumHeader { 
+            height: 80px;
+        }
+        
+        // Main content area with tabs
+        TabWidget {
+            // Tab 1: Quantum Dashboard Overview
+            Tab {
+                title: "🌌 Dashboard";
+                QuantumDashboard { }
+            }
+            
+            // Tab 2: Quantum Entropy Visualization
+            Tab {
+                title: "🔮 Entropy";
+                EntropyVisualizer { }
+            }
+            
+            // Tab 3: DAG-Knight Consensus
+            Tab {
+                title: "🔗 Consensus";
+                ConsensusVisualizer { }
+            }
+            
+            // Tab 4: Tor Anonymity Network
+            Tab {
+                title: "🧅 Anonymity";
+                AnonymityVisualizer { }
+            }
+            
+            // Tab 5: Quantum Wallet
+            Tab {
+                title: "💎 Wallet";
+                QuantumWallet { }
+            }
+            
+            // Tab 6: Canvas Visualizations
+            Tab {
+                title: "🎨 Canvas";
+                QuantumCanvasIntegration { }
+            }
+            
+            // Tab 7: System Analytics
+            Tab {
+                title: "📊 System";
+                SystemAnalytics { }
+            }
+        }
+        
+        // Status bar
+        Rectangle {
+            height: 30px;
+            background: Colors.card-background;
+            
+            HorizontalBox {
+                padding: 5px;
+                spacing: 15px;
+                alignment: space-between;
+                
+                HorizontalBox {
+                    spacing: 15px;
+                    
+                    StatusIndicator {
+                        label: "Phase";
+                        value: current-phase;
+                    }
+                    
+                    StatusIndicator {
+                        label: "Peers";
+                        value: active-peers;
+                    }
+                    
+                    StatusIndicator {
+                        label: "Health";
+                        value: Math.round(network-health * 100) + "%";
+                    }
+                }
+                
+                Text {
+                    text: "Q-NarwhalKnight v1.0 - Quantum Ready";
+                    color: Colors.text-secondary;
+                    font-size: 11px;
+                }
+            }
+        }
+    }
+    
+    // Mnemonic display dialog
+    if show-mnemonic-dialog : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Colors.overlay-medium;
+        
+        Rectangle {
+            width: 500px;
+            height: 350px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Colors.card-background;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Colors.border-color;
+            
+            VerticalBox {
+                padding: 25px;
+                spacing: 20px;
+                
+                Text {
+                    text: "🔐 Mnemonic Phrase";
+                    color: Colors.text-primary;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                
+                Text {
+                    text: "⚠️ Keep this phrase secure! It's your only way to recover your wallet.";
+                    color: Colors.warning;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                
+                Rectangle {
+                    background: Colors.background-secondary;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Colors.border-color;
+                    height: 120px;
+                    
+                    TextEdit {
+                        text: mnemonic-phrase;
+                        read-only: true;
+                        wrap: word-wrap;
+                        font-size: 14px;
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 10px;
+                    
+                    SecondaryButton {
+                        text: "Copy to Clipboard";
+                        icon: "📋";
+                    }
+                    
+                    PrimaryButton {
+                        text: "Close";
+                        icon: "✕";
+                        clicked => {
+                            show-mnemonic-dialog = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Wallet restore dialog
+    if show-restore-dialog : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Colors.overlay-medium;
+        
+        Rectangle {
+            width: 500px;
+            height: 400px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Colors.card-background;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: Colors.border-color;
+            
+            VerticalBox {
+                padding: 25px;
+                spacing: 20px;
+                
+                Text {
+                    text: "🔄 Restore Wallet";
+                    color: Colors.text-primary;
+                    font-size: 20px;
+                    font-weight: 700;
+                }
+                
+                Text {
+                    text: "Enter your 12 or 24-word mnemonic phrase to restore your wallet.";
+                    color: Colors.text-secondary;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                }
+                
+                Rectangle {
+                    background: Colors.background-secondary;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Colors.border-color;
+                    height: 150px;
+                    
+                    TextEdit {
+                        placeholder-text: "Enter your mnemonic phrase here...";
+                        wrap: word-wrap;
+                        font-size: 14px;
+                    }
+                }
+                
+                HorizontalBox {
+                    spacing: 10px;
+                    
+                    SecondaryButton {
+                        text: "Cancel";
+                        clicked => {
+                            show-restore-dialog = false;
+                        }
+                    }
+                    
+                    PrimaryButton {
+                        text: "Restore Wallet";
+                        icon: "🔄";
+                        clicked => {
+                            show-restore-dialog = false;
+                            // TODO: Implement wallet restoration
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Add wallet dialog
+    if show-add-wallet-dialog : AddWalletDialog {
+        visible: true;
+    }
+}
+
+// ========== COMPONENT DEFINITIONS ==========
+
+component QuantumHeader inherits Rectangle {
+    background: @linear-gradient(90deg, Colors.quantum-blue, Colors.quantum-purple);
+    border-radius: 15px;
+    
+    HorizontalBox {
+        padding: 20px;
+        alignment: space-between;
+        
+        HorizontalBox {
+            spacing: 15px;
+            alignment: center;
+            
+            Text {
+                text: "⚛️";
+                font-size: 32px;
+            }
+            
+            VerticalBox {
+                spacing: 2px;
+                
+                Text {
+                    text: "Q-NarwhalKnight";
+                    color: #ffffff;
+                    font-size: 22px;
+                    font-weight: 800;
+                }
+                
+                Text {
+                    text: "Quantum Consensus Interface";
+                    color: #ffffff99;
+                    font-size: 12px;
+                }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            alignment: center;
+            
+            Button {
+                text: "⚙️";
+                width: 40px;
+                height: 40px;
+            }
+            
+            Button {
+                text: "🔔";
+                width: 40px;
+                height: 40px;
+            }
+        }
+    }
+}
+
+component QuantumDashboard inherits Rectangle {
+    background: Colors.background-primary;
+    
+    ScrollView {
+        VerticalBox {
+            padding: 20px;
+            spacing: 20px;
+            
+            // Metrics grid
+            HorizontalBox {
+                spacing: 15px;
+                
+                MetricCard {
+                    title: "Entropy Quality";
+                    value: Math.round(root.entropy-quality * 1000) / 10 + "%";
+                    status: root.entropy-quality > 0.95 ? "excellent" : "good";
+                    icon: "🌊";
+                    color: Colors.quantum-green;
+                }
+                
+                MetricCard {
+                    title: "Consensus Latency";
+                    value: Math.round(root.consensus-latency * 10) / 10 + "ms";
+                    status: "optimal";
+                    icon: "⚡";
+                    color: Colors.quantum-blue;
+                }
+                
+                MetricCard {
+                    title: "Tor Circuits";
+                    value: root.tor-circuits + " active";
+                    status: "secure";
+                    icon: "🧅";
+                    color: Colors.quantum-gold;
+                }
+                
+                MetricCard {
+                    title: "Network Health";
+                    value: Math.round(root.network-health * 1000) / 10 + "%";
+                    status: "healthy";
+                    icon: "🌐";
+                    color: Colors.quantum-purple;
+                }
+            }
+            
+            // Live visualizations
+            HorizontalBox {
+                spacing: 15px;
+                
+                QuantumProcessMonitor { }
+                
+                NetworkTopologyPreview { }
+            }
+        }
+    }
+}
+
+component EntropyVisualizer inherits Rectangle {
+    background: Colors.background-primary;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "🌊 Quantum Entropy Stream";
+            color: Colors.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            QRNGDevice {
+                title: "Primary QRNG";
+                status: "Active";
+                quality: root.entropy-quality;
+                throughput: "2.1 Mbps";
+            }
+            
+            QRNGDevice {
+                title: "Backup QRNG";
+                status: "Standby";
+                quality: 0.89;
+                throughput: "1.8 Mbps";
+            }
+            
+            QRNGDevice {
+                title: "External QRNG";
+                status: "Inactive";
+                quality: 0.0;
+                throughput: "0 Mbps";
+            }
+        }
+        
+        EntropyAnalysisPanel { }
+    }
+}
+
+component ConsensusVisualizer inherits Rectangle {
+    background: Colors.background-primary;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "🔗 DAG-Knight Consensus";
+            color: Colors.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            CanvasDAGNetwork {
+                width: 60%;
+                height: 300px;
+            }
+            
+            VerticalBox {
+                spacing: 10px;
+                width: 40%;
+                
+                ConsensusMetrics { }
+                
+                VDFProgressTracker { }
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            AnchorElectionPanel { }
+            
+            LVRFRandomnessPanel { }
+        }
+    }
+}
+
+component AnonymityVisualizer inherits Rectangle {
+    background: Colors.background-primary;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "🧅 Tor Anonymity Network";
+            color: Colors.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        
+        Rectangle {
+            background: Colors.card-background;
+            border-radius: 12px;
+            height: 300px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 10px;
+                alignment: center;
+                
+                Text {
+                    text: "🌐 Tor Circuit Visualization\n4 dedicated circuits active\nAnonymity score: " + Math.round(root.network-health * 100) + "%";
+                    color: Colors.text-primary;
+                    font-size: 16px;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+component MetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> status;
+    in-out property <string> card-icon;
+    in-out property <color> indicator-color;
+    
+    background: Colors.card-background;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    height: 120px;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 8px;
+        
+        HorizontalBox {
+            spacing: 8px;
+            alignment: space-between;
+            
+            Text {
+                text: card-icon;
+                font-size: 20px;
+            }
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: indicator-color;
+            }
+        }
+        
+        Text {
+            text: title;
+            color: Colors.text-secondary;
+            font-size: 12px;
+        }
+        
+        Text {
+            text: value;
+            color: indicator-color;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        Text {
+            text: status;
+            color: Colors.text-secondary;
+            font-size: 10px;
+        }
+    }
+}
+
+component StatusIndicator inherits VerticalBox {
+    in-out property <string> label;
+    in-out property <string> value;
+    
+    spacing: 2px;
+    
+    Text {
+        text: label + ":";
+        color: Colors.text-secondary;
+        font-size: 10px;
+    }
+    
+    Text {
+        text: value;
+        color: Colors.text-primary;
+        font-size: 11px;
+        font-weight: 600;
+    }
+}
+
+component QuantumEntropyStream inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 200px;
+    
+    Text {
+        text: "🌊 Quantum Entropy Stream";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component DAGVisualization inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 250px;
+    
+    Text {
+        text: "🔗 DAG Visualization";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component QuantumProcessMonitor inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 200px;
+    
+    Text {
+        text: "⚡ Process Monitor";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component NetworkTopologyPreview inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 200px;
+    
+    Text {
+        text: "🌐 Network Topology";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component QuantumWallet inherits VerticalBox {
+    spacing: 20px;
+    padding: 20px;
+    
+    WalletCard { }
+    
+    SendTransactionPanel { }
+}
+
+component WalletCard inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 12px;
+    height: 200px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        HorizontalBox {
+            alignment: space-between;
+            
+            Text {
+                text: "💎 Quantum Wallet";
+                color: Colors.text-primary;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            
+            Text {
+                text: root.wallet-status;
+                color: root.wallet-status == "Active" ? Colors.quantum-green : Colors.quantum-red;
+                font-size: 12px;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 8px;
+            
+            Text {
+                text: "Wallet ID";
+                color: Colors.text-secondary;
+                font-size: 11px;
+            }
+            
+            Text {
+                text: root.wallet-id;
+                color: Colors.text-primary;
+                font-size: 13px;
+                font-family: "Monaco";
+            }
+        }
+        
+        VerticalBox {
+            spacing: 8px;
+            
+            Text {
+                text: "Balance";
+                color: Colors.text-secondary;
+                font-size: 11px;
+            }
+            
+            Text {
+                text: "Ξ " + root.precision-balance + " QNK";
+                color: Colors.quantum-gold;
+                font-size: 16px;
+                font-weight: 600;
+            }
+        }
+        
+        HorizontalBox {
+            spacing: 10px;
+            
+            PrimaryButton {
+                text: root.wallet-id == "Not created" ? "Create Wallet" : "Export";
+                button-icon: root.wallet-id == "Not created" ? "✨" : "📤";
+                clicked => {
+                    if (root.wallet-id == "Not created") {
+                        create-wallet();
+                    } else {
+                        export-wallet();
+                    }
+                }
+            }
+            
+            SecondaryButton {
+                text: "Show Seed";
+                icon: "🔐";
+                enabled: root.wallet-id != "Not created";
+                clicked => {
+                    show-mnemonic();
+                }
+            }
+            
+            SecondaryButton {
+                text: "Restore";
+                icon: "🔄";
+                clicked => {
+                    show-restore-dialog = true;
+                }
+            }
+        }
+    }
+}
+
+component SendTransactionPanel inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "💸 Send Transaction";
+            color: Colors.text-primary;
+            font-size: 18px;
+            font-weight: 700;
+        }
+        
+        VerticalBox {
+            spacing: 10px;
+            
+            Text {
+                text: "Recipient Address";
+                color: Colors.text-secondary;
+                font-size: 12px;
+            }
+            
+            QuantumInput {
+                placeholder: "Enter quantum address...";
+                text <=> recipient;
+            }
+        }
+        
+        VerticalBox {
+            spacing: 10px;
+            
+            Text {
+                text: "Amount (QNK)";
+                color: Colors.text-secondary;
+                font-size: 12px;
+            }
+            
+            QuantumInput {
+                placeholder: "0.000000";
+                text <=> amount;
+            }
+        }
+        
+        PrimaryButton {
+            text: "Send QNK";
+            button-icon: "🚀";
+            enabled: root.wallet-id != "Not created" && root.recipient != "" && root.amount > 0;
+            clicked => {
+                submit-tx(root.recipient, root.amount);
+            }
+        }
+    }
+}
+
+component SystemAnalytics inherits Rectangle {
+    background: Colors.background-primary;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: "📊 System Analytics";
+            color: Colors.text-primary;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        
+        ScrollView {
+            Rectangle {
+                background: Colors.card-background;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Colors.border-color;
+                height: 400px;
+                
+                VerticalBox {
+                    padding: 15px;
+                    spacing: 10px;
+                    
+                    Text {
+                        text: "System Log";
+                        color: Colors.text-primary;
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+                    
+                    TextEdit {
+                        text: root.log;
+                        read-only: true;
+                        wrap: word-wrap;
+                        font-size: 11px;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Helper components
+component PrimaryButton inherits Button {
+    in-out property <string> button-icon: "";
+    
+    text: button-icon != "" ? button-icon + " " + self.text : self.text;
+}
+
+component SecondaryButton inherits Button {
+    in-out property <string> button-icon: "";
+    
+    text: button-icon != "" ? button-icon + " " + self.text : self.text;
+}
+
+component QuantumInput inherits LineEdit {
+    in-out property <string> placeholder: "";
+    
+    placeholder-text: placeholder;
+}
+
+component QRNGDevice inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> status;
+    in-out property <float> quality;
+    in-out property <string> throughput;
+    
+    background: Colors.card-background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    height: 120px;
+    
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+        
+        Text {
+            text: "🎲 " + title;
+            color: Colors.text-primary;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        Text {
+            text: "Status: " + status;
+            color: status == "Active" ? Colors.quantum-green : Colors.text-secondary;
+            font-size: 10px;
+        }
+        
+        Text {
+            text: "Quality: " + Math.round(quality * 100) + "%";
+            color: Colors.text-secondary;
+            font-size: 10px;
+        }
+        
+        Text {
+            text: throughput;
+            color: Colors.quantum-blue;
+            font-size: 10px;
+        }
+    }
+}
+
+component EntropyAnalysisPanel inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 180px;
+    
+    Text {
+        text: "📈 Entropy Analysis";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component AnchorElectionPanel inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 150px;
+    
+    Text {
+        text: "⚓ Anchor Election";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component VDFComputationPanel inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 150px;
+    
+    Text {
+        text: "⏳ VDF Computation";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component LVRFRandomnessPanel inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 150px;
+    
+    Text {
+        text: "🎯 LVRF Randomness";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component ConsensusMetrics inherits Rectangle {
+    background: Colors.card-background;
+    border-radius: 8px;
+    height: 140px;
+    
+    Text {
+        text: "📊 Consensus Metrics";
+        color: Colors.text-primary;
+        font-size: 14px;
+        x: 15px;
+        y: 15px;
+    }
+}
+
+component AddWalletDialog inherits Rectangle {
+    in-out property <bool> is-visible: false;
+    
+    if is-visible : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Colors.overlay-medium;
+        
+        Rectangle {
+            width: 400px;
+            height: 250px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Colors.card-background;
+            border-radius: 12px;
+            
+            VerticalBox {
+                padding: 20px;
+                spacing: 15px;
+                
+                Text {
+                    text: "➕ Add New Wallet";
+                    color: Colors.text-primary;
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+                
+                QuantumInput {
+                    placeholder: "Wallet name...";
+                }
+                
+                HorizontalBox {
+                    spacing: 10px;
+                    
+                    SecondaryButton {
+                        text: "Cancel";
+                        clicked => {
+                            is-visible = false;
+                        }
+                    }
+                    
+                    PrimaryButton {
+                        text: "Create";
+                        button-icon: "✨";
+                        clicked => {
+                            is-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

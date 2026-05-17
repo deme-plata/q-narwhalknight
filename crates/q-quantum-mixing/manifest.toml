@@ -1,0 +1,113 @@
+[plugin]
+name = "Quantum Mixing"
+id = "quantum-mixing"
+version = "1.0.0"
+description = "Advanced quantum-powered cryptocurrency mixing for enhanced privacy and security"
+author = "Orobit Research Labs"
+category = "privacy"
+tags = ["quantum", "privacy", "mixing", "cryptography", "security"]
+
+[pricing]
+model = "premium"
+base_price = 5  # 5 ORB for premium features
+currency = "ORB"
+trial_duration = 7200  # 2 hours trial
+
+[permissions]
+storage_persistent = true
+storage_temporary = true
+network_p2p = true
+network_tor = true
+blockchain_read = true
+blockchain_write = true
+consensus_participate = false
+ai_inference = false
+quantum_hardware = false
+crypto_operations = true
+
+[resource_limits]
+max_memory_mb = 256
+max_cpu_cores = 2
+max_storage_mb = 512
+max_network_connections = 50
+timeout_seconds = 180
+
+[features]
+quantum_entropy_sources = ["qrng", "quantum_noise"]
+min_mixing_duration = 1  # seconds
+max_mixing_duration = 3600  # 1 hour
+default_mixing_duration = 10
+min_participants = 3
+max_participants = 100
+security_level = 128
+quantum_noise_injection = true
+quantum_decoy_transactions = true
+stealth_addresses = true
+ring_signatures = true
+zero_knowledge_proofs = true
+temporal_mixing = true
+cross_chain_mixing = false
+
+[api]
+version = "1.0"
+base_path = "/api/plugins/quantum-mixing"
+
+[[api.endpoints]]
+method = "POST"
+path = "/initiate-mix"
+description = "Initiate a new quantum mixing session"
+requires_premium = false
+
+[[api.endpoints]]
+method = "POST"
+path = "/purchase-premium"
+description = "Purchase premium features for enhanced mixing"
+requires_premium = false
+
+[[api.endpoints]]
+method = "GET"
+path = "/status"
+description = "Get plugin status and active sessions"
+requires_premium = false
+
+[[api.endpoints]]
+method = "GET"
+path = "/wallet-integration"
+description = "Get wallet UI integration components"
+requires_premium = false
+
+[[api.endpoints]]
+method = "POST"
+path = "/simulate-node-failure"
+description = "Simulate node failure for testing (admin only)"
+requires_premium = false
+
+[[api.endpoints]]
+method = "POST"
+path = "/simulate-node-recovery"
+description = "Simulate node recovery for testing (admin only)"
+requires_premium = false
+
+[frontend]
+icon = "🌀"
+color = "#7c3aed"
+category_display = "Privacy & Security"
+short_description = "Quantum-powered crypto mixing for ultimate privacy"
+screenshots = []
+demo_available = true
+compatibility = ["web", "mobile"]
+
+[frontend.ui_components]
+wallet_integration = true
+settings_panel = true
+status_dashboard = true
+analytics_view = true
+
+[metadata]
+verified = true
+license = "MIT"
+repository = "https://github.com/orobit/quantum-mixing-plugin"
+documentation = "https://docs.orobit.com/plugins/quantum-mixing"
+support_email = "support@orobit.com"
+quantum_secure = true
+peer_reviewed = true

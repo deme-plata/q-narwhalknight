@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/ui/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Q-NarwhalKnight • Quantum Consensus Wallet</title>
+    <script type="module" crossorigin src="/ui/assets/index-z9BTiFJw.js"></script>
+    <link rel="stylesheet" crossorigin href="/ui/assets/index-BHRBtFgF.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    
+    <!-- EMERGENCY TRANSACTION HOTFIX - HIGHEST PRIORITY -->
+    <script>
+// EMERGENCY TRANSACTION HOTFIX - Version 2.0
+// This script MUST run before any other JavaScript to fix the unit conversion bug
+console.log('🚨 EMERGENCY Q-NarwhalKnight Transaction Fix Loading...');
+
+(function() {
+    'use strict';
+    
+    // Store original functions before they get overridden
+    const originalFetch = window.fetch;
+    const originalXMLHttpRequest = window.XMLHttpRequest;
+    
+    // LEVEL 1: Fetch API Override (Primary Fix)
+    window.fetch = async function(url, options) {
+        if (url && url.includes('/v1/transactions/send') && options && options.method === 'POST') {
+            console.log('🔧 EMERGENCY: Intercepting transaction send request');
+            console.log('🔍 Original URL:', url);
+            console.log('🔍 Original options:', options);
+            
+            try {
+                let body = options.body;
+                if (typeof body === 'string') {
+                    body = JSON.parse(body);
+                }
+                
+                console.log('📦 EMERGENCY: Original request body:', body);
+                
+                // THE FIX: Ensure amount is sent as QNK value, not converted to smallest units
+                if (body.amount) {
+                    const originalAmount = body.amount;
+                    let fixedAmount;
+                    
+                    // If amount is a large number (indicating unit conversion happened), convert back
+                    if (originalAmount > 1000000) {
+                        fixedAmount = originalAmount / 100000000; // Convert back from smallest units
+                        console.log(`🔧 EMERGENCY: Detected unit conversion! ${originalAmount} -> ${fixedAmount} QNK`);
+                    } else {
+                        fixedAmount = parseFloat(originalAmount);
+                        console.log(`✅ EMERGENCY: Amount already in QNK: ${fixedAmount}`);
+                    }
+                    
+                    body.amount = fixedAmount;
+                }
+                
+                console.log('✅ EMERGENCY: Fixed request body:', body);
+                
+                const fixedOptions = {
+                    ...options,
+                    body: JSON.stringify(body)
+                };
+                
+                return originalFetch.call(this, url, fixedOptions);
+                
+            } catch (error) {
+                console.error('❌ EMERGENCY: Transaction fix error:', error);
+                // Fallback to original request
+                return originalFetch.call(this, url, options);
+            }
+        }
+        
+        // For all other requests, use original fetch
+        return originalFetch.call(this, url, options);
+    };
+    
+    // LEVEL 2: XMLHttpRequest Override (Backup Fix)
+    window.XMLHttpRequest = function() {
+        const xhr = new originalXMLHttpRequest();
+        const originalSend = xhr.send;
+        
+        xhr.send = function(data) {
+            if (this.url && this.url.includes('/v1/transactions/send') && data) {
+                console.log('🔧 EMERGENCY: Intercepting XHR transaction send');
+                try {
+                    let parsedData = JSON.parse(data);
+                    if (parsedData.amount && parsedData.amount > 1000000) {
+                        parsedData.amount = parsedData.amount / 100000000;
+                        console.log('🔧 EMERGENCY: Fixed XHR amount:', parsedData.amount);
+                        data = JSON.stringify(parsedData);
+                    }
+                } catch (e) {
+                    console.log('⚠️ EMERGENCY: Could not parse XHR data, using original');
+                }
+            }
+            return originalSend.call(this, data);
+        };
+        
+        return xhr;
+    };
+    
+    // Copy static properties
+    Object.setPrototypeOf(window.XMLHttpRequest, originalXMLHttpRequest);
+    Object.setPrototypeOf(window.XMLHttpRequest.prototype, originalXMLHttpRequest.prototype);
+    
+    // LEVEL 3: Global Transaction Validator
+    window.qnkEmergencyTransactionFix = {
+        validateAndFix: function(transactionData) {
+            console.log('🔍 EMERGENCY: Validating transaction data:', transactionData);
+            
+            if (transactionData && transactionData.amount) {
+                const originalAmount = transactionData.amount;
+                
+                // If amount is large number, it's been converted to smallest units - fix it
+                if (originalAmount > 1000000) {
+                    const fixedAmount = originalAmount / 100000000;
+                    console.log(`🔧 EMERGENCY: Fixed amount ${originalAmount} -> ${fixedAmount} QNK`);
+                    return {
+                        ...transactionData,
+                        amount: fixedAmount
+                    };
+                }
+            }
+            
+            return transactionData;
+        },
+        
+        testFix: function() {
+            console.log('🧪 EMERGENCY: Testing transaction fix...');
+            
+            // Test case 1: Large number (converted)
+            const test1 = this.validateAndFix({ amount: 200000996, recipient: 'test' });
+            console.log('Test 1 (200000996):', test1);
+            
+            // Test case 2: Normal QNK amount
+            const test2 = this.validateAndFix({ amount: 2.00001, recipient: 'test' });
+            console.log('Test 2 (2.00001):', test2);
+            
+            return { test1, test2 };
+        }
+    };
+    
+    // LEVEL 4: React Component Interceptor (if needed)
+    // Override common React state setters
+    const originalSetState = React && React.Component && React.Component.prototype.setState;
+    if (originalSetState) {
+        React.Component.prototype.setState = function(updater, callback) {
+            if (updater && typeof updater === 'object' && updater.amount && updater.amount > 1000000) {
+                console.log('🔧 EMERGENCY: Fixing React state amount');
+                updater = {
+                    ...updater,
+                    amount: updater.amount / 100000000
+                };
+            }
+            return originalSetState.call(this, updater, callback);
+        };
+    }
+    
+    // LEVEL 5: Event Listener Interceptor
+    const originalAddEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function(type, listener, options) {
+        if (type === 'submit' && typeof listener === 'function') {
+            const wrappedListener = function(event) {
+                console.log('🔧 EMERGENCY: Intercepting form submit event');
+                
+                // Try to find and fix amount fields
+                const form = event.target;
+                if (form && form.elements) {
+                    for (let element of form.elements) {
+                        if ((element.name === 'amount' || element.id === 'amount') && element.value) {
+                            const value = parseFloat(element.value);
+                            if (value > 1000000) {
+                                const fixedValue = value / 100000000;
+                                console.log(`🔧 EMERGENCY: Fixed form amount ${value} -> ${fixedValue}`);
+                                element.value = fixedValue.toString();
+                            }
+                        }
+                    }
+                }
+                
+                return listener.call(this, event);
+            };
+            return originalAddEventListener.call(this, type, wrappedListener, options);
+        }
+        return originalAddEventListener.call(this, type, listener, options);
+    };
+    
+    console.log('✅ EMERGENCY Q-NarwhalKnight Transaction Fix Loaded Successfully!');
+    console.log('🎯 EMERGENCY Fix Features:');
+    console.log('   • Fetch API interception');
+    console.log('   • XMLHttpRequest override');
+    console.log('   • Global transaction validator');
+    console.log('   • React component state fix');
+    console.log('   • Form submission interceptor');
+    console.log('');
+    console.log('🔧 EMERGENCY Test: window.qnkEmergencyTransactionFix.testFix()');
+    
+    // Auto-test the fix
+    setTimeout(() => {
+        if (window.qnkEmergencyTransactionFix) {
+            window.qnkEmergencyTransactionFix.testFix();
+        }
+    }, 1000);
+    
+})();
+    </script>
+  </body>
+</html>

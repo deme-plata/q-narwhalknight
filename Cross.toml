@@ -1,0 +1,15 @@
+[build.env]
+passthrough = [
+    "OPENSSL_STATIC",
+    "OPENSSL_VENDORED",
+    "OPENBLAS_TARGET",
+    "CARGO_BUILD_TARGET",
+]
+
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:0.2.5"
+pre-build = [
+    "dpkg --add-architecture amd64",
+    "apt-get update && apt-get install -y libssl-dev:amd64 pkg-config",
+]
+build-std = false

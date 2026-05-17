@@ -1,0 +1,24 @@
+# Tor configuration for Q-NarwhalKnight 50-node test
+SocksPort 0.0.0.0:9050
+ControlPort 9051
+
+# Enable hidden services for massive scale testing
+HiddenServiceDir /var/lib/tor/qnarwhal_hs/
+HiddenServicePort 80 127.0.0.1:8080
+
+# Performance optimizations for 50-node testing
+MaxCircuitDirtiness 30 minutes
+NewCircuitPeriod 30
+MaxClientCircuitsPending 48
+CircuitBuildTimeout 15
+
+# Anonymous networking for validators
+CircuitStreamTimeout 20
+CircuitIdleTimeout 60 minutes
+
+# Logging for debugging
+Log notice stdout
+
+# Network configuration
+DataDirectory /var/lib/tor
+User tor

@@ -1,0 +1,75 @@
+# Q-NarwhalKnight 4-Node Testnet Configuration
+
+[network]
+name = "q-narwhalknight-testnet"
+consensus = "dag-knight"
+mempool = "narwhal"
+phase = 1  # Post-quantum cryptography enabled
+
+# Byzantine fault tolerance: f=1 (tolerates 1 faulty node out of 4)
+[consensus]
+byzantine_nodes = 1
+min_validators = 3
+block_time_ms = 2300
+finality_threshold = 0.67  # 2/3 + 1
+
+# Node configurations
+[[nodes]]
+id = "node1"
+name = "validator-alpha"
+host = "127.0.0.1"
+port = 8001
+api_port = 9001
+role = "validator"
+stake = 1000000
+
+[[nodes]]
+id = "node2"
+name = "validator-beta"
+host = "127.0.0.1"
+port = 8002
+api_port = 9002
+role = "validator"
+stake = 1000000
+
+[[nodes]]
+id = "node3"
+name = "validator-gamma"
+host = "127.0.0.1"
+port = 8003
+api_port = 9003
+role = "validator"
+stake = 1000000
+
+[[nodes]]
+id = "node4"
+name = "validator-delta"
+host = "127.0.0.1"
+port = 8004
+api_port = 9004
+role = "validator"
+stake = 1000000
+
+# Network parameters
+[network_params]
+max_tps = 48000
+precision_decimals = 36
+gas_reduction_factor = 100000
+vrf_enabled = true
+tor_enabled = false  # Disabled for local testing
+
+# Cryptography settings
+[crypto]
+signature_scheme = "dilithium5"
+key_exchange = "kyber1024"
+hash_function = "sha3-256"
+vrf_scheme = "lattice"
+
+# Testing parameters
+[testing]
+enable_byzantine_test = true
+byzantine_node_id = "node4"  # Node4 will be Byzantine
+test_duration_seconds = 60
+transaction_rate = 1000  # TPS during test
+verify_finality = true
+measure_latency = true

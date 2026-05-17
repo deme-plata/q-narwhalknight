@@ -1,0 +1,85 @@
+[package]
+name = "q-crypto-advanced"
+version.workspace = true
+edition.workspace = true
+description = "Advanced cryptographic primitives: FROST threshold signatures, Circle STARKs, AEGIS-256"
+license.workspace = true
+authors.workspace = true
+
+[features]
+default = ["frost", "aegis"]
+frost = []
+aegis = []
+circle-stark = []
+lattice-aggregate = []
+genus2-vdf = []
+sqisign = []
+sqisign-ffi = ["dep:q-sqisign"]  # Real C implementation via FFI (off by default)
+bulletproofs-v2 = []
+timelock = []
+full = ["frost", "aegis", "circle-stark", "lattice-aggregate", "genus2-vdf", "sqisign", "bulletproofs-v2", "timelock"]
+
+[dependencies]
+# FROST Threshold Signatures (IACR 2025/1024 - Memory-Optimal Two-Round Threshold Schnorr)
+frost-ed25519 = "2.2"
+frost-core = "2.2"
+frost-ristretto255 = "2.2"
+
+# AEGIS-256 (IACR 2024/268 - Fast Authenticated Encryption, 2-5x faster than AES-GCM)
+aegis = "0.9"
+
+# Circle STARKs foundation (for future Circle STARK implementation)
+# Uses winterfell as base, with circle-specific optimizations
+winterfell = "0.9"
+
+# Core dependencies
+sha3.workspace = true
+sha2.workspace = true
+# Use rand 0.8 for FROST compatibility (uses rand_core 0.6)
+rand = "0.8"
+rand_core = "0.6"
+getrandom = "0.2"
+zeroize.workspace = true
+
+# Real Bulletproofs range proofs (v2.5.1-beta: Production ZK Privacy)
+bulletproofs.workspace = true
+merlin = "3.0"  # Fiat-Shamir transcript for bulletproofs
+# Use curve25519-dalek-ng for bulletproofs compatibility (bulletproofs crate uses -ng internally)
+curve25519-dalek-ng = "4.1"
+# curve25519-dalek 4.1 for other components that need the newer API
+curve25519-dalek = { version = "4.1", features = ["serde", "rand_core", "alloc"] }
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tracing.workspace = true
+
+# Constant-time operations for lattice crypto (IACR 2025/1056)
+subtle = "2.5"
+
+# For key derivation
+hkdf.workspace = true
+argon2 = "0.5"
+
+# Blake3 hashing (used for time-lock key derivation and commitments)
+blake3 = { workspace = true }
+
+# Serialization
+bincode.workspace = true
+
+# Async support
+tokio.workspace = true
+async-trait.workspace = true
+
+# Real SQIsign via C reference implementation FFI (optional, off by default)
+q-sqisign = { path = "../q-sqisign", optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[bench]]
+name = "crypto_benchmarks"
+harness = false

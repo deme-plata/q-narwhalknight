@@ -1,0 +1,1222 @@
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,fit,backgrounds,calc,decorations.pathreplacing}
+
+% Colors
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+\definecolor{quillonblue}{RGB}{30,90,150}
+\definecolor{mainnetgreen}{RGB}{34,139,34}
+\definecolor{warnorange}{RGB}{200,120,0}
+
+% Code listing style
+\lstdefinestyle{rustcode}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    frame=single,
+    rulecolor=\color{gray!30}
+}
+\lstset{style=rustcode}
+
+% Hyperref setup
+\hypersetup{
+    colorlinks=true,
+    linkcolor=quillonblue,
+    filecolor=magenta,
+    urlcolor=quillonblue,
+    citecolor=quillonblue,
+    pdftitle={Q-NarwhalKnight: A Quantum-Resistant P2P Network Architecture},
+    pdfauthor={Q-NarwhalKnight Development Team},
+}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\footnotesize Q-NarwhalKnight Network Whitepaper}
+\fancyhead[R]{\footnotesize v8.2.6 --- Mainnet}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Title formatting
+\titleformat{\section}{\Large\bfseries\color{quillonblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+\begin{document}
+
+% Title Page
+\begin{titlepage}
+    \centering
+    \vspace*{1.5cm}
+
+    {\Huge\bfseries\color{quillonblue} Q-NarwhalKnight\par}
+    \vspace{0.5cm}
+    {\LARGE A Quantum-Resistant Peer-to-Peer\\Network Architecture\par}
+    \vspace{1cm}
+    {\Large\textbf{Technical Whitepaper v2.0}\par}
+    \vspace{0.3cm}
+    {\large\color{mainnetgreen}\textbf{Mainnet Edition --- v8.2.6}\par}
+    \vspace{1.5cm}
+
+    \begin{tikzpicture}[scale=0.75]
+        % DAG visualization
+        \node[circle,draw,fill=quillonblue!20,minimum size=1cm] (b1) at (0,4) {$B_1$};
+        \node[circle,draw,fill=quillonblue!20,minimum size=1cm] (b2) at (3,4) {$B_2$};
+        \node[circle,draw,fill=quillonblue!20,minimum size=1cm] (b3) at (1.5,2.5) {$B_3$};
+        \node[circle,draw,fill=quillonblue!30,minimum size=1cm] (b4) at (0,1) {$B_4$};
+        \node[circle,draw,fill=quillonblue!30,minimum size=1cm] (b5) at (1.5,1) {$B_5$};
+        \node[circle,draw,fill=quillonblue!30,minimum size=1cm] (b6) at (3,1) {$B_6$};
+
+        \draw[->,thick] (b1) -- (b3);
+        \draw[->,thick] (b2) -- (b3);
+        \draw[->,thick] (b3) -- (b4);
+        \draw[->,thick] (b3) -- (b5);
+        \draw[->,thick] (b3) -- (b6);
+
+        % Network nodes with labels
+        \node[circle,draw,fill=green!20,minimum size=0.8cm,font=\tiny] (n1) at (6,3.5) {$\beta$};
+        \node[circle,draw,fill=green!20,minimum size=0.8cm,font=\tiny] (n2) at (7.5,4.5) {$\gamma$};
+        \node[circle,draw,fill=green!20,minimum size=0.8cm,font=\tiny] (n3) at (9,3.5) {$\delta$};
+        \node[circle,draw,fill=green!20,minimum size=0.8cm,font=\tiny] (n4) at (7.5,2) {$\alpha$};
+
+        \draw[thick,green!50!black] (n1) -- (n2);
+        \draw[thick,green!50!black] (n2) -- (n3);
+        \draw[thick,green!50!black] (n1) -- (n4);
+        \draw[thick,green!50!black] (n3) -- (n4);
+        \draw[thick,green!50!black] (n2) -- (n4);
+        \draw[thick,green!50!black] (n1) -- (n3);
+
+        % Miner cloud
+        \node[cloud, draw, fill=yellow!10, minimum width=3cm, minimum height=1.5cm, cloud puffs=10, font=\footnotesize] (miners) at (7.5,-0.2) {182 Miners};
+        \draw[->,dashed,thick] (miners) -- (n4);
+        \draw[->,dashed,thick] (miners) -- (n1);
+    \end{tikzpicture}
+
+    \vspace{1.5cm}
+
+    {\large Q-NarwhalKnight Development Team\par}
+    \vspace{0.3cm}
+    {\large February 2026\par}
+    \vspace{0.3cm}
+    {\normalsize Mainnet Launch: February 22, 2026\par}
+
+    \vfill
+
+    {\small\texttt{https://quillon.xyz}\par}
+
+\end{titlepage}
+
+% Abstract
+\begin{abstract}
+\noindent Q-NarwhalKnight is a production-deployed, quantum-resistant peer-to-peer network operating on mainnet since February 2026. Built on libp2p-rust, the system combines DAG-Knight consensus with Narwhal mempool technology and a novel \textbf{Apollo Sync} optimization engine that employs Kalman filtering, PID rate control, and gravitational peer modeling for adaptive synchronization. This paper describes the complete network architecture as deployed at v8.2.6, covering the four-server high-availability infrastructure, zero-downtime rolling deployments, Dandelion++ gossip privacy, the PI-controlled emission system maintaining 2,625,000 QUG/year issuance, and critical safety systems including sync-down protection, immediate balance persistence, and height-gated consensus upgrades. As of this writing, the network sustains 182 active miners producing 458 MH/s aggregate hashpower, with 394 registered wallets and 8,267 QUG mined of the 21 million maximum supply.
+
+\vspace{0.5cm}
+\noindent\textbf{Keywords:} Blockchain, DAG Consensus, libp2p, Post-Quantum Cryptography, Peer-to-Peer Networks, Byzantine Fault Tolerance, Kalman Filter Sync, PI Emission Control, High Availability
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Introduction}
+% ============================================================================
+
+Modern blockchain networks face three critical challenges: \textbf{scalability}, \textbf{latency}, and \textbf{quantum resistance}. Traditional linear blockchains suffer from inherent throughput limitations, while naive parallelization approaches compromise security guarantees. Q-NarwhalKnight addresses these challenges through a carefully designed network architecture that leverages:
+
+\begin{enumerate}
+    \item \textbf{DAG-Knight Consensus}: A directed acyclic graph (DAG) based consensus protocol that achieves zero-message-complexity Byzantine fault tolerance
+    \item \textbf{Narwhal Mempool}: A reliable broadcast primitive that separates data dissemination from consensus ordering
+    \item \textbf{libp2p-rust}: A modular networking stack providing transport-agnostic peer-to-peer communication
+    \item \textbf{Post-Quantum Cryptography}: Integration of Dilithium5 signatures and Kyber1024 key encapsulation with crypto-agile height-gated transitions
+    \item \textbf{Apollo Sync Engine}: A control-theoretic synchronization optimizer using Kalman filtering, PID rate control, and gravitational peer modeling
+    \item \textbf{PI Emission Controller}: A proportional-integral feedback controller that maintains target emission rates across varying network conditions
+\end{enumerate}
+
+This paper describes the complete network layer as deployed on the Q-NarwhalKnight mainnet (network ID: \texttt{mainnet-genesis}), which has been in continuous operation since February 22, 2026.
+
+\subsection{Document History}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llp{8cm}}
+\toprule
+\textbf{Version} & \textbf{Date} & \textbf{Changes} \\
+\midrule
+v1.0 & Dec 2025 & Initial whitepaper (testnet architecture) \\
+v2.0 & Feb 2026 & Mainnet edition: Apollo Sync, HA deployment, PI emission, Dandelion++, balance persistence, 4-server infrastructure, production metrics \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================================
+\section{Network Architecture Overview}
+% ============================================================================
+
+\subsection{Unified Network Manager}
+
+The Q-NarwhalKnight network layer is orchestrated by the \texttt{UnifiedNetworkManager}, a central component that coordinates all peer-to-peer operations. Unlike traditional blockchain clients that treat networking as a simple message-passing layer, Q-NarwhalKnight's network manager actively participates in consensus decisions and adaptive synchronization through the Apollo control systems.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    box/.style={rectangle, draw, rounded corners, minimum width=2.5cm, minimum height=0.8cm, align=center, font=\small},
+    transport/.style={rectangle, draw, rounded corners, minimum width=2cm, minimum height=0.6cm, align=center, font=\footnotesize, fill=blue!10},
+    apollo/.style={rectangle, draw, rounded corners, minimum width=2cm, minimum height=0.6cm, align=center, font=\footnotesize, fill=red!10},
+    arrow/.style={->, thick}
+]
+    % Main container
+    \node[box, minimum width=14cm, minimum height=8cm, fill=gray!5] (container) at (0,0) {};
+    \node[above] at (container.north) {\textbf{UnifiedNetworkManager}};
+
+    % Protocol boxes
+    \node[box, fill=green!20] (gossip) at (-5,3) {Gossipsub\\(Blocks)};
+    \node[box, fill=yellow!20] (kad) at (-1.5,3) {Kademlia\\(DHT)};
+    \node[box, fill=orange!20] (reqres) at (2,3) {Request-Response\\(BlockPack Sync)};
+    \node[box, fill=purple!15] (dandelion) at (5.5,3) {Dandelion++\\(Tx Privacy)};
+
+    % Apollo systems
+    \node[apollo] (kalman) at (-4,0.5) {Kalman\\Predictor};
+    \node[apollo] (pid) at (-1,0.5) {PID Rate\\Controller};
+    \node[apollo] (gravity) at (2,0.5) {Gravity\\Assist};
+    \node[apollo] (emission) at (5,0.5) {PI Emission\\Controller};
+
+    % Swarm
+    \node[box, fill=purple!20, minimum width=3cm] (swarm) at (0,-1.5) {Swarm EventLoop};
+
+    % Transports
+    \node[transport] (quic) at (-3,-3) {QUIC};
+    \node[transport] (tcp) at (0,-3) {TCP + Noise};
+    \node[transport] (ws) at (3,-3) {WebSocket};
+
+    % Arrows - protocols to swarm
+    \draw[arrow] (gossip) -- (swarm);
+    \draw[arrow] (kad) -- (swarm);
+    \draw[arrow] (reqres) -- (swarm);
+    \draw[arrow] (dandelion) -- (swarm);
+
+    % Arrows - apollo to swarm
+    \draw[arrow,dashed,red!60] (kalman) -- (swarm);
+    \draw[arrow,dashed,red!60] (pid) -- (swarm);
+    \draw[arrow,dashed,red!60] (gravity) -- (swarm);
+    \draw[arrow,dashed,red!60] (emission) -- (swarm);
+
+    % Arrows - swarm to transports
+    \draw[arrow] (swarm) -- (quic);
+    \draw[arrow] (swarm) -- (tcp);
+    \draw[arrow] (swarm) -- (ws);
+\end{tikzpicture}
+\caption{Unified Network Manager Architecture (v8.2.6)}
+\label{fig:network-arch}
+\end{figure}
+
+\subsection{Transport Layer}
+
+Q-NarwhalKnight supports multiple transport protocols to maximize connectivity:
+
+\begin{itemize}
+    \item \textbf{QUIC} (Primary): Provides multiplexed streams with built-in encryption via TLS~1.3, reducing connection overhead for high-frequency block gossip
+    \item \textbf{TCP + Noise}: Fallback transport using Noise Protocol Framework for encryption, used when QUIC is blocked by network firewalls
+    \item \textbf{WebSocket}: Enables browser-based light clients to participate in the network via the Quillon wallet web interface
+\end{itemize}
+
+The libp2p \texttt{Swarm} abstraction allows seamless protocol negotiation, automatically selecting the optimal transport based on peer capabilities.
+
+\subsection{Production Infrastructure}
+
+The mainnet operates on a four-server high-availability infrastructure:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    server/.style={rectangle, draw, rounded corners, minimum width=3cm, minimum height=1.5cm, align=center, font=\small},
+    arrow/.style={<->, thick, green!50!black}
+]
+    \node[server, fill=blue!15] (beta) at (0,0) {\textbf{Server Beta}\\Primary (w=10)\\185.182.185.227};
+    \node[server, fill=green!15] (gamma) at (5,0) {\textbf{Server Gamma}\\Backup (w=1)\\109.205.176.60};
+    \node[server, fill=yellow!15] (alpha) at (0,-3) {\textbf{Server Alpha}\\Canary (Docker)\\161.35.219.10};
+    \node[server, fill=orange!15] (delta) at (5,-3) {\textbf{Server Delta}\\Bootstrap Node\\5.79.79.158};
+
+    % Nginx load balancer
+    \node[rectangle, draw, rounded corners, fill=purple!15, minimum width=4cm, minimum height=0.8cm, font=\small] (nginx) at (2.5,2.5) {\textbf{Nginx LB} --- quillon.xyz\\ip\_hash sticky sessions};
+
+    \draw[arrow] (beta) -- (gamma);
+    \draw[arrow] (beta) -- (alpha);
+    \draw[arrow] (gamma) -- (delta);
+    \draw[arrow] (beta) -- (delta);
+
+    \draw[->,thick,purple] (nginx) -- (beta);
+    \draw[->,thick,purple] (nginx) -- (gamma);
+\end{tikzpicture}
+\caption{Four-Server High-Availability Infrastructure}
+\label{fig:ha-infra}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llll}
+\toprule
+\textbf{Server} & \textbf{Role} & \textbf{Ports} & \textbf{Special Configuration} \\
+\midrule
+Beta & Primary bootstrap & 8080/9001 & 16GB RAM, RocksDB cache 4GB \\
+Gamma & Hot standby & 8080/9001 & 8GB RAM + 4GB swap, cache 512MB \\
+Alpha & Canary testing & Docker & Debian 12 container on Debian 11 \\
+Delta & 4th bootstrap & 8080/9001 & RocksDB cache 2GB \\
+\bottomrule
+\end{tabular}
+\caption{Server Configuration Summary}
+\end{table}
+
+% ============================================================================
+\section{Protocol Stack}
+% ============================================================================
+
+\subsection{Gossipsub: Block Propagation}
+
+Q-NarwhalKnight uses libp2p's Gossipsub v1.1 for block propagation, with custom topic configuration optimized for DAG-Knight's parallel block production.
+
+\subsubsection{Topic Structure}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Topic} & \textbf{Purpose} \\
+\midrule
+\texttt{/qnk/\{network\_id\}/blocks} & Full block announcements via DAG gossipsub \\
+\texttt{/qnk/\{network\_id\}/peer-heights} & Height announcements for sync coordination \\
+\texttt{/qnk/\{network\_id\}/turbo-sync-request} & Batch sync request coordination \\
+\texttt{/qnk/\{network\_id\}/turbo-sync-response} & Batch sync response routing \\
+\texttt{/qnk/\{network\_id\}/balance-updates} & Balance state propagation (P2P consensus) \\
+\texttt{/qnk/\{network\_id\}/miner-stats} & Mining statistics broadcast \\
+\texttt{/qnk/\{network\_id\}/pool-*} & Mining pool coordination topics \\
+\bottomrule
+\end{tabular}
+\caption{Gossipsub Topic Structure (v8.2.6)}
+\end{table}
+
+\subsubsection{Network ID Isolation}
+
+A critical safety property: gossipsub topics are namespaced by \texttt{network\_id}, providing complete isolation between network generations. When a new mainnet epoch launches (e.g., \texttt{mainnet2026.1} $\rightarrow$ \texttt{mainnet-genesis}), nodes on different networks cannot exchange messages, blocks, or sync state. This is enforced at three layers:
+
+\begin{enumerate}
+    \item \textbf{Gossipsub Topic Isolation}: Different topic strings prevent message exchange
+    \item \textbf{Protocol Handshake Validation}: Peers validate \texttt{network\_id} before data exchange
+    \item \textbf{HTTP State Sync}: \texttt{FullStateSnapshot} embeds \texttt{network\_id}---rejects mismatches
+\end{enumerate}
+
+\subsubsection{Message Validation}
+
+Unlike traditional blockchains where gossip validation is binary (valid/invalid), Q-NarwhalKnight implements a three-tier validation strategy:
+
+\begin{enumerate}
+    \item \textbf{Syntax Validation}: Immediate rejection of malformed messages
+    \item \textbf{Semantic Validation}: Signature and hash verification
+    \item \textbf{Contextual Validation}: DAG parent verification (may defer if parents unknown)
+\end{enumerate}
+
+\begin{lstlisting}[language=Rust, caption={Three-tier message validation}]
+fn validate_message(&self, msg: &GossipsubMessage) -> MessageAcceptance {
+    // Tier 1: Syntax
+    let block = match deserialize_block(&msg.data) {
+        Ok(b) => b,
+        Err(_) => return MessageAcceptance::Reject,
+    };
+
+    // Tier 2: Semantic (signature + hash)
+    if !verify_block_signature(&block) {
+        return MessageAcceptance::Reject;
+    }
+
+    // Tier 3: Contextual (DAG parents)
+    if !self.has_all_parents(&block.dag_parents) {
+        return MessageAcceptance::Ignore; // May receive parents later
+    }
+
+    MessageAcceptance::Accept
+}
+\end{lstlisting}
+
+\subsection{Kademlia DHT: Peer Discovery}
+
+The Kademlia Distributed Hash Table serves dual purposes:
+
+\begin{enumerate}
+    \item \textbf{Peer Discovery}: Finding nodes by their PeerId across the global network
+    \item \textbf{Content Routing}: Locating peers that have specific block ranges for targeted sync
+\end{enumerate}
+
+\subsubsection{Bootstrap Process with Connection Warmup}
+
+New nodes bootstrap through a combination of hardcoded bootstrap peer addresses and DNS-based peer discovery. Starting with v3.3.7, Q-NarwhalKnight implements \textbf{automatic connection warmup} for newly generated identities:
+
+\begin{enumerate}
+    \item Connect to bootstrap peer(s) via hardcoded multiaddresses
+    \item Perform iterative \texttt{FIND\_NODE} for random IDs to populate routing table
+    \item If identity is \textbf{new} (first boot): execute retry loop with exponential backoff (3s, 6s, 12s) re-triggering Kademlia DHT bootstrap after failures
+    \item Build routing table with k-bucket diversity
+    \item Subscribe to all gossipsub topics
+    \item Announce local height to trigger sync if behind
+\end{enumerate}
+
+This warmup procedure resolves a class of first-boot failures where DHT routing tables are empty and bootstrap connections fail silently.
+
+\subsection{Request-Response: Block Synchronization}
+
+For bulk block synchronization, Q-NarwhalKnight implements a custom request-response protocol using libp2p's \texttt{request\_response} behavior with CBOR encoding, LZ4 compression, and adaptive batching.
+
+\subsubsection{BlockPack Protocol}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Description} \\
+\midrule
+\multicolumn{3}{l}{\textit{Request (/qnk/blockpack/1.0.0)}} \\
+\texttt{start\_height} & \texttt{u64} & Starting block height \\
+\texttt{count} & \texttt{u32} & Number of blocks requested (adaptive) \\
+\texttt{include\_balance\_updates} & \texttt{bool} & Include balance data with blocks \\
+\texttt{network\_id} & \texttt{String} & Network isolation identifier \\
+\midrule
+\multicolumn{3}{l}{\textit{Response}} \\
+\texttt{blocks} & \texttt{Vec<QBlock>} & LZ4-compressed block data \\
+\texttt{balance\_updates} & \texttt{Vec<Update>} & Balance changes for sync \\
+\texttt{peer\_height} & \texttt{u64} & Peer's current height \\
+\texttt{merkle\_root} & \texttt{[u8; 32]} & Integrity verification hash \\
+\texttt{network\_id} & \texttt{String} & Network ID for cross-check \\
+\bottomrule
+\end{tabular}
+\caption{BlockPack Protocol Message Format}
+\end{table}
+
+\subsubsection{Concurrent Request Management}
+
+\begin{itemize}
+    \item \textbf{Request Pipelining}: Up to 3 concurrent block pack requests
+    \item \textbf{Stale Request Detection}: Requests older than 35 seconds are cleared (just above libp2p's 30s timeout)
+    \item \textbf{Adaptive Batch Sizing}: Batch size adjusts from 1,000 to 10,000 blocks based on network conditions, controlled by the Apollo PID system
+    \item \textbf{LZ4 Compression}: 60--80\% bandwidth reduction on block pack transfers
+\end{itemize}
+
+\subsection{Dandelion++: Transaction Privacy}
+
+Q-NarwhalKnight implements Dandelion++ \cite{dandelion} for transaction propagation privacy, preventing network observers from linking transactions to originating IP addresses:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node/.style={circle, draw, minimum size=0.8cm, font=\footnotesize},
+    stem/.style={->, thick, red!70},
+    fluff/.style={->, thick, green!70, dashed}
+]
+    % Stem phase
+    \node[node, fill=red!20] (orig) at (0,0) {Tx};
+    \node[node, fill=red!10] (s1) at (2,0.5) {$S_1$};
+    \node[node, fill=red!10] (s2) at (4,0) {$S_2$};
+    \node[node, fill=yellow!20] (fluffer) at (6,0.5) {$F$};
+
+    \draw[stem] (orig) -- (s1);
+    \draw[stem] (s1) -- (s2);
+    \draw[stem] (s2) -- (fluffer);
+
+    % Fluff phase
+    \node[node, fill=green!10] (f1) at (7.5,2) {};
+    \node[node, fill=green!10] (f2) at (8.5,0.5) {};
+    \node[node, fill=green!10] (f3) at (7.5,-1) {};
+    \node[node, fill=green!10] (f4) at (9.5,1.5) {};
+
+    \draw[fluff] (fluffer) -- (f1);
+    \draw[fluff] (fluffer) -- (f2);
+    \draw[fluff] (fluffer) -- (f3);
+    \draw[fluff] (f1) -- (f4);
+
+    % Labels
+    \node[below, font=\footnotesize, red!70] at (3,-0.7) {Stem Phase (anonymity set)};
+    \node[below, font=\footnotesize, green!70] at (8,-1.5) {Fluff Phase (gossipsub)};
+\end{tikzpicture}
+\caption{Dandelion++ Transaction Propagation}
+\label{fig:dandelion}
+\end{figure}
+
+\begin{itemize}
+    \item \textbf{Stem Phase}: Transaction is forwarded along a single random path for 2--4 hops
+    \item \textbf{Fluff Phase}: At a randomly selected node, the transaction enters normal gossipsub propagation
+    \item \textbf{Fail-Safe}: If the stem relay fails or times out, the transaction automatically enters fluff mode after 30 seconds
+\end{itemize}
+
+% ============================================================================
+\section{Apollo Sync Optimization Engine}
+% ============================================================================
+
+Apollo is Q-NarwhalKnight's adaptive synchronization engine, named for the Apollo space program's guidance systems. It provides real-time optimization of sync behavior through three integrated control systems.
+
+\subsection{Kalman Network Predictor}
+
+The Kalman filter maintains an optimal estimate of network conditions by fusing noisy observations from multiple peers:
+
+\begin{equation}
+\hat{\mathbf{x}}_{k|k} = \hat{\mathbf{x}}_{k|k-1} + \mathbf{K}_k(\mathbf{z}_k - \mathbf{H}\hat{\mathbf{x}}_{k|k-1})
+\end{equation}
+
+where the state vector $\mathbf{x} = [\text{bandwidth}, \text{latency}, \text{packet\_loss}]^T$ is estimated from peer observations $\mathbf{z}_k$.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llp{6cm}}
+\toprule
+\textbf{State Variable} & \textbf{Unit} & \textbf{Description} \\
+\midrule
+Bandwidth & MB/s & Estimated available sync bandwidth \\
+Latency & ms & Smoothed round-trip time to sync peers \\
+Packet Loss & ratio & Estimated message loss probability \\
+Confidence & 0--1 & Kalman filter confidence (innovation-based) \\
+\bottomrule
+\end{tabular}
+\caption{Kalman Filter State Variables}
+\end{table}
+
+The confidence metric drives the sync strategy:
+\begin{itemize}
+    \item \textbf{LOCKED} ($> 0.8$): High confidence; use aggressive batch sizes
+    \item \textbf{TRACKING} ($0.5$--$0.8$): Moderate confidence; standard parameters
+    \item \textbf{ACQUIRING} ($0.2$--$0.5$): Building estimate; conservative settings
+    \item \textbf{IDLE} ($< 0.2$): Insufficient data; use defaults
+\end{itemize}
+
+\subsection{PID Rate Controller}
+
+The PID (Proportional-Integral-Derivative) controller regulates the block processing rate to match network capacity:
+
+\begin{equation}
+u(t) = K_p \cdot e(t) + K_i \int_0^t e(\tau)\,d\tau + K_d \frac{de(t)}{dt}
+\end{equation}
+
+where $e(t) = \text{target\_bps} - \text{actual\_bps}$ is the blocks-per-second error signal, and $u(t)$ is the batch size adjustment.
+
+\begin{itemize}
+    \item \textbf{Target BPS}: Dynamically set based on Kalman bandwidth estimate
+    \item \textbf{Drift Detection}: If actual BPS deviates $> 20\%$ from target, the controller adjusts batch sizes and concurrent request count
+    \item \textbf{Anti-Windup}: Integral term is clamped to prevent oscillation during network congestion
+\end{itemize}
+
+\subsection{Gravity Assist (Peer Momentum Model)}
+
+Inspired by gravitational slingshot maneuvers, the Gravity Assist system models peer ``momentum'' to optimize which peers to request blocks from:
+
+\begin{equation}
+\text{momentum}_i = \frac{\text{height}_i \cdot \text{response\_rate}_i}{\text{latency}_i^2}
+\end{equation}
+
+\begin{itemize}
+    \item \textbf{Peer Momentum}: Higher-height, lower-latency peers have greater momentum
+    \item \textbf{Cache Heat}: Tracks recently-accessed block ranges per peer (``hot'' peers respond faster for adjacent ranges)
+    \item \textbf{Gravitational Routing}: Sync requests are directed to the peer with highest momentum for the requested height range
+\end{itemize}
+
+The three Apollo systems work in concert: the Kalman predictor estimates the environment, the PID controller regulates throughput, and Gravity Assist optimizes peer selection.
+
+% ============================================================================
+\section{DAG-Knight Consensus Integration}
+% ============================================================================
+
+\subsection{DAG Structure}
+
+Unlike linear blockchains, Q-NarwhalKnight blocks form a directed acyclic graph where each block references multiple parents:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    block/.style={circle, draw, fill=quillonblue!20, minimum size=1cm, font=\footnotesize},
+    arrow/.style={->, thick}
+]
+    % Top layer
+    \node[block] (b1) at (0,3) {$B_1$};
+    \node[block] (b2) at (3,3) {$B_2$};
+
+    % Middle layer
+    \node[block] (b3) at (1.5,1.5) {$B_3$};
+
+    % Bottom layer
+    \node[block] (b4) at (0,0) {$B_4$};
+    \node[block] (b5) at (1.5,0) {$B_5$};
+    \node[block] (b6) at (3,0) {$B_6$};
+
+    % Arrows
+    \draw[arrow] (b1) -- (b3);
+    \draw[arrow] (b2) -- (b3);
+    \draw[arrow] (b3) -- (b4);
+    \draw[arrow] (b3) -- (b5);
+    \draw[arrow] (b3) -- (b6);
+
+    % Labels
+    \node[right, font=\footnotesize] at (3.5,3) {DAG Parents};
+    \node[right, font=\footnotesize] at (3.5,1.5) {$B_3$ references both $B_1$ and $B_2$};
+    \node[right, font=\footnotesize] at (3.5,0) {Multiple blocks at same height};
+\end{tikzpicture}
+\caption{DAG Block Structure}
+\label{fig:dag-structure}
+\end{figure}
+
+\subsection{Parent Selection}
+
+When producing a new block, miners select DAG parents based on:
+
+\begin{enumerate}
+    \item \textbf{Recency}: Parents should be among the most recent blocks
+    \item \textbf{Coverage}: Parents should maximize coverage of the DAG tip set
+    \item \textbf{Availability}: Only reference parents that are locally available
+\end{enumerate}
+
+\subsection{Ordering and Finality}
+
+DAG-Knight achieves consensus ordering through a VDF-based anchor election mechanism:
+
+\begin{enumerate}
+    \item Each epoch, validators compute a Verifiable Delay Function
+    \item The validator with the winning VDF output becomes the epoch anchor
+    \item The anchor's view of DAG ordering becomes canonical
+    \item Blocks referenced by the anchor achieve finality (typically $< 3$ seconds)
+\end{enumerate}
+
+% ============================================================================
+\section{Narwhal Mempool Integration}
+% ============================================================================
+
+\subsection{Reliable Broadcast}
+
+Narwhal's reliable broadcast primitive ensures that if any correct node delivers a transaction, all correct nodes eventually deliver it. Q-NarwhalKnight implements this through:
+
+\begin{enumerate}
+    \item \textbf{Primary Workers}: Batch transactions and create certificates
+    \item \textbf{Certificate Gossip}: Propagate certificates via gossipsub
+    \item \textbf{DAG Inclusion}: Include certificate hashes in block headers
+\end{enumerate}
+
+\subsection{Bullshark Finality}
+
+The Bullshark consensus protocol \cite{bullshark} runs atop the Narwhal DAG, providing:
+\begin{itemize}
+    \item Optimistic fast path (2-round finality when leader is honest)
+    \item Fallback path (4-round finality under Byzantine leader)
+\end{itemize}
+
+% ============================================================================
+\section{Synchronization Strategies}
+% ============================================================================
+
+\subsection{TurboSync: High-Speed Block Synchronization}
+
+For nodes significantly behind the network, Q-NarwhalKnight implements TurboSync, an Apollo-optimized synchronization protocol:
+
+\begin{enumerate}
+    \item Node discovers it is behind via peer height announcements ($\text{peer\_height} > \text{local\_height} + 5$)
+    \item Apollo Kalman filter estimates available bandwidth and latency
+    \item Apollo PID controller calculates optimal batch size (1,000--10,000 blocks)
+    \item Apollo Gravity Assist selects the highest-momentum peer for the target range
+    \item Initiates parallel block pack requests (up to 3 concurrent)
+    \item Validates blocks in topological order (respecting DAG parents)
+    \item Commits blocks in LZ4-compressed batches for I/O efficiency
+    \item Updates height cache to actual contiguous height via database pointer
+\end{enumerate}
+
+\subsubsection{Height Cache Consistency}
+
+A critical invariant: the height cache must reflect the actual contiguous chain height, not the highest block received. After batch commit, the actual database pointer is read back:
+
+\begin{lstlisting}[language=Rust, caption={Height cache consistency}]
+// After batch commit, read actual pointer from database
+let actual_height = storage.get_latest_qblock_height().await?;
+storage.update_height_cache(actual_height).await;
+
+// Persist safe floor with fsync for crash recovery
+storage.save_safe_floor(max(contiguous_height, turbo_tip)).await;
+\end{lstlisting}
+
+\subsection{Height Recovery After Restart}
+
+To prevent height regression on restart (a bug that caused nodes to roll back from height 5,431 to 2,502 in early mainnet), Q-NarwhalKnight maintains multiple recovery signals:
+
+\begin{equation}
+\text{recovery\_target} = \max(\text{highest\_block}, \text{db\_pointer}, \text{persisted\_tip}, \text{safe\_floor})
+\end{equation}
+
+The \texttt{safe\_floor} is persisted with \texttt{fsync} every 15 seconds via the balance sync background task. The fast recovery scan threshold activates for any chain height above 1,000 blocks.
+
+\subsection{Gap Detection and Recovery}
+
+The network layer continuously monitors for chain gaps between the height cache and database pointer:
+
+\begin{lstlisting}[language=Rust, caption={Gap detection algorithm}]
+fn detect_gaps(&self) -> Option<(u64, u64)> {
+    let cache_height = self.height_cache.cached();
+    let pointer_height = self.get_qblock_latest_pointer()?;
+
+    if cache_height > pointer_height + BATCH_SIZE {
+        // Gap detected - cache raced ahead of actual chain
+        Some((pointer_height, cache_height))
+    } else {
+        None
+    }
+}
+\end{lstlisting}
+
+\subsection{Fork Detection and Reorganization}
+
+When receiving blocks at heights already occupied, Q-NarwhalKnight employs a fork-choice rule based on cumulative difficulty:
+
+\begin{lstlisting}[language=Rust, caption={Fork choice rule}]
+fn should_reorganize(&self, new_block: &QBlock, existing: &QBlock) -> bool {
+    // Higher cumulative difficulty wins
+    if new_block.cumulative_difficulty > existing.cumulative_difficulty {
+        return true;
+    }
+    // Tie-breaker: lower hash value
+    if new_block.cumulative_difficulty == existing.cumulative_difficulty {
+        return new_block.hash < existing.hash;
+    }
+    false
+}
+\end{lstlisting}
+
+% ============================================================================
+\section{Emission Economics and PI Controller}
+% ============================================================================
+
+\subsection{Emission Schedule}
+
+Q-NarwhalKnight uses a Bitcoin-inspired fixed-supply emission model with PI feedback control:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+Maximum Supply & 21,000,000 QUG & Hard cap, enforced at consensus level \\
+Era 0 Emission & 2,625,000 QUG/year & First 4 years \\
+Halving Interval & 4 years & Emission halves each era \\
+Block Time & $\sim$1 second & DAG-Knight target \\
+Dev Fee & 1\% & Applied to mining rewards \\
+\bottomrule
+\end{tabular}
+\caption{Emission Parameters}
+\end{table}
+
+\subsection{PI Emission Controller}
+
+To maintain the target emission rate despite variable block times and hash rate fluctuations, Q-NarwhalKnight employs a proportional-integral (PI) feedback controller:
+
+\begin{equation}
+\text{correction} = K_p \cdot (\text{target\_rate} - \text{actual\_rate}) + K_i \int (\text{target\_rate} - \text{actual\_rate})\,dt
+\end{equation}
+
+The controller adjusts per-block rewards to converge on the target annual emission. As of v8.2.6 on mainnet, the PI correction factor is approximately 1.52$\times$, indicating the controller is compensating for below-target block production by temporarily increasing per-block rewards.
+
+\subsection{Balance Persistence and Consensus}
+
+\textbf{Critical Safety Property (v8.2.6):} All balance updates are persisted to disk \textit{immediately} via \texttt{put\_sync} (fsync) after every transaction. This prevents a double-spend vulnerability discovered in v8.2.5 where balances were only synced every 15 seconds:
+
+\begin{lstlisting}[language=Rust, caption={Immediate balance persistence (v8.2.6 fix)}]
+// After EVERY transfer - persist BOTH sender and receiver immediately
+storage.save_wallet_balance(&tx.from, sender_new).await?;
+storage.save_wallet_balance(&tx.to, receiver_new).await?;
+// save_wallet_balance uses put_sync (fsync) - crash-durable
+\end{lstlisting}
+
+Balance updates propagate through three independent code paths:
+\begin{enumerate}
+    \item \textbf{Block Producer Path}: Local mining rewards and transactions
+    \item \textbf{DAG Gossipsub Path}: Blocks received from peers via gossipsub
+    \item \textbf{P2P Balance Gossipsub}: Direct balance state propagation
+\end{enumerate}
+
+All three paths now use immediate persistence with fsync, ensuring no balance loss on node restart.
+
+% ============================================================================
+\section{Security}
+% ============================================================================
+
+\subsection{Sync-Down Protection}
+
+A critical safety invariant prevents synchronizing to a lower height, which would catastrophically delete blocks:
+
+\begin{lstlisting}[language=Rust, caption={Sync-down protection (multi-layer)}]
+// Application layer (main.rs)
+if network_height > current_height + 5 {
+    turbo_sync.sync_to_height(network_height).await;
+}
+
+// Database layer (turbo_sync.rs)
+if target_height < local_height && local_height > 1000 {
+    error!("CRITICAL: Sync-down blocked: {} -> {}", local_height, target_height);
+    return Err(anyhow!("SAFETY ABORT: Refusing to sync down"));
+}
+\end{lstlisting}
+
+This defense operates at two independent layers---even if the application logic has a bug, the database layer will refuse to execute a sync-down operation.
+
+\subsection{Height-Gated Consensus Upgrades}
+
+All consensus rule changes are wrapped in block-height gates, ensuring historical blocks always validate with their original rules:
+
+\begin{lstlisting}[language=Rust, caption={Height-gated consensus upgrade pattern}]
+fn validate_signature(&self, block: &Block) -> Result<()> {
+    if is_upgrade_active(Upgrade::PostQuantumSigs, block.height) {
+        self.verify_dilithium_sig(block)?;  // New rule
+    } else {
+        self.verify_ed25519_sig(block)?;    // Historical rule
+    }
+    Ok(())
+}
+\end{lstlisting}
+
+Activation heights are defined in advance and announced to the network, allowing nodes to upgrade binaries before activation without consensus disruption.
+
+\subsection{Eclipse Attack Mitigation}
+
+\begin{enumerate}
+    \item \textbf{Diverse Peer Selection}: Maintain connections to peers from different /16 subnets
+    \item \textbf{Bootstrap Pinning}: Always maintain at least one connection to a trusted bootstrap node (4 bootstrap nodes available)
+    \item \textbf{Outbound Connection Preference}: Prioritize self-initiated connections over incoming
+\end{enumerate}
+
+\subsection{Peer Trust and Reputation}
+
+Q-NarwhalKnight maintains per-peer trust scores based on block validity rate, response latency, bandwidth contribution, and protocol compliance. Peers falling below threshold are temporarily blacklisted.
+
+\subsection{Post-Quantum Cryptographic Agility}
+
+The architecture supports phased transition to post-quantum primitives:
+
+\begin{itemize}
+    \item \textbf{Phase 0} (Current): Ed25519 signatures, QUIC/Noise transport
+    \item \textbf{Phase 1} (Ready): Dilithium5 signatures, Kyber1024 KEM (height-gated activation)
+    \item \textbf{Phase 2} (Planned): Hybrid Ed25519 + Dilithium5 during transition
+    \item \textbf{Phase 3} (Future): Full post-quantum with QKD preparation layer
+\end{itemize}
+
+The crypto-agility layer allows algorithm substitution without protocol changes, activated via the height-gated upgrade system.
+
+\subsection{Pre-Flight Verification}
+
+Before serving requests after a binary upgrade, nodes optionally run a pre-flight verification:
+
+\begin{enumerate}
+    \item Block chain integrity (blocks load and deserialize correctly)
+    \item Parent chain continuity (last 100 blocks have valid parent links)
+    \item Height pointer consistency (tip block exists and matches)
+    \item Schema version compatibility
+\end{enumerate}
+
+This can be run in isolation (\texttt{Q\_PREFLIGHT\_ONLY=1}) to verify a new binary without affecting the live network.
+
+% ============================================================================
+\section{High-Availability Deployment}
+% ============================================================================
+
+\subsection{Zero-Downtime Rolling Upgrades}
+
+All production deployments follow a six-step rolling upgrade pipeline that ensures zero user-visible downtime:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{clp{5.5cm}c}
+\toprule
+\textbf{Step} & \textbf{Action} & \textbf{Description} & \textbf{Users Affected?} \\
+\midrule
+1 & \texttt{verify-alpha} & SCP binary to Alpha Docker canary, verify & No \\
+2 & \texttt{verify-gamma} & SCP to Gamma, restart, health check & No \\
+3 & \texttt{promote} & Nginx: Gamma $w$=10, Beta $w$=1 & No \\
+4 & Soak test & 30s wait, verify Gamma handles traffic & No \\
+5 & \texttt{deploy-beta} & Stop Beta, replace, restart, verify & No \\
+6 & \texttt{restore} & Nginx: Beta $w$=10, Gamma $w$=1 & No \\
+\bottomrule
+\end{tabular}
+\caption{Rolling Upgrade Pipeline}
+\end{table}
+
+Nginx uses \texttt{ip\_hash} sticky sessions so each user consistently hits the same backend, preventing balance display flickering during transitions.
+
+\subsection{Automated Test Gate}
+
+The deployment script (\texttt{ha-deploy.sh}) runs 4,000+ automated tests before building, covering:
+
+\begin{itemize}
+    \item Sync-down protection (prevents catastrophic data loss)
+    \item Balance integrity (prevents incorrect balance display)
+    \item Double-spend and replay attack prevention
+    \item Fork detection and reorg safety
+    \item DEX overflow protection (u128 arithmetic safety)
+    \item Signature verification (prevents forged transactions)
+    \item Block validation (prevents consensus failure)
+\end{itemize}
+
+Deployment is automatically aborted if any test fails.
+
+% ============================================================================
+\section{Performance Characteristics}
+% ============================================================================
+
+\subsection{Production Metrics (Mainnet, February 2026)}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Conditions} \\
+\midrule
+Active Miners & 182 & Mainnet, 24h window \\
+Aggregate Hash Rate & 458 MH/s & Across all miners \\
+Registered Wallets & 394 & Unique wallet addresses \\
+Total Supply Mined & 8,267.6 QUG & Of 21M maximum \\
+Block Propagation Latency & $< 50$ms & 4-server mesh \\
+TurboSync Throughput & 500--1,000 blocks/s & Apollo-optimized \\
+Gossipsub Overhead & 12\% & Mesh factor $d=6$ \\
+Connection Establishment & $< 100$ms & QUIC transport \\
+DAG Finality & $< 3$ seconds & $3f+1$ validators online \\
+PI Emission Correction & 1.52$\times$ & Self-correcting to target \\
+Node Binary Size & $\sim$84 MB & Statically linked, Linux x86\_64 \\
+\bottomrule
+\end{tabular}
+\caption{Production Performance Metrics}
+\end{table}
+
+\subsection{Scalability}
+
+The network layer is designed to scale through:
+
+\begin{itemize}
+    \item \textbf{Tiered Gossip}: Validators form a core gossip mesh; observers connect to validators
+    \item \textbf{LZ4 Compression}: Block pack transfers achieve 60--80\% bandwidth reduction
+    \item \textbf{Apollo Adaptive Batching}: Automatically adjusts to network capacity
+    \item \textbf{RocksDB Tuning}: Per-server block cache sizing (512MB to 4GB) prevents OOM while maximizing read throughput
+\end{itemize}
+
+% ============================================================================
+\section{Implementation Details}
+% ============================================================================
+
+\subsection{Technology Stack}
+
+\begin{itemize}
+    \item \textbf{Language}: Rust (100\% safe code in networking layer)
+    \item \textbf{Async Runtime}: Tokio with multi-threaded scheduler
+    \item \textbf{libp2p Version}: 0.56.x with SwarmBuilder async pattern
+    \item \textbf{Serialization}: Bincode for storage, CBOR for network messages
+    \item \textbf{Database}: RocksDB with column family separation (Linux), Sled fallback (Windows)
+    \item \textbf{Compression}: LZ4 for block packs, avoiding double-compression
+    \item \textbf{AI Inference}: Optional llama-cpp integration for on-node AI chat (resource-throttled)
+    \item \textbf{TUI}: Ratatui-based terminal dashboard with Apollo control system visualization
+\end{itemize}
+
+\subsection{Crate Organization}
+
+\begin{verbatim}
+crates/
++-- q-api-server/        # HTTP API, SSE streaming, block producer, mining
++-- q-network/           # UnifiedNetworkManager, gossipsub, Kademlia
+|   +-- unified_network_manager.rs
+|   +-- protocol_handshake.rs
+|   +-- handshake_validator.rs
+|   `-- auto_cluster.rs
++-- q-storage/           # RocksDB, TurboSync, balance consensus
+|   +-- turbo_sync.rs
+|   +-- balance_consensus.rs
+|   +-- checkpoint_jumps.rs
+|   `-- genesis_checkpoint.rs
++-- q-types/             # Block, Transaction, NetworkId definitions
++-- q-dandelion/         # Dandelion++ privacy layer
++-- q-dex/               # Decentralized exchange with AMM
++-- q-mining-pool/       # Distributed mining pool
++-- q-tui/               # Terminal UI with Apollo visualization
++-- q-miner/             # Standalone mining client
++-- q-quantum-crypto/    # Post-quantum cryptographic primitives
+`-- q-consensus-guard/   # Height-gated upgrade system
+\end{verbatim}
+
+\subsection{Configuration}
+
+Key network parameters are configurable via environment variables and TOML:
+
+\begin{lstlisting}[language=Rust, caption={Network configuration (production defaults)}]
+[network]
+bootstrap_peers = [
+    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWBHTC9Fhww...",
+    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFqPX9TkvF4...",
+    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWQZZAyLA4VQmw...",
+    "/ip4/161.35.219.10/tcp/9001/p2p/12D3KooWPwin4nJcU9P..."
+]
+max_peers = 50
+gossipsub_mesh_n = 6
+gossipsub_mesh_n_low = 4
+gossipsub_mesh_n_high = 12
+sync_batch_size = 5000        # Apollo PID adjusts dynamically
+max_concurrent_sync = 3
+stall_timeout_secs = 35
+network_id = "mainnet-genesis"
+
+# RocksDB tuning (per-server)
+# ROCKSDB_BLOCK_CACHE_MB = 4096  (Beta, 16GB RAM)
+# ROCKSDB_BLOCK_CACHE_MB = 512   (Gamma, 8GB RAM)
+# ROCKSDB_BLOCK_CACHE_MB = 2048  (Delta)
+\end{lstlisting}
+
+% ============================================================================
+\section{Future Work}
+% ============================================================================
+
+\subsection{Completed Since v1.0 (Previously ``Future Work'')}
+
+\begin{itemize}
+    \item[$\checkmark$] \textbf{Dandelion++ Integration}: Deployed in production for transaction privacy
+    \item[$\checkmark$] \textbf{Apollo Sync Engine}: Kalman, PID, and Gravity Assist operational
+    \item[$\checkmark$] \textbf{PI Emission Controller}: Self-correcting emission rate active on mainnet
+    \item[$\checkmark$] \textbf{4-Server HA Infrastructure}: Zero-downtime rolling deployments
+    \item[$\checkmark$] \textbf{Height-Gated Upgrades}: Consensus Guard system for safe rule changes
+    \item[$\checkmark$] \textbf{Mining Pool}: Distributed pool with stratum-compatible protocol
+    \item[$\checkmark$] \textbf{DEX}: On-chain decentralized exchange with AMM pools
+    \item[$\checkmark$] \textbf{TUI Dashboard}: Real-time Apollo control system visualization
+\end{itemize}
+
+\subsection{In Progress}
+
+\begin{enumerate}
+    \item \textbf{Tor Integration}: Dedicated circuits per validator for IP anonymity (arti client)
+    \item \textbf{QRNG Circuit Seeding}: Quantum random number generation for Tor circuit selection
+    \item \textbf{Browser P2P}: Full WebRTC support for browser-native full nodes
+    \item \textbf{Cross-Shard Routing}: Protocol support for sharded execution
+    \item \textbf{Cross-Chain Bridges}: Bitcoin and Ethereum bridge protocols
+\end{enumerate}
+
+\subsection{Research Directions}
+
+\begin{itemize}
+    \item \textbf{Adaptive Mesh Optimization}: ML-based peer selection using Apollo telemetry
+    \item \textbf{Recursive SNARK Weak Subjectivity}: Eliminating checkpoint trust assumptions
+    \item \textbf{BEP44 DHT Records}: Fully decentralized peer discovery without bootstrap servers
+    \item \textbf{Genus-2 Jacobian VDF Mining}: Novel proof-of-work based on algebraic geometry
+\end{itemize}
+
+% ============================================================================
+\section{Conclusion}
+% ============================================================================
+
+Q-NarwhalKnight's network layer has evolved from a testnet prototype to a production mainnet sustaining 182 miners, 394 wallets, and continuous block production since February 22, 2026. The architecture demonstrates that combining modern peer-to-peer networking primitives (libp2p, gossipsub, Kademlia) with novel control-theoretic optimization (Apollo Kalman/PID/Gravity) and rigorous safety engineering (sync-down protection, immediate balance persistence, height-gated upgrades) yields a system that is:
+
+\begin{itemize}
+    \item \textbf{Performant}: Sub-second block propagation with Apollo-adaptive synchronization
+    \item \textbf{Resilient}: Byzantine fault tolerant with automatic fork resolution across 4 bootstrap nodes
+    \item \textbf{Extensible}: Crypto-agile design with height-gated upgrade path to post-quantum primitives
+    \item \textbf{Economically Sound}: PI-controlled emission maintaining 2,625,000 QUG/year target with self-correcting feedback
+    \item \textbf{Production-Hardened}: Zero-downtime deployment pipeline with 4,000+ automated safety tests
+\end{itemize}
+
+The unified network manager pattern, combined with the Apollo adaptive sync engine, provides a clean abstraction that separates protocol logic from transport concerns, enabling rapid iteration on consensus improvements without disrupting the networking layer.
+
+% ============================================================================
+% References
+% ============================================================================
+
+\begin{thebibliography}{99}
+
+\bibitem{narwhal}
+Danezis, G., Kokoris-Kogias, L., Sonnino, A., \& Spiegelman, A. (2022).
+\textit{Narwhal and Tusk: A DAG-based Mempool and Efficient BFT Consensus}.
+EuroSys 2022.
+
+\bibitem{dagknight}
+Keidar, I., Kokoris-Kogias, E., Naor, O., \& Spiegelman, A. (2021).
+\textit{All You Need is DAG}.
+PODC 2021.
+
+\bibitem{libp2p}
+Protocol Labs. (2024).
+\textit{libp2p Specifications}.
+\url{https://github.com/libp2p/specs}
+
+\bibitem{postquantum}
+Bernstein, D.J., \& Lange, T. (2017).
+\textit{Post-Quantum Cryptography}.
+Nature 549, pp. 188--194.
+
+\bibitem{kademlia}
+Maymounkov, P., \& Mazieres, D. (2002).
+\textit{Kademlia: A Peer-to-peer Information System Based on the XOR Metric}.
+IPTPS 2002.
+
+\bibitem{gossipsub}
+Vyzovitis, D., et al. (2020).
+\textit{GossipSub: Attack-Resilient Message Propagation in the Filecoin and ETH2.0 Networks}.
+arXiv:2007.02754.
+
+\bibitem{bullshark}
+Spiegelman, A., Giridharan, N., Sonnino, A., \& Kokoris-Kogias, L. (2022).
+\textit{Bullshark: DAG BFT Protocols Made Practical}.
+CCS 2022.
+
+\bibitem{dandelion}
+Fanti, G., Venkatakrishnan, S.B., Bakshi, S., Denby, B., Bhargava, S., Miller, A., \& Viswanath, P. (2018).
+\textit{Dandelion++: Lightweight Cryptocurrency Networking with Formal Anonymity Guarantees}.
+ACM SIGMETRICS 2018.
+
+\bibitem{kalman}
+Kalman, R.E. (1960).
+\textit{A New Approach to Linear Filtering and Prediction Problems}.
+Journal of Basic Engineering, 82(1), pp. 35--45.
+
+\bibitem{rocksdb}
+Facebook. (2024).
+\textit{RocksDB: A Persistent Key-Value Store}.
+\url{https://rocksdb.org}
+
+\end{thebibliography}
+
+% ============================================================================
+\appendix
+\section{Message Formats}
+% ============================================================================
+
+\subsection{Block Announcement (Gossipsub)}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Size} \\
+\midrule
+\multicolumn{3}{l}{\textit{Header}} \\
+height & \texttt{u64} & 8 bytes \\
+timestamp & \texttt{i64} & 8 bytes \\
+prev\_block\_hash & \texttt{[u8; 32]} & 32 bytes \\
+solutions\_root & \texttt{[u8; 32]} & 32 bytes \\
+state\_root & \texttt{[u8; 32]} & 32 bytes \\
+network\_id & \texttt{String} & variable \\
+\midrule
+dag\_parents & \texttt{Vec<VertexId>} & variable \\
+mining\_solutions & \texttt{Vec<MiningSolution>} & variable \\
+transactions & \texttt{Vec<Transaction>} & variable \\
+\midrule
+\multicolumn{3}{l}{\textit{Quantum Metadata}} \\
+qrng\_entropy & \texttt{[u8; 32]} & 32 bytes \\
+pq\_signature & \texttt{Option<Vec<u8>>} & variable \\
+\bottomrule
+\end{tabular}
+\caption{Block Announcement Message Format}
+\end{table}
+
+\subsection{Peer Height Announcement}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Field} & \textbf{Type} & \textbf{Size} \\
+\midrule
+peer\_id & \texttt{PeerId} & 38 bytes \\
+height & \texttt{u64} & 8 bytes \\
+block\_hash & \texttt{[u8; 32]} & 32 bytes \\
+timestamp & \texttt{u64} & 8 bytes \\
+signature & \texttt{[u8; 64]} & 64 bytes \\
+network\_id & \texttt{String} & variable \\
+version & \texttt{String} & variable \\
+\bottomrule
+\end{tabular}
+\caption{Peer Height Announcement Message Format (v8.x)}
+\end{table}
+
+% ============================================================================
+\section{Sync State Machine}
+% ============================================================================
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    state/.style={rectangle, rounded corners, draw, minimum width=2.5cm, minimum height=1cm, align=center},
+    arrow/.style={->, thick}
+]
+    \node[state, fill=gray!20] (idle) at (0,4) {IDLE};
+    \node[state, fill=blue!20] (syncing) at (0,2) {SYNCING\\(Apollo Active)};
+    \node[state, fill=yellow!20] (validating) at (0,0) {VALIDATING};
+    \node[state, fill=green!20] (caught) at (0,-2) {CAUGHT\_UP};
+
+    \draw[arrow] (idle) -- node[right, font=\footnotesize] {peer\_height $>$ local $+ 5$} (syncing);
+    \draw[arrow] (syncing) -- node[right, font=\footnotesize] {batch\_received} (validating);
+    \draw[arrow] (validating) -- node[right, font=\footnotesize] {all\_valid} (caught);
+    \draw[arrow] (validating.east) to[bend right=60] node[right, font=\footnotesize] {more\_needed} (syncing.east);
+    \draw[arrow] (syncing.west) to[bend right=60] node[left, font=\footnotesize] {timeout / stall} (caught.west);
+\end{tikzpicture}
+\caption{Synchronization State Machine}
+\label{fig:sync-state}
+\end{figure}
+
+% ============================================================================
+\section{Mainnet Network Statistics}
+% ============================================================================
+
+Production statistics as of February 24, 2026:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Network ID & \texttt{mainnet-genesis} \\
+Software Version & v8.2.6 \\
+Bootstrap Nodes & 4 (Beta, Gamma, Delta, Alpha) \\
+Active Miners (24h) & 182 \\
+Aggregate Hash Rate & 458 MH/s \\
+Registered Wallets & 394 \\
+Total QUG Mined & 8,267.6 \\
+Maximum Supply & 21,000,000 QUG \\
+Annual Emission (Era 0) & 2,625,000 QUG/year \\
+PI Correction Factor & 1.52$\times$ \\
+Era 0 Duration & 4 years \\
+Mining Health & Healthy \\
+\bottomrule
+\end{tabular}
+\caption{Mainnet Statistics Snapshot (Feb 24, 2026)}
+\end{table}
+
+\vfill
+
+\begin{center}
+\rule{0.5\textwidth}{0.4pt}\\[0.5cm]
+{\small Document generated for Q-NarwhalKnight v8.2.6 --- Mainnet}\\
+{\small Copyright 2025--2026 Q-NarwhalKnight Development Team}\\
+{\small Licensed under MIT/Apache-2.0}
+\end{center}
+
+\end{document}

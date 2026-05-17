@@ -1,0 +1,490 @@
+import { Theme } from "theme.slint";
+import { LoginScreen } from "login.slint";
+import { DashboardScreen, TokenInfo } from "dashboard.slint";
+import { ReceiveScreen } from "receive.slint";
+import { SendScreen, AddressEntry } from "send.slint";
+import { HistoryScreen, TxRecord } from "history.slint";
+import { MinerScreen } from "miner.slint";
+import { SyncBar } from "sync_bar.slint";
+import { UpdateBar } from "update_bar.slint";
+import { NavButton } from "theme.slint";
+import { OAuthConsentScreen, OAuthScope } from "oauth_consent.slint";
+import { PosScreen } from "pos.slint";
+import { DexScreen, DexToken, ChartBar, TokenTx } from "dex.slint";
+
+// ─── Excluded features (not ready) ───────────────────────────
+// email.slint, calendar.slint, chat.slint are intentionally NOT
+// imported here. Add them only when features are complete.
+// Icons reserved: icons/mail.svg, icons/calendar.svg, icons/bot.svg
+// ─────────────────────────────────────────────────────────────
+
+export { TokenInfo, TxRecord, OAuthScope, AddressEntry, DexToken, ChartBar, TokenTx }
+
+export component AppWindow inherits Window {
+    title: "Quillon Graph Wallet";
+    min-width: 600px;
+    min-height: 800px;
+    preferred-width: 720px;
+    preferred-height: 900px;
+    background: Theme.bg-primary;
+
+    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent, 7=pos, 8=dex
+    in-out property <int> active-screen: 0;
+
+    // Login properties
+    in-out property <string> login-error: "";
+    in-out property <string> generated-mnemonic: "";
+    in-out property <bool> show-create-view: false;
+    in-out property <string> server-url: "https://quillon.xyz";
+
+    // Dashboard properties
+    in property <string> wallet-address: "";
+    in property <string> qug-balance: "0.00";
+    in property <string> qug-value-usd: "$0.00";
+    in property <[TokenInfo]> tokens: [];
+
+    // Dashboard state
+    in-out property <bool> copy-feedback: false;
+
+    // Send properties
+    in property <string> send-balance-display: "0.00 QUG";
+    in-out property <string> send-status: "";
+    in property <bool> sending: false;
+    in property <bool> needs-seed-phrase: false;
+    in property <[AddressEntry]> address-book: [];
+    in-out property <bool> show-send-confirm: false;
+    in property <string> confirm-amount: "";
+    in property <[string]> available-tokens: ["QUG"];
+    in-out property <string> selected-token: "QUG";
+    in property <string> confirm-recipient: "";
+    in-out property <bool> contact-saved: false;
+    in property <string> current-fee: "0.001";
+    in property <string> fee-tier: "FAST";
+
+    // History properties
+    in property <[TxRecord]> transactions: [];
+    in property <bool> history-loading: false;
+
+    // Miner properties
+    in property <bool> mining: false;
+    in property <string> hashrate: "0";
+    in property <string> blocks-found: "0";
+    in property <string> difficulty: "N/A";
+    in property <string> reward-per-block: "0";
+    in property <string> miner-status: "";
+    in property <string> thread-count: "0";
+    in-out property <bool> pool-mode: false;
+    // GPU miner properties
+    in property <string> gpu-hashrate: "0";
+    in property <string> gpu-device-count: "0";
+    in property <string> gpu-status: "";
+    in property <string> gpu-blocks-found: "0";
+
+    // Wallet version (footer on login screen)
+    in property <string> wallet-version: "v?";
+
+    // Miner controls (persisted user preferences)
+    in property <int> cpu-threads-current: 1;
+    in property <int> cpu-threads-max: 16;
+    in property <int> gpu-intensity-current: 5;
+
+    callback set-cpu-threads(int);
+    callback set-gpu-intensity(int);
+
+    // v11.4.0: Quantum Mixer toggle on Send screen — main.rs reads via get_use_mixer()
+    in-out property <bool> use-mixer: false;
+    in property <bool> mixer-available: true;
+
+    // v11.5.0: AI TRADE dashboard card — emits Claude Code MCP setup instructions
+    callback ai-trade-clicked();
+
+    // Receive / QR code properties
+    in property <image> qr-code-image;
+
+    // PoS properties
+    in-out property <int> pos-state: 0;
+    in-out property <string> pos-amount: "";
+    in-out property <string> pos-memo: "";
+    in property <string> pos-received-amount: "0";
+    in property <image> pos-qr-image;
+    in property <int> pos-wait-seconds: 0;
+
+    // Sync bar properties
+    in property <bool> connected: false;
+    in property <string> current-height: "0";
+    in property <string> network-height: "0";
+    in property <float> sync-percent: 0;
+
+    // OAuth consent properties
+    in property <string> oauth-client-name: "";
+    in property <string> oauth-client-id: "";
+    in property <[OAuthScope]> oauth-scopes: [];
+    in property <string> oauth-redirect-uri: "";
+
+    // Auto-update properties
+    in property <int> update-state: 0;          // 0=hidden, 1=available, 2=downloading, 3=ready, 4=error
+    in property <string> update-version: "";
+    in property <float> update-progress: 0;
+    in property <string> update-status: "";
+    in property <string> update-error: "";
+    callback start-update-download();
+    callback restart-for-update();
+    callback dismiss-update-error();
+
+    // Callbacks
+    callback create-wallet();
+    callback import-wallet(string);
+    callback confirm-created();
+    callback send-transaction(string, string, string, string, string);
+    callback refresh-history();
+    callback toggle-mining();
+    callback copy-address();
+    callback oauth-approve();
+    callback oauth-deny();
+    callback open-oauth-browser();
+    callback save-contact(string, string);
+    callback load-address-book();
+    callback send-token(string);
+    callback select-token(string);
+    callback copy-text(string);
+
+    // PoS callbacks
+    callback create-payment-request(string, string);
+    callback cancel-payment-request();
+
+    // DEX properties
+    in-out property <string> dex-from-symbol: "QUG";
+    in-out property <string> dex-from-name: "Quillon";
+    in-out property <string> dex-from-balance: "0.00";
+    in-out property <string> dex-from-amount: "";
+    in-out property <string> dex-to-symbol: "QUGUSD";
+    in-out property <string> dex-to-name: "QUG Stablecoin";
+    in-out property <string> dex-to-balance: "0.00";
+    in-out property <string> dex-to-amount: "";
+    in property <string> dex-exchange-rate: "";
+    in property <string> dex-price-impact: "";
+    in property <string> dex-min-received: "";
+    in property <string> dex-swap-fee: "0.3%";
+    in-out property <string> dex-slippage: "0.5%";
+    in property <bool> dex-swap-loading: false;
+    in property <string> dex-swap-status: "";
+    in property <bool> dex-swap-success: false;
+    in property <string> dex-swap-result-from: "";
+    in property <string> dex-swap-result-to: "";
+    in property <string> dex-swap-result-tx: "";
+    in property <[DexToken]> dex-token-list: [];
+
+    // DEX callbacks
+    callback dex-execute-swap();
+    callback dex-flip-tokens();
+    callback dex-request-quote(string);
+    callback dex-open-token-list(int);
+    callback dex-select-token(int, string);
+    callback dex-set-slippage(string);
+    callback dex-add-liquidity();
+    callback dex-dismiss-swap-success();
+    callback dex-open-token-detail(string);
+    callback dex-close-token-detail();
+
+    // Token detail properties
+    in property <bool> dex-show-token-detail: false;
+    in property <string> dex-detail-symbol: "";
+    in property <string> dex-detail-name: "";
+    in property <string> dex-detail-contract-type: "";
+    in property <string> dex-detail-address: "";
+    in property <string> dex-detail-decimals: "";
+    in property <string> dex-detail-total-supply: "";
+    in property <bool> dex-detail-verified: false;
+    in property <string> dex-detail-price: "";
+    in property <string> dex-detail-change-24h: "";
+    in property <bool> dex-detail-change-positive: true;
+    in property <string> dex-detail-balance: "";
+    in property <string> dex-detail-value-usd: "";
+    in property <[ChartBar]> dex-detail-chart-bars: [];
+    in property <string> dex-detail-chart-high: "";
+    in property <string> dex-detail-chart-low: "";
+    in property <[TokenTx]> dex-detail-txns: [];
+
+    VerticalLayout {
+        // Main content area
+        Rectangle {
+            vertical-stretch: 1;
+
+            if root.active-screen == 0 : LoginScreen {
+                error-message: root.login-error;
+                generated-mnemonic: root.generated-mnemonic;
+                show-create-view <=> root.show-create-view;
+                server-url <=> root.server-url;
+                wallet-version: root.wallet-version;
+
+                create-wallet => { root.create-wallet(); }
+                import-wallet(m) => { root.import-wallet(m); }
+                confirm-created => { root.confirm-created(); }
+                open-oauth-browser => { root.open-oauth-browser(); }
+            }
+
+            if root.active-screen == 1 : DashboardScreen {
+                address: root.wallet-address;
+                qug-balance: root.qug-balance;
+                qug-value-usd: root.qug-value-usd;
+                tokens: root.tokens;
+                copy-feedback: root.copy-feedback;
+
+                navigate(screen) => {
+                    root.active-screen = screen;
+                    if screen == 3 { root.refresh-history(); }
+                    if screen == 2 { root.load-address-book(); }
+                }
+                copy-address => { root.copy-address(); }
+                send-token(symbol) => { root.send-token(symbol); }
+                ai-trade-clicked => { root.ai-trade-clicked(); }
+            }
+
+            if root.active-screen == 2 : SendScreen {
+                balance-display: root.send-balance-display;
+                status-message <=> root.send-status;
+                sending: root.sending;
+                needs-seed-phrase: root.needs-seed-phrase;
+                contacts: root.address-book;
+                show-confirm <=> root.show-send-confirm;
+                confirm-amount: root.confirm-amount;
+                confirm-recipient: root.confirm-recipient;
+                contact-saved <=> root.contact-saved;
+                available-tokens: root.available-tokens;
+                selected-token <=> root.selected-token;
+                current-fee: root.current-fee;
+                fee-tier: root.fee-tier;
+                use-mixer <=> root.use-mixer;
+                mixer-available: root.mixer-available;
+
+                send-transaction => {
+                    root.send-transaction(self.recipient, self.amount, self.memo, self.seed-phrase, root.selected-token);
+                }
+                go-back => { root.active-screen = 1; }
+                save-contact => {
+                    root.save-contact(self.recipient, self.contact-label);
+                }
+                select-token(symbol) => { root.select-token(symbol); }
+                toggle-mixer(on) => { root.use-mixer = on; }
+            }
+
+            if root.active-screen == 3 : HistoryScreen {
+                transactions: root.transactions;
+                loading: root.history-loading;
+
+                go-back => { root.active-screen = 1; }
+                refresh => { root.refresh-history(); }
+                copy-text(text) => { root.copy-text(text); }
+            }
+
+            if root.active-screen == 4 : MinerScreen {
+                mining: root.mining;
+                hashrate: root.hashrate;
+                blocks-found: root.blocks-found;
+                difficulty: root.difficulty;
+                reward-per-block: root.reward-per-block;
+                miner-address: root.wallet-address;
+                miner-status: root.miner-status;
+                thread-count: root.thread-count;
+                pool-mode <=> root.pool-mode;
+                gpu-hashrate: root.gpu-hashrate;
+                gpu-device-count: root.gpu-device-count;
+                gpu-status: root.gpu-status;
+                gpu-blocks-found: root.gpu-blocks-found;
+                cpu-threads-current: root.cpu-threads-current;
+                cpu-threads-max: root.cpu-threads-max;
+                gpu-intensity-current: root.gpu-intensity-current;
+
+                toggle-mining => { root.toggle-mining(); }
+                set-cpu-threads(n) => { root.set-cpu-threads(n); }
+                set-gpu-intensity(p) => { root.set-gpu-intensity(p); }
+                go-back => { root.active-screen = 1; }
+            }
+
+            if root.active-screen == 5 : ReceiveScreen {
+                qr-code-image: root.qr-code-image;
+                address: root.wallet-address;
+                qug-balance: root.qug-balance;
+
+                copy-address => { root.copy-address(); }
+                go-back => { root.active-screen = 1; }
+                open-pos => {
+                    root.pos-state = 0;
+                    root.active-screen = 7;
+                }
+            }
+
+            if root.active-screen == 6 : OAuthConsentScreen {
+                client-name: root.oauth-client-name;
+                client-id: root.oauth-client-id;
+                scopes: root.oauth-scopes;
+                wallet-address: root.wallet-address;
+                redirect-uri: root.oauth-redirect-uri;
+
+                approve => { root.oauth-approve(); }
+                deny => { root.oauth-deny(); }
+            }
+
+            if root.active-screen == 7 : PosScreen {
+                pos-state: root.pos-state;
+                address: root.wallet-address;
+                qr-image: root.pos-qr-image;
+                wait-seconds: root.pos-wait-seconds;
+                received-amount: root.pos-received-amount;
+                amount-text <=> root.pos-amount;
+                memo-text <=> root.pos-memo;
+
+                create-payment-request(amount, memo) => {
+                    root.create-payment-request(amount, memo);
+                }
+                cancel-payment-request => {
+                    root.cancel-payment-request();
+                }
+                go-back => {
+                    root.cancel-payment-request();
+                    root.active-screen = 5;
+                }
+                new-request => {
+                    root.pos-state = 0;
+                }
+            }
+
+            if root.active-screen == 8 : DexScreen {
+                from-symbol <=> root.dex-from-symbol;
+                from-name <=> root.dex-from-name;
+                from-balance <=> root.dex-from-balance;
+                from-amount <=> root.dex-from-amount;
+                to-symbol <=> root.dex-to-symbol;
+                to-name <=> root.dex-to-name;
+                to-balance <=> root.dex-to-balance;
+                to-amount <=> root.dex-to-amount;
+                exchange-rate: root.dex-exchange-rate;
+                price-impact: root.dex-price-impact;
+                min-received: root.dex-min-received;
+                swap-fee: root.dex-swap-fee;
+                slippage <=> root.dex-slippage;
+                swap-loading: root.dex-swap-loading;
+                swap-status: root.dex-swap-status;
+                swap-success: root.dex-swap-success;
+                swap-result-from: root.dex-swap-result-from;
+                swap-result-to: root.dex-swap-result-to;
+                swap-result-tx: root.dex-swap-result-tx;
+                token-list: root.dex-token-list;
+
+                go-back => { root.active-screen = 1; }
+                execute-swap => { root.dex-execute-swap(); }
+                flip-tokens => { root.dex-flip-tokens(); }
+                request-quote(amount) => { root.dex-request-quote(amount); }
+                open-token-list(side) => { root.dex-open-token-list(side); }
+                select-token(side, symbol) => { root.dex-select-token(side, symbol); }
+                set-slippage(s) => { root.dex-set-slippage(s); }
+                add-liquidity => { root.dex-add-liquidity(); }
+                dismiss-swap-success => { root.dex-dismiss-swap-success(); }
+                open-token-detail(sym) => { root.dex-open-token-detail(sym); }
+                close-token-detail => { root.dex-close-token-detail(); }
+
+                // Token detail bindings
+                show-token-detail: root.dex-show-token-detail;
+                detail-symbol: root.dex-detail-symbol;
+                detail-name: root.dex-detail-name;
+                detail-contract-type: root.dex-detail-contract-type;
+                detail-address: root.dex-detail-address;
+                detail-decimals: root.dex-detail-decimals;
+                detail-total-supply: root.dex-detail-total-supply;
+                detail-verified: root.dex-detail-verified;
+                detail-price: root.dex-detail-price;
+                detail-change-24h: root.dex-detail-change-24h;
+                detail-change-positive: root.dex-detail-change-positive;
+                detail-balance: root.dex-detail-balance;
+                detail-value-usd: root.dex-detail-value-usd;
+                detail-chart-bars: root.dex-detail-chart-bars;
+                detail-chart-high: root.dex-detail-chart-high;
+                detail-chart-low: root.dex-detail-chart-low;
+                detail-txns: root.dex-detail-txns;
+            }
+        }
+
+        // Bottom nav bar (shown when logged in, hidden on PoS screen)
+        if root.active-screen > 0 && root.active-screen != 7 : Rectangle {
+            height: 56px;
+
+            // Top border separator
+            Rectangle {
+                height: 1px;
+                background: Theme.border;
+                y: 0;
+            }
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-sm;
+                padding-right: Theme.spacing-sm;
+                padding-top: 1px;
+                spacing: Theme.spacing-xs;
+
+                NavButton {
+                    nav-icon: @image-url("icons/home.svg");
+                    label: "Home";
+                    active: root.active-screen == 1;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 1; }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-down-to-line.svg");
+                    label: "Receive";
+                    active: root.active-screen == 5;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 5; }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-up-from-line.svg");
+                    label: "Send";
+                    active: root.active-screen == 2;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 2; root.load-address-book(); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/arrow-up-down.svg");
+                    label: "DEX";
+                    active: root.active-screen == 8;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 8; root.dex-open-token-list(0); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/clock.svg");
+                    label: "History";
+                    active: root.active-screen == 3;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 3; root.refresh-history(); }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/pickaxe.svg");
+                    label: "Miner";
+                    active: root.active-screen == 4;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 4; }
+                }
+            }
+        }
+
+        // Sync bar at bottom (only shown when logged in, not on PoS)
+        if root.active-screen > 0 && root.active-screen != 7 : SyncBar {
+            connected: root.connected;
+            current-height: root.current-height;
+            network-height: root.network-height;
+            sync-percent: root.sync-percent;
+        }
+
+        // Auto-update bar (below sync bar, only shown when update available)
+        if root.active-screen > 0 && root.active-screen != 7 : UpdateBar {
+            update-state: root.update-state;
+            update-version: root.update-version;
+            update-progress: root.update-progress;
+            update-status: root.update-status;
+            update-error: root.update-error;
+
+            start-download => { root.start-update-download(); }
+            restart-now => { root.restart-for-update(); }
+            dismiss-error => { root.dismiss-update-error(); }
+        }
+    }
+}

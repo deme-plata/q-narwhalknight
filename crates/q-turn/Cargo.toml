@@ -1,0 +1,33 @@
+[package]
+name = "q-turn"
+version.workspace = true
+edition.workspace = true
+description = "Custom STUN/TURN relay server for Q-NarwhalKnight — zero IP leak WebRTC"
+license.workspace = true
+
+[[bin]]
+name = "q-turn"
+path = "src/main.rs"
+
+[dependencies]
+tokio        = { workspace = true, features = ["full"] }
+serde        = { workspace = true, features = ["derive"] }
+serde_json   = { workspace = true }
+toml         = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+clap         = { workspace = true, features = ["derive"] }
+dashmap      = { workspace = true }
+bytes        = { workspace = true }
+socket2      = { workspace = true }
+num_cpus     = { workspace = true }
+parking_lot  = { workspace = true }
+sha2         = { workspace = true }
+ring         = { workspace = true }
+hex          = { workspace = true }
+rand         = { workspace = true }
+crc32fast    = { workspace = true }
+chrono       = { workspace = true }
+# MD5 for RFC 5389 MESSAGE-INTEGRITY key derivation: MD5(user:realm:pass)
+md-5         = "0.10"

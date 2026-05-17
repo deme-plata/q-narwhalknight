@@ -1,0 +1,148 @@
+[package]
+name = "q-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+q-dag-knight = { path = "../q-dag-knight" }
+q-resonance = { path = "../q-resonance", optional = true }
+q-storage = { path = "../q-storage" }
+q-zk-stark = { path = "../q-zk-stark" }
+q-ai-inference = { path = "../q-ai-inference", default-features = false }
+q-quantum-crypto = { path = "../q-quantum-crypto" }
+
+# Networking - gossipsub included from workspace
+# NOTE: workspace = true doesn't work for libp2p features, so we explicitly define it here
+# 🔥 v2.0.0: Upgraded to libp2p 0.56 with NAT traversal and WebRTC support
+libp2p = { version = "0.56", features = [
+    "noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp",
+    "macros", "tokio", "request-response",
+    "autonat",                    # 🔥 Detect if node is dialable
+    "relay",                      # 🔥 Be reachable via relay nodes
+    "dcutr",                      # 🔥 Hole-punching for direct connections
+    "quic",                       # 🔥 QUIC transport for better NAT traversal
+    "dns",                        # 🔥 DNS resolution for bootstrap nodes
+    "websocket",                  # 🌐 WebSocket transport for browser clients
+    "memory-connection-limits",   # v10.9.27: OOM-safety — refuse new conns under mem pressure
+    "metrics",                    # v10.9.27: Prometheus-format /metrics endpoint
+] }
+
+# v10.9.27: Prometheus metrics registry — exposes the libp2p-metrics output
+# alongside our own app-level counters (peer state, dial outcomes, throttle
+# events, height progress, chunk in-flight). Same crate libp2p re-exports for
+# its Metrics struct so all data lives in one Registry that we serialize as
+# `text` format on the /metrics HTTP endpoint.
+prometheus-client = "0.23"  # MUST match libp2p-metrics 0.17.0's version (0.23.1) — bumping creates Registry-type mismatch
+libp2p-websocket = "0.45" # 🌐 WebSocket transport for browser connections
+# 🌐 v2.0.0: WebRTC-Direct transport for true browser P2P (optional)
+libp2p-webrtc = { version = "0.9.0-alpha.1", features = ["tokio"], optional = true }
+
+# MessagePack serialization for gossipsub block decoding (v2.1.7-DELTA-V)
+rmp-serde = "1.3"
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+
+# HTTP client for dynamic peer ID discovery
+reqwest = { workspace = true }
+uuid = { workspace = true }
+blake3 = { workspace = true }
+
+# Cryptography - Phase 0 (Classical)
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+
+# Cryptography - Phase 1 (Post-Quantum)
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+pqcrypto-traits = { workspace = true }
+
+# v2.5.1-beta: AEAD encryption for P2P AI message privacy
+chacha20poly1305 = { workspace = true }
+
+# Missing dependencies
+hex = { workspace = true }
+zeroize = { workspace = true }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Tor integration
+q-tor-client = { path = "../q-tor-client" }
+q-tor-circuit = { path = "../q-tor-circuit" }
+
+# Network discovery integrations - these are optional dependencies to avoid circular deps
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge", optional = true }
+# q-dns-phantom = { path = "../q-dns-phantom", optional = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+
+# Time and utilities
+chrono = { workspace = true }
+rand = { workspace = true }
+crossbeam = { workspace = true }
+
+# 🚀 v1.7.0-LAMINAR: Lock-free concurrent collections
+dashmap = { workspace = true }
+
+# System info for hardware capability detection
+sysinfo = "0.30"
+num_cpus = "1.16"
+
+# Compression for tensor forwarding
+zstd = "0.13"
+bincode = "1.3"
+
+# libp2p codec support (v1.0.15.1-beta: handshake protocol)
+unsigned-varint = { version = "0.7", features = ["futures", "codec"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# void crate for libp2p 0.53 connection_limits (v1.0.17-beta)
+void = "1.0"
+
+# Lazy static for Tor Prometheus metrics
+lazy_static = "1.4"
+
+# Prometheus metrics for Tor integration
+prometheus = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+
+# Platform-specific dependencies
+# mDNS requires libudev on Linux which cannot be cross-compiled to Windows or macOS
+# Enable mDNS only on Linux platforms
+[features]
+default = []
+# K-Parameter resonance protocol (disabled for ARM64 cross-compilation)
+resonance = ["q-resonance"]
+# ✨ v1.0.58-beta: Enable Lattice Aggregate Signatures for 98% bandwidth reduction
+advanced-crypto = ["q-crypto-advanced"]
+
+# 🚀 v1.4.12-beta: GPU acceleration for distributed AI inference
+cuda = ["q-ai-inference/cuda"]
+metal = ["q-ai-inference/metal"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libp2p = { workspace = true, features = ["mdns"] }

@@ -1,0 +1,69 @@
+{
+  "timestamp": "2025-09-05T18:42:47.654645",
+  "onion_services": [
+    {
+      "name": "qnk-validator-alpha",
+      "onion_address": "ogkilq37m4tvwa6emrqfbeoplv6ph3zem7tfh7ux3xl2uvjvtf6b26qd.onion",
+      "port": 8001,
+      "private_key_type": "ED25519-V3",
+      "created_at": "2025-09-05T18:42:48.919054",
+      "status": "active",
+      "tor_response": "250-ServiceID=ogkilq37m4tvwa6emrqfbeoplv6ph3zem7tfh7ux3xl2uvjvtf6b26qd\r\n250-PrivateKey=ED25519-V3:eJwdUweYiivLBmKjfXpsdqfZCPbC/hv1BB2lAKuq6Uv+RVOmAkNvhZt30oUj6+BhGesV64yBeKBe+7SeqK9UMg==\r\n250 OK",
+      "address_length": 62,
+      "is_v3": true,
+      "connectivity_test": {
+        "status": "address_resolved",
+        "evidence": "Onion address resolved, general SOCKS server failure (normal - no web server running)"
+      }
+    },
+    {
+      "name": "qnk-validator-beta",
+      "onion_address": "ydrb657d2t4pqbmbashykr7xgnogniejfv6qakkmnr3kdfacfogvhoid.onion",
+      "port": 8002,
+      "private_key_type": "ED25519-V3",
+      "created_at": "2025-09-05T18:42:53.756666",
+      "status": "active",
+      "tor_response": "250-ServiceID=ydrb657d2t4pqbmbashykr7xgnogniejfv6qakkmnr3kdfacfogvhoid\r\n250-PrivateKey=ED25519-V3:AOP5DSh7ZgMzTux6z8DRt+gxJ5vSozjshVy2ouqq43XwTzfRLqlf1jiTZRRa+EiE2fOJur0zM9CW7SgvhfY4GQ==\r\n250 OK",
+      "address_length": 62,
+      "is_v3": true,
+      "connectivity_test": {
+        "status": "timeout",
+        "evidence": "Connection timeout - onion service may be valid but not responding"
+      }
+    },
+    {
+      "name": "qnk-dht-bootstrap",
+      "onion_address": "albncyoysiugn4ct5q2sqsj55ixwbdbl7qvfjvsj6p6is7yiehqfkwad.onion",
+      "port": 8003,
+      "private_key_type": "ED25519-V3",
+      "created_at": "2025-09-05T18:42:58.764755",
+      "status": "active",
+      "tor_response": "250-ServiceID=albncyoysiugn4ct5q2sqsj55ixwbdbl7qvfjvsj6p6is7yiehqfkwad\r\n250-PrivateKey=ED25519-V3:yPCia5pgUeoAiUOcVRCohoZAjuvqZTjHJ7VnhIkxFXW/9OypWEYqnNcoKrWxcJlcOvcJvh/qe6vRo4SWBjf/4Q==\r\n250 OK",
+      "address_length": 62,
+      "is_v3": true,
+      "connectivity_test": {
+        "status": "timeout",
+        "evidence": "Connection timeout - onion service may be valid but not responding"
+      }
+    }
+  ],
+  "network_tests": [
+    {
+      "test": "Direct IP",
+      "result": "185.182.185.227"
+    },
+    {
+      "test": "Tor Exit IP",
+      "result": "45.84.107.74"
+    },
+    {
+      "test": "Anonymity",
+      "result": "\u2705 Achieved (Direct: 185.182.185.227, Tor: 45.84.107.74)"
+    }
+  ],
+  "system_evidence": {
+    "tor_processes": "debian-+  166006  1.5  0.1 118128 113320 ?       Rs   18:25   0:16 /usr/bin/tor --defaults-torrc /usr/share/tor/tor-service-defaults-torrc -f /etc/tor/torrc --RunAsDaemon 0\nroot      172222  0.2  0.0   6936  3520 ?        Ss   18:42   0:00 /bin/bash -c -l source /root/.claude/shell-snapshots/snapshot-bash-1757083614883-tc5juj.sh && eval 'python3 final_tor_demonstration.py' \\< /dev/null && pwd -P >| /tmp/claude-e8ac-cwd\nroot      172229  1.3  0.0  19020 11980 ?        S    18:42   0:00 python3 final_tor_demonstration.py",
+    "tor_ports": "tcp   LISTEN 0      4096       127.0.0.1:9051       0.0.0.0:*    users:((\"tor\",pid=166006,fd=7))                                                                                                                                                                                                                                                                                                                                                                                                                                                \ntcp   LISTEN 0      4096       127.0.0.1:9050       0.0.0.0:*    users:((\"tor\",pid=166006,fd=6))                                                                                                                                                                                                                                                                                                                                                                                                                                                ",
+    "tor_service": "\u25cf tor.service - Anonymizing overlay network for TCP (multi-instance-master)\n     Loaded: loaded (/lib/systemd/system/tor.service; enabled; preset: enabled)\n     Active: active (exited) since Fri 2025-09-05 18:25:37 CEST; 17min ago\n    Process: 165995 ExecStart=/bin/true (code=exited, status=0/SUCCESS)\n   Main PID: 165995 (code=exited, status=0/SUCCESS)\n        CPU: 8ms\n\nSep 05 18:25:37 vmi2628966.contaboserver.net systemd[1]: Starting tor.service - Anonymizing overlay network for TCP (multi-inst"
+  }
+}

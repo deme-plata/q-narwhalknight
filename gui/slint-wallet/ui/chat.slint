@@ -1,0 +1,236 @@
+// ═══════════════════════════════════════════════════════════════
+// NOT READY — Feature incomplete, do not import in app.slint
+// This screen is excluded from navigation until implementation
+// is complete and approved. Icons: icons/mail.svg / calendar.svg / bot.svg
+// ═══════════════════════════════════════════════════════════════
+
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+
+export struct ChatMessage {
+    role: string,      // "user" | "assistant"
+    content: string,
+    timestamp: string,
+}
+
+export component ChatScreen inherits Rectangle {
+    in property <[ChatMessage]> messages: [];
+    in property <bool> loading: false;
+    in-out property <string> input-text: "";
+
+    callback go-back();
+    callback send-message(string);
+    callback clear-chat();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+                back-touch := TouchArea { clicked => { root.go-back(); } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/arrow-left.svg"); icon-color: Theme.text-primary; }
+                }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                Text {
+                    text: "AI Assistant";
+                    font-size: Theme.font-lg;
+                    font-weight: 700;
+                    color: Theme.text-primary;
+                }
+                Text {
+                    text: "Powered by QUG AI";
+                    font-size: Theme.font-xs;
+                    color: Theme.accent-purple;
+                }
+            }
+
+            if root.messages.length > 0 : Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: clear-touch.has-hover ? Theme.bg-hover : transparent;
+                clear-touch := TouchArea { clicked => { root.clear-chat(); } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/x.svg"); icon-color: Theme.text-secondary; width: 18px; height: 18px; }
+                }
+            }
+        }
+
+        // Messages scroll area
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: root.messages.length * 80px + 200px;
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+                padding-bottom: Theme.spacing-sm;
+
+                // Welcome message when empty
+                if root.messages.length == 0 : Rectangle {
+                    height: 180px;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: Theme.spacing-md;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 56px;
+                                height: 56px;
+                                border-radius: 28px;
+                                background: Theme.accent-purple.with-alpha(0.2);
+                                border-width: 1px;
+                                border-color: Theme.accent-purple.with-alpha(0.4);
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        source: @image-url("icons/sparkles.svg");
+                                        icon-color: Theme.accent-purple;
+                                        width: 28px; height: 28px;
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Ask me anything about your wallet,\ntransactions, or the QUG network.";
+                            font-size: Theme.font-sm;
+                            color: Theme.text-secondary;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                for msg[i] in root.messages : HorizontalLayout {
+                    alignment: msg.role == "user" ? end : start;
+                    padding-left: msg.role == "user" ? 40px : 0px;
+                    padding-right: msg.role == "user" ? 0px : 40px;
+
+                    Rectangle {
+                        background: msg.role == "user" ? Theme.accent-blue : Theme.bg-card;
+                        border-radius: Theme.radius-md;
+                        border-width: msg.role == "assistant" ? 1px : 0px;
+                        border-color: Theme.border;
+
+                        VerticalLayout {
+                            padding: Theme.spacing-sm;
+                            spacing: 4px;
+
+                            Text {
+                                text: msg.content;
+                                font-size: Theme.font-sm;
+                                color: Theme.text-primary;
+                                wrap: word-wrap;
+                                horizontal-alignment: left;
+                            }
+
+                            if msg.timestamp != "" : Text {
+                                text: msg.timestamp;
+                                font-size: 10px;
+                                color: msg.role == "user" ? Theme.text-primary.with-alpha(0.6) : Theme.text-muted;
+                                horizontal-alignment: msg.role == "user" ? right : left;
+                            }
+                        }
+                    }
+                }
+
+                // Typing indicator
+                if root.loading : HorizontalLayout {
+                    alignment: start;
+                    Rectangle {
+                        background: Theme.bg-card;
+                        border-radius: Theme.radius-md;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        height: 36px;
+                        width: 80px;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Text { text: "●"; font-size: 8px; color: Theme.accent-purple; }
+                            Text { text: "●"; font-size: 8px; color: Theme.accent-purple; }
+                            Text { text: "●"; font-size: 8px; color: Theme.accent-purple; }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Input bar
+        Rectangle {
+            height: 52px;
+            background: Theme.bg-card;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: chat-input.has-focus ? Theme.accent-purple : Theme.border;
+            animate border-color { duration: 150ms; }
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-sm;
+                padding-right: Theme.spacing-xs;
+                spacing: Theme.spacing-xs;
+                alignment: center;
+
+                chat-input := TextInput {
+                    horizontal-stretch: 1;
+                    text <=> root.input-text;
+                    font-size: Theme.font-sm;
+                    color: Theme.text-primary;
+                    vertical-alignment: center;
+                    accepted => {
+                        if root.input-text != "" && !root.loading {
+                            root.send-message(root.input-text);
+                            root.input-text = "";
+                        }
+                    }
+                }
+
+                if root.input-text == "" : Text {
+                    text: "Ask anything...";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+
+                // Send button
+                Rectangle {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 18px;
+                    background: root.input-text != "" && !root.loading
+                        ? (send-touch.has-hover ? Theme.accent-purple.darker(10%) : Theme.accent-purple)
+                        : Theme.bg-hover;
+                    send-touch := TouchArea {
+                        enabled: root.input-text != "" && !root.loading;
+                        clicked => {
+                            root.send-message(root.input-text);
+                            root.input-text = "";
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/send.svg");
+                            icon-color: root.input-text != "" ? Theme.text-primary : Theme.text-muted;
+                            width: 16px; height: 16px;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

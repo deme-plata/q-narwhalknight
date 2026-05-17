@@ -1,0 +1,110 @@
+version: '3.8'
+
+networks:
+  quantum-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+services:
+  validator-alpha-001:
+    image: q-narwhalknight/quantum-node:1.0.0
+    container_name: quantum-validator-alpha-001
+    hostname: quantum-alpha-001
+    networks:
+      quantum-network:
+        ipv4_address: 172.20.0.10
+    ports:
+      - "8080:8080"   # P2P
+      - "8081:8081"   # Consensus
+      - "8082:8082"   # API
+      - "9090:9090"   # Metrics
+    volumes:
+      - "./nodes/validator-alpha-001:/app/data"
+    environment:
+      - QUANTUM_ENHANCED=true
+      - NODE_ID=qv-alpha-001
+      - REGION=us-east-1
+    restart: unless-stopped
+    
+  validator-beta-002:
+    image: q-narwhalknight/quantum-node:1.0.0
+    container_name: quantum-validator-beta-002
+    hostname: quantum-beta-002
+    networks:
+      quantum-network:
+        ipv4_address: 172.20.0.11
+    ports:
+      - "8180:8080"
+      - "8181:8081"
+      - "8182:8082"
+      - "9190:9090"
+    volumes:
+      - "./nodes/validator-beta-002:/app/data"
+    environment:
+      - QUANTUM_ENHANCED=true
+      - NODE_ID=qv-beta-002
+      - REGION=eu-west-1
+    restart: unless-stopped
+    
+  validator-gamma-003:
+    image: q-narwhalknight/quantum-node:1.0.0
+    container_name: quantum-validator-gamma-003
+    hostname: quantum-gamma-003
+    networks:
+      quantum-network:
+        ipv4_address: 172.20.0.12
+    ports:
+      - "8280:8080"
+      - "8281:8081"
+      - "8282:8082"
+      - "9290:9090"
+    volumes:
+      - "./nodes/validator-gamma-003:/app/data"
+    environment:
+      - QUANTUM_ENHANCED=true
+      - NODE_ID=qv-gamma-003
+      - REGION=asia-pacific-1
+    restart: unless-stopped
+    
+  validator-delta-004:
+    image: q-narwhalknight/quantum-node:1.0.0
+    container_name: quantum-validator-delta-004
+    hostname: quantum-delta-004
+    networks:
+      quantum-network:
+        ipv4_address: 172.20.0.13
+    ports:
+      - "8380:8080"
+      - "8381:8081"
+      - "8382:8082"
+      - "9390:9090"
+    volumes:
+      - "./nodes/validator-delta-004:/app/data"
+    environment:
+      - QUANTUM_ENHANCED=true
+      - NODE_ID=qv-delta-004
+      - REGION=us-west-2
+    restart: unless-stopped
+
+  # Monitoring stack
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantum-prometheus
+    networks:
+      - quantum-network
+    ports:
+      - "9001:9090"
+    volumes:
+      - "./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml"
+    
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quantum-grafana
+    networks:
+      - quantum-network
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=quantum_consensus_2024

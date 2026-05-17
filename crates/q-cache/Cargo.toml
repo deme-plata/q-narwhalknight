@@ -1,0 +1,76 @@
+[package]
+name = "q-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Hierarchical caching system for Q-NarwhalKnight performance optimization"
+
+[features]
+default = ["hierarchical", "metrics"]
+hierarchical = []  # L1/L2/L3 cache hierarchy
+metrics = ["prometheus"]  # Cache performance metrics
+ml-prefetch = ["candle-core", "candle-nn"]  # Machine learning prefetching
+compression = ["lz4", "zstd"]  # Cache data compression
+numa-aware = ["hwloc"]  # NUMA-aware cache placement
+
+[dependencies]
+q-types = { path = "../q-types" }
+# q-sharding = { path = "../q-sharding" } # Temporarily disabled due to compilation errors
+# q-storage = { path = "../q-storage" } # Temporarily disabled due to compilation issues
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# Hashing and utilities
+blake3 = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+
+# Data structures
+dashmap = "6.1"
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+# Metrics (optional)
+prometheus = { workspace = true, optional = true }
+
+# ML dependencies (optional)
+candle-core = { version = "0.6", optional = true }
+candle-nn = { version = "0.6", optional = true }
+
+# Compression (optional)
+lz4 = { version = "1.25", optional = true }
+zstd = { version = "0.13", optional = true }
+
+# NUMA awareness (optional)
+hwloc = { version = "0.5.0", optional = true }
+
+# Benchmarking
+criterion = { workspace = true }
+hex.workspace = true
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }
+
+[[bench]]
+name = "cache_performance"
+harness = false

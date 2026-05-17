@@ -1,0 +1,41 @@
+TOPIC: QUG Tokenomics and Economics
+
+## Supply
+- **Maximum supply**: 21,000,000 QUG (21 million, same cap as Bitcoin)
+- **Decimals**: 24 (extreme precision for micropayments and DeFi)
+- **Smallest unit**: 1 × 10^-24 QUG
+
+## Emission Schedule
+- **Era 0** (current): ~2,625,000 QUG per year
+- **Halving**: Every 4 years, emission cuts in half (like Bitcoin)
+- Era 1: ~1,312,500 QUG/year
+- Era 2: ~656,250 QUG/year
+- And so on until max supply is reached
+
+## Block Rewards
+- Each block produces a mining reward
+- Block time: ~1 second
+- Reward per block ≈ annual emission / seconds per year
+- 1% dev fee → founder wallet (funds development)
+- 99% → miners (proportional to hashrate contribution)
+
+## Transaction Fees
+- Simple transfer: ~0.00002 QUG (extremely cheap)
+- Token transfer: ~0.00004 QUG
+- DEX swap: ~0.00006 QUG (plus 0.3% pool fee)
+- Contract call: ~0.00010 QUG
+- Fees are burned or paid to miners depending on network rules
+
+## How to Get QUG
+1. **Mine it**: Download q-miner and start mining (free, just needs computing power)
+2. **Receive it**: Someone sends QUG to your wallet address
+3. **Trade for it**: Use the DEX to swap tokens for QUG
+4. **Faucet**: Small amounts available for testing (when active)
+
+## Value Proposition
+- Fixed supply (deflationary like Bitcoin)
+- Post-quantum security (future-proof against quantum computers)
+- Fast block times (1 second vs Bitcoin's 10 minutes)
+- Low fees (fractions of a cent)
+- Built-in DEX and smart contracts
+- AI-powered features (chat, narrative generation)

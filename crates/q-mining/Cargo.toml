@@ -1,0 +1,81 @@
+[package]
+name = "q-mining"
+version = "0.1.0"
+edition = "2021"
+description = "Quantum-enhanced mining for Q-NarwhalKnight blockchain"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core dependencies
+q-types = { path = "../q-types" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-vdf = { path = "../q-vdf" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+# ✨ v1.0.60-beta: Post-quantum VRF for mining leader election (replaces broken X-VRF)
+q-rlwe-vrf = { path = "../q-rlwe-vrf", optional = true }
+q-network = { path = "../q-network" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+q-precision = { path = "../q-precision" }
+
+# Cryptography
+sha3 = "0.10"
+blake3 = "1.5"
+dilithium = "0.2.0-alpha.3"
+# v2.4.7-beta: NIST PQC standard Dilithium5 for block signatures
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4"] }
+num_cpus = "1.16"
+
+# Networking
+libp2p = "0.53"
+
+# Performance
+rayon = "1.8"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+
+# GPU acceleration (optional)
+opencl3 = { version = "0.9", optional = true }
+
+# System info
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# v1.0.60-beta: Ring-LWE VRF enabled by default for post-quantum mining security
+default = ["mining-vrf"]
+gpu-mining = ["opencl3"]
+# ✨ v1.0.58-beta: Enable Bulletproofs v2 for confidential mining rewards
+advanced-crypto = ["q-crypto-advanced"]
+# ✨ v1.0.60-beta: Enable Ring-LWE VRF for post-quantum mining leader election
+mining-vrf = ["q-rlwe-vrf"]
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3.8"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+

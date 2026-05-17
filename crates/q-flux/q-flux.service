@@ -1,0 +1,26 @@
+[Unit]
+Description=q-flux High-Performance Reverse Proxy
+After=network.target q-api-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/orobit/shared/q-narwhalknight/q-flux -c /opt/orobit/shared/q-narwhalknight/q-flux.toml
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight
+Environment="RUST_LOG=info"
+
+# Memory limits — prevent OOM on 64GB Epsilon
+MemoryMax=8G
+MemoryHigh=6G
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/orobit/shared/q-narwhalknight /home/orobit/q-narwhalknight /var/log
+ReadOnlyPaths=/etc/letsencrypt
+
+[Install]
+WantedBy=multi-user.target

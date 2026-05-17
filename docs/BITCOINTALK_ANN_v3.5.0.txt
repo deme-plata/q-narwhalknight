@@ -1,0 +1,403 @@
+[center]
+[size=28pt][color=#6B46C1][b]Q-NarwhalKnight[/b][/color][/size]
+[size=14pt][color=#805AD5]Quantum-Enhanced DAG-BFT Consensus System[/color][/size]
+
+[img]https://quillon.xyz/logo-256.png[/img]
+
+[size=12pt][b]Post-Quantum Cryptography | Complete Tor Integration | 160,000+ TPS | DAG-Knight Consensus[/b][/size]
+
+[url=https://quillon.xyz][b]Website[/b][/url] | [url=https://quillon.xyz/whitepaper][b]Whitepaper[/b][/url] | [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf][b]Technical Report[/b][/url]
+[/center]
+
+[size=18pt][color=#6B46C1][b]Introduction[/b][/color][/size]
+[hr]
+
+Q-NarwhalKnight represents a fundamental advancement in blockchain technology, combining quantum-resistant cryptography with high-performance DAG-based consensus. Built from scratch in Rust with 680,000+ lines of production code, this is not a fork or derivative - it's a ground-up reimagining of what a blockchain can be.
+
+[b]Why Another Blockchain?[/b]
+
+The threat landscape has evolved dramatically since Bitcoin's 2008 announcement:
+[list]
+[li]Quantum computers threaten ECDSA signatures used by Bitcoin and Ethereum[/li]
+[li]Chain analysis firms have deanonymized millions of "pseudonymous" transactions[/li]
+[li]7 TPS is no longer acceptable when Visa processes 65,000+[/li]
+[li]60-minute finality creates unacceptable user experience[/li]
+[/list]
+
+Q-NarwhalKnight addresses all of these with production-ready solutions, not theoretical proposals.
+
+
+[size=18pt][color=#6B46C1][b]Project Statistics (January 2026)[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Total Lines of Code[/b][/td]
+[td]680,000+[/td]
+[td][b]Source Files[/b][/td]
+[td]1,400+[/td]
+[/tr]
+[tr]
+[td][b]Crate Count[/b][/td]
+[td]90+[/td]
+[td][b]Test Coverage[/b][/td]
+[td]4,500+ tests[/td]
+[/tr]
+[tr]
+[td][b]Network Height[/b][/td]
+[td]1,050,000+ blocks[/td]
+[td][b]Active Miners[/b][/td]
+[td]7+[/td]
+[/tr]
+[tr]
+[td][b]Target TPS[/b][/td]
+[td]160,000+[/td]
+[td][b]Block Finality[/b][/td]
+[td]<50ms[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]Key Features[/b][/color][/size]
+[hr]
+
+[size=14pt][color=#805AD5][b]Post-Quantum Cryptography[/b][/color][/size]
+
+We assume quantum adversaries exist [b]today[/b]. All cryptographic primitives are NIST-standardized post-quantum algorithms:
+
+[list]
+[li][b]CRYSTALS-Dilithium5[/b] - Lattice-based digital signatures (NIST FIPS 204)[/li]
+[li][b]Kyber1024[/b] - Post-quantum key encapsulation (NIST FIPS 203)[/li]
+[li][b]SHA3-256[/b] - Quantum-resistant hashing[/li]
+[li][b]Crypto-Agile Framework[/b] - Seamless algorithm migration without hard forks[/li]
+[/list]
+
+[quote]
+"Harvest now, decrypt later" attacks mean your transactions today could be decrypted by future quantum computers. Q-NarwhalKnight protects against this threat [b]now[/b].
+[/quote]
+
+
+[size=14pt][color=#805AD5][b]Complete Tor Integration[/b][/color][/size]
+
+Full anonymity layer with enterprise-grade privacy features:
+
+[table]
+[tr]
+[td][b]Feature[/b][/td]
+[td][b]Description[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]Embedded Arti Client[/td]
+[td]Native Tor integration, no external dependencies[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]4 Dedicated Circuits[/td]
+[td]Isolated circuits per validator (Tor Proposal 368)[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]Vanguards-lite[/td]
+[td]Guard node protection (Tor Proposal 292)[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]Traffic Shaping[/td]
+[td]Bandwidth fingerprinting protection[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]Dandelion++ Gossip[/td]
+[td]Transaction privacy via stem/fluff propagation[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]Bridge Support[/td]
+[td]obfs4, meek, snowflake for censorship resistance[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[/table]
+
+[b]Performance via Tor:[/b]
+[list]
+[li]Consensus Latency: 145ms (vs 12ms direct)[/li]
+[li]Throughput: 48,000+ TPS[/li]
+[li]IP Leakage Risk: 0%[/li]
+[li]Circuit Establishment: <500ms (prewarmed)[/li]
+[/list]
+
+
+[size=14pt][color=#805AD5][b]DAG-Knight Consensus[/b][/color][/size]
+
+Revolutionary consensus mechanism combining the best of DAG structure with BFT security:
+
+[list]
+[li][b]Zero-Message Complexity BFT[/b] - No coordinator, pure P2P[/li]
+[li][b]VDF-Based Anchor Election[/b] - Verifiable delay functions prevent manipulation[/li]
+[li][b]Multi-Parent DAG[/b] - No orphan blocks, all work contributes to security[/li]
+[li][b]Sub-50ms Finality[/b] - Transactions confirmed in milliseconds, not minutes[/li]
+[li][b]160,000+ TPS[/b] - Scales horizontally with validator count[/li]
+[/list]
+
+[code]
+Consensus Comparison:
+                    Bitcoin     Ethereum    Solana      Q-NarwhalKnight
+Finality            60 min      12 min      400ms       <50ms
+TPS                 7           30          65,000      160,000+
+Quantum-Safe        No          No          No          Yes
+Privacy             None        None        None        Full Tor + ZK
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Technical Architecture[/b][/color][/size]
+[hr]
+
+[b]Modular Rust Workspace[/b]
+
+[code]
+Application Layer
+├── q-api-server (91,923 lines) - REST API, SSE streaming
+├── q-wallet - HD wallet with post-quantum keys
+├── q-miner - Mining client with GPU support
+└── q-tui - Terminal UI for node operators
+
+Consensus & Network
+├── q-dag-knight (8,730 lines) - DAG-Knight consensus engine
+├── q-narwhal-core (9,383 lines) - Narwhal mempool
+├── q-network (45,392 lines) - libp2p P2P networking
+└── q-resonance - Swarm intelligence coordination
+
+Storage & Cryptography
+├── q-storage (64,830 lines) - RocksDB state management
+├── q-crypto-advanced (6,757 lines) - Post-quantum primitives
+├── q-tor-client (26,737 lines) - Full Tor integration
+└── q-vm (53,447 lines) - WASM smart contract execution
+
+Core Types
+├── q-types (17,137 lines) - Type definitions
+└── q-dex (6,004 lines) - Decentralized exchange
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Multi-Layer Security[/b][/color][/size]
+[hr]
+
+Defense-in-depth with multiple specialized security crates:
+
+[table]
+[tr]
+[td][b]Crate[/b][/td]
+[td][b]Protection[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]q-consensus-guard[/td]
+[td]Height-gated upgrades, mainnet-safe deployments[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]q-lattice-guard[/td]
+[td]RLWE-based post-quantum SNARKs[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]q-temporal-shield[/td]
+[td]HSM-backed time-lock encryption (17-of-32 threshold)[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]q-zk-stark[/td]
+[td]Transparent zero-knowledge proofs (no trusted setup)[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]q-zk-snark[/td]
+[td]Groth16 and PLONK for efficient verification[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[tr]
+[td]q-crypto-advanced[/td]
+[td]Bulletproofs range proofs, ring signatures[/td]
+[td][color=green]Production[/color][/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]Decentralized Plugin System[/b][/color][/size]
+[hr]
+
+Extensible blockchain functionality through sandboxed WASM execution:
+
+[list]
+[li][b]Sandboxed Execution[/b] - WASM isolation (100MB memory, 5s timeout)[/li]
+[li][b]Consensus Verification[/b] - Plugin state changes verified via DAG-Knight[/li]
+[li][b]P2P Distribution[/b] - Automatic propagation via gossipsub[/li]
+[li][b]Dual Signatures[/b] - Ed25519 (Phase 0) + Dilithium5 (Phase 1)[/li]
+[li][b]Hot Reloading[/b] - Dynamic updates without node restart[/li]
+[/list]
+
+[code]
+// Plugin manifest example
+[plugin]
+name = "quantum-mixer"
+version = "1.0.0"
+api_version = "3.5.0"
+
+[permissions]
+state_read = true
+state_write = true
+consensus_participation = true
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Decentralized Exchange (DEX)[/b][/color][/size]
+[hr]
+
+On-chain AMM with quantum-resistant atomic swaps:
+
+[list]
+[li]Constant product market maker (x * y = k)[/li]
+[li]Quantum-resistant swap signatures[/li]
+[li]MEV protection via encrypted mempool[/li]
+[li]Cross-chain bridge preparation[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Roadmap[/b][/color][/size]
+[hr]
+
+[b]Phase 0: Foundation[/b] [color=green]COMPLETE[/color]
+[list]
+[li]Core types and DAG-Knight consensus[/li]
+[li]Narwhal mempool with reliable broadcast[/li]
+[li]libp2p networking infrastructure[/li]
+[/list]
+
+[b]Phase 1: Post-Quantum[/b] [color=green]COMPLETE[/color]
+[list]
+[li]Dilithium5 signatures in production[/li]
+[li]Kyber1024 key exchange[/li]
+[li]Crypto-agile migration framework[/li]
+[/list]
+
+[b]Phase 2: Privacy & Scale[/b] [color=green]COMPLETE[/color]
+[list]
+[li]Complete Tor integration (4 phases)[/li]
+[li]Turbo Sync protocol (1000+ blocks/sec)[/li]
+[li]Distributed AI inference[/li]
+[li]DEX implementation[/li]
+[/list]
+
+[b]Phase 3: Production[/b] [color=orange]IN PROGRESS[/color]
+[list]
+[li]GPU-accelerated consensus verification[/li]
+[li]Advanced Tor circuits with QRNG seeding[/li]
+[li]External security audits[/li]
+[li][b]Mainnet Launch: Q4 2026[/b][/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Performance Targets[/b][/color][/size]
+[hr]
+
+[code]
+TPS Progression:
+Current  → Q1 2026 → Q2 2026 → Mainnet
+160K       400K       750K       1M+
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]How to Participate[/b][/color][/size]
+[hr]
+
+[b]Run a Node:[/b]
+[code]
+wget https://quillon.xyz/downloads/q-api-server-v3.5.11-beta
+chmod +x q-api-server-v3.5.11-beta
+./q-api-server-v3.5.11-beta --port 8080
+[/code]
+
+[b]Bootstrap Peer:[/b]
+[code]
+/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWFrhdwDDTgxPX41mUyRgLcE1ozsBYArKM4DT8t4VLwuNx
+[/code]
+
+
+[size=18pt][color=#6B46C1][b]Technical Specifications[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Property[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Consensus[/td]
+[td]DAG-BFT with VDF anchor election[/td]
+[/tr]
+[tr]
+[td]Finality[/td]
+[td]<50 milliseconds[/td]
+[/tr]
+[tr]
+[td]Throughput[/td]
+[td]160,000+ TPS (target 1M+)[/td]
+[/tr]
+[tr]
+[td]Block Structure[/td]
+[td]Multi-parent DAG (no orphans)[/td]
+[/tr]
+[tr]
+[td]Signatures[/td]
+[td]CRYSTALS-Dilithium5 (NIST FIPS 204)[/td]
+[/tr]
+[tr]
+[td]Key Exchange[/td]
+[td]Kyber1024 (NIST FIPS 203)[/td]
+[/tr]
+[tr]
+[td]Hash Function[/td]
+[td]SHA3-256[/td]
+[/tr]
+[tr]
+[td]P2P Protocol[/td]
+[td]libp2p + Noise encryption[/td]
+[/tr]
+[tr]
+[td]Privacy Layer[/td]
+[td]Full Tor + Dandelion++ + ZK proofs[/td]
+[/tr]
+[tr]
+[td]Smart Contracts[/td]
+[td]WASM VM with sandboxed execution[/td]
+[/tr]
+[tr]
+[td]Network[/td]
+[td]testnet-phase19[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]Links[/b][/color][/size]
+[hr]
+
+[list]
+[li][b]Website:[/b] [url=https://quillon.xyz]https://quillon.xyz[/url][/li]
+[li][b]Whitepaper:[/b] [url=https://quillon.xyz/whitepaper]https://quillon.xyz/whitepaper[/url][/li]
+[li][b]Technical Report:[/b] [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf]Project Report v3.5.0[/url][/li]
+[li][b]Node Binary:[/b] [url=https://quillon.xyz/downloads/q-api-server-v3.5.11-beta]Linux x86_64[/url][/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Disclaimer[/b][/color][/size]
+[hr]
+
+[i]This is experimental software in active development. The testnet is live and functional with 1,050,000+ blocks produced. Mainnet launch planned for Q4 2026 following external security audits. Do your own research before participating.[/i]
+
+
+[center]
+[size=12pt][color=#805AD5][b]"The future is quantum. The future is decentralized. The future is private."[/b][/color][/size]
+
+[size=10pt]Q-NarwhalKnight v3.5.0 | January 2026 | 680,000+ lines of Rust[/size]
+[/center]

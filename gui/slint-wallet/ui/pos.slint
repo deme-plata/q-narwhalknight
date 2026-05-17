@@ -1,0 +1,466 @@
+import { Theme, Card, GradientCard, QButton, QInput, Icon } from "theme.slint";
+
+export component PosScreen inherits Rectangle {
+    // State: 0=form, 1=waiting, 2=received
+    in property <int> pos-state: 0;
+    in property <string> address: "";
+    in property <image> qr-image;
+    in property <int> wait-seconds: 0;
+    in property <string> received-amount: "0";
+    in-out property <string> amount-text: "";
+    in-out property <string> memo-text: "";
+
+    callback create-payment-request(string, string);
+    callback cancel-payment-request();
+    callback go-back();
+    callback new-request();
+
+    background: Theme.bg-primary;
+
+    // ═══ STATE 0: Payment Request Form ═══
+    if root.pos-state == 0 : VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header with back button
+        HorizontalLayout {
+            height: 36px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 60px;
+                border-radius: Theme.radius-sm;
+                background: back-touch0.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch0 := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 3px;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.accent-cyan;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Back";
+                        color: Theme.accent-cyan;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Text {
+                text: "Request Payment";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                horizontal-alignment: center;
+            }
+
+            Rectangle { width: 60px; }
+        }
+
+        // Amount input card with cyan glow
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-lg;
+            border-width: 2px;
+            border-color: Theme.accent-cyan.with-alpha(0.4);
+            drop-shadow-blur: 12px;
+            drop-shadow-color: Theme.accent-cyan.with-alpha(0.08);
+
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                spacing: Theme.spacing-md;
+
+                Text {
+                    text: "Amount (QUG)";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+
+                QInput {
+                    text <=> root.amount-text;
+                    placeholder: "0.00";
+                    input-type: InputType.decimal;
+                    accepted(t) => {
+                        if root.amount-text != "" {
+                            root.create-payment-request(root.amount-text, root.memo-text);
+                        }
+                    }
+                }
+
+                // Quick presets
+                Text {
+                    text: "Quick Amount";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    for preset in [
+                        { val: "1" },
+                        { val: "5" },
+                        { val: "10" },
+                        { val: "50" },
+                        { val: "100" },
+                    ] : Rectangle {
+                        horizontal-stretch: 1;
+                        height: 40px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: root.amount-text == preset.val ? Theme.accent-cyan : Theme.border;
+                        background: root.amount-text == preset.val
+                            ? Theme.accent-cyan.with-alpha(0.15)
+                            : (preset-touch.has-hover ? Theme.bg-hover : Theme.bg-card);
+                        drop-shadow-blur: preset-touch.has-hover ? 4px : 0px;
+                        drop-shadow-color: Theme.accent-cyan.with-alpha(0.1);
+                        animate background, border-color, drop-shadow-blur { duration: 100ms; }
+
+                        preset-touch := TouchArea {
+                            clicked => { root.amount-text = preset.val; }
+                        }
+
+                        Text {
+                            text: preset.val;
+                            color: root.amount-text == preset.val ? Theme.accent-cyan : Theme.text-secondary;
+                            font-size: Theme.font-md;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Memo input
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Memo / Description";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                }
+
+                QInput {
+                    text <=> root.memo-text;
+                    placeholder: "e.g. Coffee x2, Table 5";
+                }
+            }
+        }
+
+        // Spacer
+        Rectangle { vertical-stretch: 1; }
+
+        // Generate button — cyan gradient style
+        Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-md;
+            background: root.amount-text != ""
+                ? (gen-touch.pressed ? #0891b2 : (gen-touch.has-hover ? #07a3c4 : Theme.accent-cyan))
+                : Theme.bg-hover;
+            drop-shadow-blur: root.amount-text != "" ? (gen-touch.pressed ? 2px : 10px) : 0px;
+            drop-shadow-offset-y: gen-touch.pressed ? 0px : 3px;
+            drop-shadow-color: root.amount-text != "" ? Theme.accent-cyan.with-alpha(0.3) : transparent;
+            animate background, drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+            gen-touch := TouchArea {
+                enabled: root.amount-text != "";
+                clicked => {
+                    root.create-payment-request(root.amount-text, root.memo-text);
+                }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                Icon {
+                    source: @image-url("icons/qr-code.svg");
+                    icon-color: root.amount-text != "" ? white : Theme.text-muted;
+                    width: Theme.icon-lg;
+                    height: Theme.icon-lg;
+                }
+                Text {
+                    text: "Generate Payment QR";
+                    color: root.amount-text != "" ? white : Theme.text-muted;
+                    font-size: Theme.font-md;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ═══ STATE 1: Waiting for Payment ═══
+    if root.pos-state == 1 : VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Top bar: cancel button
+        HorizontalLayout {
+            height: 36px;
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Rectangle {
+                width: 72px;
+                border-radius: Theme.radius-sm;
+                background: cancel-touch.has-hover ? Theme.accent-red.with-alpha(0.1) : transparent;
+
+                cancel-touch := TouchArea {
+                    clicked => { root.cancel-payment-request(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Icon {
+                        source: @image-url("icons/x.svg");
+                        icon-color: Theme.accent-red;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Cancel";
+                        color: Theme.accent-red;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Amount display
+        Text {
+            text: root.amount-text + " QUG";
+            color: Theme.text-primary;
+            font-size: Theme.font-3xl;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        // Memo
+        if root.memo-text != "" : Text {
+            text: root.memo-text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        // QR Code with amber glow
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 308px;
+                height: 308px;
+                border-radius: Theme.radius-lg;
+                border-width: 3px;
+                border-color: Theme.pos-waiting;
+                background: white;
+                drop-shadow-blur: 20px;
+                drop-shadow-color: Theme.pos-waiting.with-alpha(0.25);
+
+                Image {
+                    source: root.qr-image;
+                    width: 296px;
+                    height: 296px;
+                    image-fit: contain;
+                }
+            }
+        }
+
+        // Pulsing waiting indicator
+        HorizontalLayout {
+            alignment: center;
+            spacing: Theme.spacing-sm;
+            height: 28px;
+
+            // Amber pulsing dot
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: Theme.pos-waiting;
+
+                // Outer pulse ring
+                Rectangle {
+                    x: -5px;
+                    y: -5px;
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 10px;
+                    background: Theme.pos-waiting.with-alpha(0.3);
+                }
+            }
+
+            Text {
+                text: "Waiting for payment...";
+                color: Theme.pos-waiting;
+                font-size: Theme.font-sm;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+
+        // Elapsed time
+        Text {
+            text: root.wait-seconds >= 60
+                ? Math.floor(root.wait-seconds / 60) + "m " + Math.mod(root.wait-seconds, 60) + "s"
+                : root.wait-seconds + "s";
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        // Compact address
+        Text {
+            text: root.address;
+            color: Theme.text-muted;
+            font-size: 10px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // ═══ STATE 2: Payment Received ═══
+    if root.pos-state == 2 : VerticalLayout {
+        padding: Theme.spacing-lg;
+        spacing: Theme.spacing-lg;
+        alignment: center;
+
+        // Big green checkmark circle
+        HorizontalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 120px;
+                height: 120px;
+                border-radius: 60px;
+                background: Theme.pos-received.with-alpha(0.15);
+                drop-shadow-blur: 24px;
+                drop-shadow-color: Theme.pos-received.with-alpha(0.3);
+
+                // Inner circle
+                Rectangle {
+                    x: 15px;
+                    y: 15px;
+                    width: 90px;
+                    height: 90px;
+                    border-radius: 45px;
+                    background: Theme.pos-received.with-alpha(0.25);
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/circle-check-big.svg");
+                        icon-color: Theme.pos-received;
+                        width: 56px;
+                        height: 56px;
+                    }
+                }
+            }
+        }
+
+        // Payment received text
+        Text {
+            text: "Payment Received!";
+            color: Theme.pos-received;
+            font-size: Theme.font-xl;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        // Amount
+        Text {
+            text: root.received-amount + " QUG";
+            color: Theme.text-primary;
+            font-size: Theme.font-3xl;
+            font-weight: 700;
+            horizontal-alignment: center;
+        }
+
+        // Memo
+        if root.memo-text != "" : Text {
+            text: root.memo-text;
+            color: Theme.text-secondary;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        // Action buttons
+        VerticalLayout {
+            spacing: Theme.spacing-sm;
+
+            // New payment request button (cyan)
+            Rectangle {
+                height: 48px;
+                border-radius: Theme.radius-md;
+                background: new-touch.pressed ? #0891b2 : (new-touch.has-hover ? #07a3c4 : Theme.accent-cyan);
+                drop-shadow-blur: new-touch.pressed ? 2px : 8px;
+                drop-shadow-offset-y: new-touch.pressed ? 0px : 2px;
+                drop-shadow-color: Theme.accent-cyan.with-alpha(0.3);
+                animate background, drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+                new-touch := TouchArea {
+                    clicked => {
+                        root.amount-text = "";
+                        root.memo-text = "";
+                        root.new-request();
+                    }
+                }
+
+                Text {
+                    text: "New Payment Request";
+                    color: white;
+                    font-size: Theme.font-md;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            // Back to wallet button (gray)
+            Rectangle {
+                height: 44px;
+                border-radius: Theme.radius-md;
+                background: wallet-touch.has-hover ? Theme.bg-hover : transparent;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                wallet-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                Text {
+                    text: "Back to Wallet";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-md;
+                    font-weight: 500;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

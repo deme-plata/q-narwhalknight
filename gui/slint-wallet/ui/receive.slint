@@ -1,0 +1,190 @@
+import { Theme, Card, QButton, Icon } from "theme.slint";
+
+export component ReceiveScreen inherits Rectangle {
+    in property <image> qr-code-image;
+    in property <string> address: "";
+    in property <string> qug-balance: "0.00";
+
+    callback copy-address();
+    callback go-back();
+    callback open-pos();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header with back button
+        HorizontalLayout {
+            height: 32px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 60px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 3px;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.accent-blue;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Back";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Text {
+                text: "Receive";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                horizontal-alignment: center;
+            }
+
+            // Spacer to balance the back button
+            Rectangle { width: 60px; }
+        }
+
+        // QR Code Card
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                alignment: center;
+                spacing: Theme.spacing-md;
+
+                Text {
+                    text: "Scan to send QUG";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-md;
+                    horizontal-alignment: center;
+                }
+
+                // QR Code image centered with white background
+                HorizontalLayout {
+                    alignment: center;
+
+                    Rectangle {
+                        width: 248px;
+                        height: 248px;
+                        border-radius: Theme.radius-md;
+                        background: white;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #000000.with-alpha(0.2);
+
+                        Image {
+                            source: root.qr-code-image;
+                            width: 240px;
+                            height: 240px;
+                            image-fit: contain;
+                        }
+                    }
+                }
+
+                Text {
+                    text: "QUG Balance: " + root.qug-balance;
+                    color: Theme.accent-green;
+                    font-size: Theme.font-lg;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // PoS Button — gradient cyan-to-blue
+        Rectangle {
+            height: 56px;
+            border-radius: Theme.radius-md;
+            background: pos-touch.pressed
+                ? @linear-gradient(90deg, #0891b2, #2563eb)
+                : @linear-gradient(90deg, #06b6d4, #3b82f6);
+            drop-shadow-blur: pos-touch.pressed ? 2px : 12px;
+            drop-shadow-offset-y: pos-touch.pressed ? 0px : 3px;
+            drop-shadow-color: Theme.accent-cyan.with-alpha(0.3);
+            animate drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+            pos-touch := TouchArea {
+                clicked => { root.open-pos(); }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                Icon {
+                    source: @image-url("icons/qr-code.svg");
+                    icon-color: white;
+                    width: Theme.icon-lg;
+                    height: Theme.icon-lg;
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Request Payment";
+                        color: white;
+                        font-size: Theme.font-md;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: "Point of Sale Mode";
+                        color: white.with-alpha(0.7);
+                        font-size: Theme.font-xs;
+                    }
+                }
+            }
+        }
+
+        // Address Card
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Your Wallet Address";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
+                }
+
+                // Full address (selectable-looking, monospace feel)
+                Rectangle {
+                    height: 48px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-primary;
+
+                    Text {
+                        text: root.address;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // Copy button
+                QButton {
+                    label: "Copy Address";
+                    clicked => { root.copy-address(); }
+                }
+            }
+        }
+    }
+}

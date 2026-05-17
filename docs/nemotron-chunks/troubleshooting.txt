@@ -1,0 +1,58 @@
+TOPIC: Troubleshooting Common Issues
+
+## Wallet Issues
+
+**Can't see my balance:**
+- Make sure your wallet is synced (check block height in status bar)
+- Balance updates arrive via SSE — refresh the page if needed
+- New wallets start at 0 QUG — you need to mine or receive QUG
+
+**Lost my mnemonic phrase:**
+- Unfortunately, there is no recovery without the mnemonic phrase
+- The mnemonic IS your private key — no one else can recover it
+- Always write it down and store it safely
+
+**Transaction stuck/pending:**
+- Quillon has ~1 second block times, transactions confirm almost instantly
+- If stuck, check that your node is synced to the latest block height
+- Ensure you have enough QUG to cover the transaction fee
+
+## Mining Issues
+
+**Miner won't connect:**
+- Check internet connection
+- Try: `./q-miner --server https://quillon.xyz --wallet qnk<address>`
+- If primary fails, miner auto-falls back to backup servers
+- Check firewall: miner needs HTTP/HTTPS outbound access
+
+**Low hashrate:**
+- CPU mining: normal range is 1-100 KH/s depending on CPU
+- GPU mining: normal range is 100 KH/s - 10 MH/s depending on GPU
+- Close other CPU-heavy applications
+- Use `--threads N` to control how many cores to use
+
+**No rewards showing:**
+- Mining rewards appear in real-time via SSE
+- Check that your wallet address is correct
+- Rewards are proportional to your hashrate vs network hashrate
+- Small hashrate = less frequent rewards (but same expected value)
+
+## Node Issues
+
+**Node won't sync:**
+- Check that port 9001 (P2P) is open for incoming connections
+- Verify bootstrap peers are reachable
+- Check disk space — blockchain needs several GB
+- Try adding `--p2p-port 9001` explicitly
+
+**Node crashes with OOM:**
+- Set `ROCKSDB_BLOCK_CACHE_MB=512` for low-memory systems
+- Minimum recommended RAM: 4 GB (8 GB recommended)
+- Add swap space if RAM is tight
+
+## DEX Issues
+
+**Swap failed:**
+- Check you have enough QUG for the swap amount + gas fee
+- Check slippage tolerance — high slippage on thin pools
+- The pool must have enough liquidity for your trade size

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SSE Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #0f0; }
+        .event { border: 1px solid #0f0; margin: 10px 0; padding: 10px; }
+        .match { background: #004400; }
+        .nomatch { background: #440000; }
+    </style>
+</head>
+<body>
+    <h1>SSE Balance Update Test</h1>
+    <div>
+        <label>Your wallet address:
+            <input type="text" id="walletInput" style="width: 600px; background: #000; color: #0f0; border: 1px solid #0f0;"
+                   value="qnk02698d86f5e69b8c8c8e0a1939bf98df45cd767ab3cdfc1f81251dad36817fa7">
+        </label>
+    </div>
+    <div id="status">Connecting to SSE...</div>
+    <div id="events"></div>
+
+    <script>
+        const eventsDiv = document.getElementById('events');
+        const statusDiv = document.getElementById('status');
+        const walletInput = document.getElementById('walletInput');
+
+        const eventSource = new EventSource('/api/v1/events');
+
+        eventSource.onopen = () => {
+            statusDiv.textContent = '✅ Connected to SSE';
+            statusDiv.style.color = '#0f0';
+        };
+
+        eventSource.onerror = () => {
+            statusDiv.textContent = '❌ SSE connection error';
+            statusDiv.style.color = '#f00';
+        };
+
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('SSE Event:', data);
+
+                const eventDiv = document.createElement('div');
+                eventDiv.className = 'event';
+
+                if (data.type === 'balance-updated') {
+                    const walletAddress = walletInput.value;
+                    const currentHex = walletAddress.startsWith('qnk')
+                        ? walletAddress.substring(3)
+                        : walletAddress;
+                    const eventHex = data.data.wallet_address;
+                    const match = eventHex === currentHex;
+
+                    eventDiv.className += match ? ' match' : ' nomatch';
+                    eventDiv.innerHTML = `
+                        <strong>Balance Updated Event</strong><br>
+                        Event Type: ${data.type}<br>
+                        Event Wallet (hex): ${eventHex}<br>
+                        Current Wallet (qnk): ${walletAddress}<br>
+                        Current Wallet (hex): ${currentHex}<br>
+                        Match: ${match ? '✅ YES' : '❌ NO'}<br>
+                        Old Balance: ${data.data.old_balance} QNK<br>
+                        New Balance: ${data.data.new_balance} QNK<br>
+                        Reason: ${data.data.change_reason}<br>
+                        Timestamp: ${data.data.timestamp}<br>
+                        <br>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    eventDiv.innerHTML = `
+                        <strong>Other Event: ${data.type}</strong><br>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                }
+
+                eventsDiv.insertBefore(eventDiv, eventsDiv.firstChild);
+            } catch (e) {
+                console.error('Error parsing SSE event:', e);
+            }
+        };
+    </script>
+</body>
+</html>

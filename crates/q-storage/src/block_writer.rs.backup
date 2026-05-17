@@ -1,0 +1,268 @@
+/// Single-threaded block writer to prevent parallel write conflicts
+///
+/// This module implements Phase 1 of the Database Durability Rescue Plan.
+/// It serializes all block writes through a single async task to eliminate
+/// the parallel write conflicts that caused 11 occurrences of data corruption.
+///
+/// Key Features:
+/// - Single commit queue (no parallel writes to qblock:latest)
+/// - Duplicate detection (prevents double-writes)
+/// - Conditional pointer updates (only extends chain)
+/// - Write verification (detects phantom writes)
+///
+/// Expert Validation:
+/// - ChatGPT: "This eliminates the root cause"
+/// - DeepSeek: "Deploy immediately"
+/// - Kimi AI: "90% reduction in corruption risk"
+
+use std::sync::Arc;
+use tokio::sync::{mpsc, oneshot};
+use anyhow::{Result, Context, bail};
+use tracing::{info, warn, error, debug};
+use q_types::block::QBlock;
+use crate::kv::KVStore;
+use crate::CF_BLOCKS;
+
+/// Message sent to the commit worker
+struct CommitMsg {
+    block: QBlock,
+    reply: oneshot::Sender<Result<()>>,
+}
+
+/// Single-threaded block writer
+///
+/// All save_qblock() calls go through this writer, which
+/// processes them sequentially in a dedicated task.
+pub struct BlockWriter {
+    commit_tx: mpsc::Sender<CommitMsg>,
+}
+
+impl BlockWriter {
+    /// Create a new BlockWriter
+    ///
+    /// This spawns a background task that processes blocks sequentially.
+    /// The task runs until the BlockWriter is dropped.
+    pub fn new(hot_db: Arc<dyn KVStore>) -> Self {
+        let (commit_tx, mut commit_rx) = mpsc::channel::<CommitMsg>(2048);
+
+        // Spawn dedicated commit worker (SINGLE THREAD)
+        tokio::spawn(async move {
+            use tokio::time::{timeout, Duration, Instant};
+
+            info!("🔒 Block writer worker started (single-threaded commit queue)");
+
+            // 🚨 v0.9.94-beta: DEADLOCK PREVENTION - Circuit breaker and watchdog
+            // Expert consensus: ChatGPT, Kimi AI, DeepSeek (95% confidence)
+            // These additions detect and contain failures, preventing silent deadlocks
+
+            let mut consecutive_errors = 0usize;
+            const MAX_CONSECUTIVE_ERRORS: usize = 5;
+            const RECV_TIMEOUT: Duration = Duration::from_secs(10);
+            const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+            let mut blocks_processed = 0u64;
+            let worker_start = Instant::now();
+
+            loop {
+                // WATCHDOG: Detect receiver starvation with timeout
+                // If no messages for 10s, log heartbeat to prove task is alive
+                let msg = match timeout(RECV_TIMEOUT, commit_rx.recv()).await {
+                    Ok(Some(m)) => m,
+                    Ok(None) => {
+                        info!("🛑 Block writer channel closed gracefully (processed {} blocks)", blocks_processed);
+                        break;
+                    }
+                    Err(_) => {
+                        // No messages for 10 seconds - log heartbeat
+                        debug!("⏱️ BlockWriter: no messages for 10s (processed {} blocks in {:?}, errors={})",
+                              blocks_processed, worker_start.elapsed(), consecutive_errors);
+                        continue;
+                    }
+                };
+
+                let block_height = msg.block.header.height;
+                blocks_processed += 1;
+
+                // Periodic status report every 100 blocks
+                if blocks_processed % 100 == 0 {
+                    info!("📊 BlockWriter: processed {} blocks in {:?}, consecutive_errors={}",
+                          blocks_processed, worker_start.elapsed(), consecutive_errors);
+                }
+
+                // CIRCUIT BREAKER: Stop processing if too many consecutive errors
+                // This prevents cascading failures and makes the problem loud
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    error!("🚨 Circuit breaker OPEN - too many consecutive write errors ({})", consecutive_errors);
+                    error!("   BlockWriter is in degraded state. Check RocksDB health!");
+                    let _ = msg.reply.send(Err(anyhow::anyhow!(
+                        "Circuit breaker open after {} consecutive errors", consecutive_errors
+                    )));
+                    consecutive_errors += 1; // Keep counting for metrics
+                    continue;
+                }
+
+                info!("📥 BlockWriter received block at height {}", block_height);
+
+                // Add timeout to the entire write operation
+                // This ensures we detect slow writes and don't silently hang
+                let write_start = Instant::now();
+                let result = match timeout(WRITE_TIMEOUT, Self::save_qblock_internal(&hot_db, &msg.block)).await {
+                    Ok(Ok(())) => {
+                        debug!("✅ Block {} saved in {:?}", block_height, write_start.elapsed());
+                        consecutive_errors = 0; // Reset on success
+                        Ok(())
+                    }
+                    Ok(Err(e)) => {
+                        error!("❌ Block {} write failed: {}", block_height, e);
+                        consecutive_errors += 1;
+                        Err(e)
+                    }
+                    Err(_) => {
+                        error!("⏰ Block {} write TIMEOUT after {:?}", block_height, WRITE_TIMEOUT);
+                        error!("   This indicates RocksDB is stalling. Check disk I/O!");
+                        consecutive_errors += 1;
+                        Err(anyhow::anyhow!("Write timeout after {:?}", WRITE_TIMEOUT))
+                    }
+                };
+
+                // Send response (oneshot::send is non-blocking)
+                if let Err(_) = msg.reply.send(result) {
+                    warn!("⚠️ Failed to send reply for block {} (receiver dropped)", block_height);
+                } else {
+                    debug!("📤 Reply sent for block {}", block_height);
+                }
+            }
+
+            info!("🛑 Block writer worker stopped (processed {} blocks in {:?})",
+                  blocks_processed, worker_start.elapsed());
+        });
+
+        Self { commit_tx }
+    }
+
+    /// Internal save logic (runs in dedicated task)
+    ///
+    /// This implements:
+    /// - Fix 1.2: Duplicate detection
+    /// - Fix 1.3: Conditional pointer update
+    /// - Fix 1.5: Write verification
+    async fn save_qblock_internal(db: &Arc<dyn KVStore>, block: &QBlock) -> Result<()> {
+        let start_time = std::time::SystemTime::now();
+        let block_hash = block.calculate_hash();
+        let height = block.header.height;
+
+        // FIX 1.2: DUPLICATE DETECTION (Idempotent)
+        // 🚨 v0.9.99-beta: IDEMPOTENCY FIX - Return Ok() on duplicate (not an error)
+        // Expert consensus: ChatGPT, DeepSeek, Kimi AI (95% confidence)
+        // Lock-free producer (v0.9.93) allows concurrent writes of same block
+        // Idempotent writes prevent circuit breaker from tripping on duplicates
+        // Note: No height pointer desync because we skip the batch write below
+        let height_key = format!("qblock:height:{}", height);
+        if let Ok(Some(_)) = db.get(CF_BLOCKS, height_key.as_bytes()).await {
+            debug!("✅ Block already exists at height {} (idempotent write, skipping)", height);
+            return Ok(()); // ✅ Idempotent - not an error
+        }
+
+        info!("💾 Saving QBlock at height {} with hash {}",
+              height, hex::encode(&block_hash[..8]));
+
+        // Serialize block (bincode for consistency)
+        let block_data = bincode::serialize(block)
+            .context("Failed to serialize QBlock")?;
+
+        // FIX 1.3: CONDITIONAL POINTER UPDATE
+        // 🚨 v0.9.95-beta: Check height BEFORE building batch (avoid race)
+        let current_height = match db.get(CF_BLOCKS, b"qblock:latest").await {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                u64::from_be_bytes(bytes.try_into().unwrap())
+            }
+            _ => 0
+        };
+
+        let should_update_pointer = if height == 0 {
+            true // Always set pointer for genesis
+        } else if height == current_height + 1 {
+            true // Normal chain extension
+        } else if height <= current_height {
+            false // Old block or duplicate
+        } else {
+            // Gap detected - log but don't update pointer
+            warn!("📏 Gap detected: current={}, incoming={} (skipping pointer update)",
+                  current_height, height);
+            false
+        };
+
+        // 🚨 v0.9.95-beta: CRITICAL FIX - ATOMIC WRITEBATCH
+        // Expert consensus: ChatGPT, DeepSeek, Kimi AI (99% confidence)
+        // Block data + height pointer MUST be in same WriteBatch (atomic update)
+        // This prevents height pointer drift that caused the 221→242 desync bug
+        let mut batch: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+
+        // Store by height
+        batch.push((
+            CF_BLOCKS,
+            height_key.clone().into_bytes(),
+            block_data.clone()
+        ));
+
+        // Store by hash
+        let hash_key = format!("qblock:hash:{}", hex::encode(block_hash));
+        batch.push((
+            CF_BLOCKS,
+            hash_key.into_bytes(),
+            block_data.clone()
+        ));
+
+        // 🚨 CRITICAL: Add height pointer to SAME batch (atomic with block data!)
+        if should_update_pointer {
+            let latest_height_bytes = height.to_be_bytes().to_vec();
+            batch.push((
+                CF_BLOCKS,
+                b"qblock:latest".to_vec(),
+                latest_height_bytes
+            ));
+            debug!("📌 Pointer update queued in atomic batch: {} → {}", current_height, height);
+        }
+
+        // Write batch to database (SINGLE atomic operation)
+        // Either ALL writes succeed (block + hash + pointer) or NONE do
+        db.write_batch(batch).await
+            .context("Failed to write QBlock batch")?;
+
+        // FIX 1.5: WRITE VERIFICATION
+        // Immediately verify the block is readable
+        match db.get(CF_BLOCKS, height_key.as_bytes()).await {
+            Ok(Some(_)) => {
+                let latency = start_time.elapsed().unwrap_or_default();
+                info!("✅ Saved QBlock {} in {}ms ({} solutions) - VERIFIED",
+                      height, latency.as_millis(), block.mining_solutions.len());
+                Ok(())
+            }
+            Ok(None) => {
+                error!("🚨 CRITICAL: Block {} written but missing on read!", height);
+                bail!("Block write verification failed - phantom write detected");
+            }
+            Err(e) => {
+                error!("🚨 Block {} verification read failed: {}", height, e);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Queue a block for writing
+    ///
+    /// This is the public API called by QStorage. It sends the block to the
+    /// commit queue and waits for the result.
+    pub async fn write_block(&self, block: QBlock) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+
+        self.commit_tx.send(CommitMsg {
+            block,
+            reply: reply_tx,
+        }).await
+        .map_err(|_| anyhow::anyhow!("Block writer channel closed"))?;
+
+        reply_rx.await
+            .map_err(|_| anyhow::anyhow!("Block writer reply channel closed"))?
+    }
+}

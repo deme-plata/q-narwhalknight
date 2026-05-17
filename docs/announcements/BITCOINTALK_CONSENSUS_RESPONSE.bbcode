@@ -1,0 +1,147 @@
+[center][size=16pt][color=#00D9FF]⚛️ Q-NarwhalKnight Consensus Protocol Clarification ⚛️[/color][/size][/center]
+
+[quote]i wanna follow this project
+
+for now i want to inform you, that the consensus protocol is stated here as DAG-Knight
+
+but the consensus protocol of quillon is DAG-RIDER
+
+seems to be very different ones[/quote]
+
+[size=14pt][b][color=#00FF94]Thank you for your interest and for catching this important detail![/color][/b][/size]
+
+You're absolutely correct - let me clarify! 🎯
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🔗 Consensus Protocol Architecture[/color][/b][/size]
+
+Q-NarwhalKnight uses [b][color=#00D9FF]DAG-Knight[/color][/b] (not DAG-RIDER) as the consensus layer on top of Narwhal mempool.
+
+[b]Why DAG-Knight instead of DAG-RIDER?[/b]
+
+DAG-Knight is a [i]newer protocol (2024)[/i] that improves upon DAG-RIDER:
+
+[list]
+[li]⚡ [b]Zero-message complexity[/b] - no additional consensus messages needed[/li]
+[li]🚀 [b]Lower latency[/b] - ~2.3s finality[/li]
+[li]📊 [b]Better throughput[/b] - 48,000+ TPS in testing[/li]
+[li]🔐 [b]Same BFT security guarantees[/b] as DAG-RIDER[/li]
+[/list]
+
+Think of it as an [i]evolution[/i] of the Narwhal+Tusk/DAG-RIDER architecture.
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🏗️ Technical Stack[/color][/b][/size]
+
+[code]
+┌─────────────────────────────────────────────┐
+│  DAG-Knight Consensus                       │
+│  - Zero-message ordering                   │
+│  - VDF-based anchor election               │
+│  - Sub-3s finality                         │
+└─────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────┐
+│  Narwhal Mempool                            │
+│  - Reliable broadcast (Bracha's protocol)  │
+│  - Data availability guarantee              │
+│  - Certificate-based batching               │
+└─────────────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────────────┐
+│  libp2p Networking                          │
+│  - Gossipsub + Kademlia DHT                │
+│  - Post-quantum secure (Dilithium5+Kyber)  │
+└─────────────────────────────────────────────┘
+[/code]
+
+[b]📚 Academic References:[/b]
+[list]
+[li]Narwhal: [url=https://arxiv.org/abs/2105.11827]https://arxiv.org/abs/2105.11827[/url][/li]
+[li]DAG-Knight: [url=https://arxiv.org/abs/2407.07886]https://arxiv.org/abs/2407.07886[/url][/li]
+[/list]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🔧 Wallet Generation Bug Fix[/color][/b][/size]
+
+Thanks for reporting the BIP39 issue! This has been [b][color=#00FF94]fixed in v0.0.20-beta[/color][/b].
+
+[b]What was the bug?[/b]
+Early versions had a bug where the first 12 words of the BIP39 wordlist were being reused. This has been fixed and now uses proper cryptographic randomness.
+
+[color=#FF0000][b]⚠️ If you generated a wallet during the buggy period, please regenerate it with the latest version.[/b][/color]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]✅ Current Status (v0.0.20-beta)[/color][/b][/size]
+
+[table]
+[tr][td][b]Feature[/b][/td][td][b]Status[/b][/td][/tr]
+[tr][td]Decentralized Network[/td][td][color=#00FF94]✅ Operational[/color][/td][/tr]
+[tr][td]Dual Bootstrap Nodes[/td][td][color=#00FF94]✅ Live[/color][/td][/tr]
+[tr][td]Post-Quantum Crypto[/td][td][color=#00FF94]✅ Phase 1 (Dilithium5+Kyber1024)[/color][/td][/tr]
+[tr][td]Cross-Server Mining[/td][td][color=#00FF94]✅ Working (48K+ TPS)[/color][/td][/tr]
+[tr][td]Wallet Generation[/td][td][color=#00FF94]✅ Fixed[/color][/td][/tr]
+[tr][td]Peer Discovery[/td][td][color=#00FF94]✅ mDNS + Kademlia DHT[/color][/td][/tr]
+[/table]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🔮 Coming Soon (v0.0.21-beta)[/color][/b][/size]
+
+[list]
+[li]🧅 [b]Tor integration[/b] with dedicated circuits (4 per validator)[/li]
+[li]🌸 [b]Dandelion++[/b] for enhanced transaction privacy[/li]
+[li]🎨 [b]Enhanced quantum mixer[/b] with 3D visualization[/li]
+[li]📱 [b]Mobile wallet support[/b] (iOS + Android)[/li]
+[/list]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🚀 Try the Network[/color][/b][/size]
+
+[b]Testnet Bootstrap Node:[/b]
+[code]161.35.219.10:18080[/code]
+
+[b]Mainnet Bootstrap Node:[/b]
+[code]185.182.185.227:18081[/code]
+
+[b]Download Binaries:[/b]
+[url=https://quillon.xyz/downloads]https://quillon.xyz/downloads[/url]
+
+[b]GitHub Repository:[/b]
+[url=https://github.com/deme-plata/q-narwhalknight]https://github.com/deme-plata/q-narwhalknight[/url]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🌐 Decentralization Demo[/color][/b][/size]
+
+Users can run their own node and mine locally:
+
+[code]
+# Terminal 1: Start your own node
+./q-api-server --port 8080
+
+# Terminal 2: Mine to your own node
+./q-miner --server http://localhost:8080 \
+          --wallet qnk<your_address> \
+          --threads 4
+[/code]
+
+[b]Or mine to public pool:[/b]
+[code]
+./q-miner --server http://161.35.219.10:18080 \
+          --wallet qnk<your_address> \
+          --threads 8
+[/code]
+
+[hr]
+
+[center][size=14pt][b][color=#00FF94]Thank you for the technical scrutiny - it helps us build a better protocol! 🚀[/color][/b][/size]
+
+[i]Looking forward to your continued involvement in Q-NarwhalKnight![/i]
+
+[b]⚛️ Quantum-Enhanced Anonymous Consensus ⚛️[/b][/center]

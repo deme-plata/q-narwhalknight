@@ -1,0 +1,348 @@
+root@LA8G:~# ./q-api-server-v0.1.1-beta --port 8080
+⚠️  Warning: Could not load .env file: path not found
+    Continuing without .env (environment variables must be set externally)
+2025-10-27T11:43:56.392778Z  INFO q_api_server::config: 🔍 Attempting automatic bootstrap discovery from http://185.182.185.227:8080
+2025-10-27T11:43:56.756905Z  INFO q_api_server::config: ✅ Discovered 1 bootstrap peer(s) automatically
+2025-10-27T11:43:56.756936Z  INFO q_api_server::config:    📡 /ip4/185.182.185.227/tcp/9001/p2p/12D3KooWLkYYeg2HAmYfx1TysN7KA2ywoudzP4dUNoUDGrP2v4kt
+2025-10-27T11:43:56.756948Z  WARN q_api_server::config: ⚡ Fast block production enabled: 2 second intervals (Phase 2 exciting visualization)
+2025-10-27T11:43:56.756959Z  WARN q_api_server::config: ⚡ This is optimized for DAG visualization - consider 5-15s for production
+2025-10-27T11:43:56.756969Z  INFO q_api_server::config: ✅ Configuration validated successfully
+2025-10-27T11:43:56.757029Z  INFO q_api_server: 🌐 ════════════════════════════════════════════════════════
+2025-10-27T11:43:56.757039Z  INFO q_api_server: 🌐 Network: Q-NarwhalKnight Testnet
+2025-10-27T11:43:56.757057Z  INFO q_api_server: 🌐 Chain ID: 1
+2025-10-27T11:43:56.757061Z  INFO q_api_server: 🌐 Version: v0.0.9-beta-testnet
+2025-10-27T11:43:56.757090Z  INFO q_api_server: 🌐 Launch Time: 2025-10-23 00:00:00 UTC
+2025-10-27T11:43:56.757103Z  INFO q_api_server: 🌐 ════════════════════════════════════════════════════════
+2025-10-27T11:43:56.757113Z  INFO q_api_server: Starting Q-NarwhalKnight API Server testnet-node-unknown on port 8080
+2025-10-27T11:43:56.757154Z  INFO q_api_server: 🆔 Generated new node ID: 487b1eb9037399417a00810254af82a88611359605f71766f9ce9b7e28a01742
+2025-10-27T11:43:56.757163Z  INFO q_api_server: 🚀 Initializing Q-NarwhalKnight Triple-Layer Anonymity Network
+2025-10-27T11:43:56.757167Z  INFO q_api_server: 📡 Node ID: 487b1eb9037399417a00810254af82a88611359605f71766f9ce9b7e28a01742
+2025-10-27T11:43:56.757171Z  INFO q_api_server: 🧅 Starting Tor client...
+2025-10-27T11:44:23.412841Z  INFO q_api_server: ✅ Tor client initialized successfully
+2025-10-27T11:44:23.412884Z  INFO q_api_server: ⚠️  Bitcoin Bridge DEACTIVATED - module commented out
+2025-10-27T11:44:23.412893Z  INFO q_api_server: ⚠️  DNS Phantom DEACTIVATED - module commented out
+2025-10-27T11:44:23.412900Z  INFO q_api_server: ⚠️  BEP-44 Discovery DEACTIVATED - module commented out
+2025-10-27T11:44:23.412908Z  INFO q_api_server: 🌐 Initializing libp2p Unified Network Manager for Q-NarwhalKnight Testnet...
+2025-10-27T11:44:23.412988Z  INFO q_network::unified_network_manager: 🚀 Starting Q-NarwhalKnight Zero-Knowledge Discovery
+2025-10-27T11:44:23.413001Z  INFO q_network::unified_network_manager: 🌐 Network: Q-NarwhalKnight Testnet
+2025-10-27T11:44:23.413007Z  INFO q_network::unified_network_manager: 🆔 Local Peer ID: 12D3KooWEMBZFq99oz9JH3Ktey1tYihYXA37BC5XFBwnGqrPDWoz
+2025-10-27T11:44:23.413641Z  INFO q_network::unified_network_manager: ℹ️ No bootstrap peers configured - DHT will populate via mDNS discoveries
+2025-10-27T11:44:23.413656Z  INFO q_network::unified_network_manager: 🌍 Kademlia DHT initialized for clearnet discovery
+2025-10-27T11:44:23.413727Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/blocks
+2025-10-27T11:44:23.413741Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/transactions
+2025-10-27T11:44:23.413749Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/mining-rewards
+2025-10-27T11:44:23.413765Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/dex/swaps
+2025-10-27T11:44:23.413772Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/votes
+2025-10-27T11:44:23.413776Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet Gossipsub topic: /qnk/testnet/ack
+2025-10-27T11:44:23.413952Z  INFO q_network::unified_network_manager: ✅ Zero-Knowledge Discovery initialized successfully!
+2025-10-27T11:44:23.413961Z  INFO q_network::unified_network_manager: 📡 Discovery mechanisms active:
+2025-10-27T11:44:23.413965Z  INFO q_network::unified_network_manager:   • mDNS (local network, <1 second)
+2025-10-27T11:44:23.413970Z  INFO q_network::unified_network_manager:   • Kademlia DHT (global clearnet discovery)
+2025-10-27T11:44:23.413973Z  INFO q_network::unified_network_manager:   • Identify (peer exchange)
+2025-10-27T11:44:23.413977Z  INFO q_network::unified_network_manager:   • Ping (connection keepalive)
+2025-10-27T11:44:23.413981Z  INFO q_network::unified_network_manager:   • Gossipsub (consensus messaging, 6 topics)
+2025-10-27T11:44:23.414000Z  INFO q_api_server: ✅ libp2p Network Manager initialized for Q-NarwhalKnight Testnet
+2025-10-27T11:44:23.414009Z  INFO q_api_server:    Local Peer ID: 12D3KooWEMBZFq99oz9JH3Ktey1tYihYXA37BC5XFBwnGqrPDWoz
+2025-10-27T11:44:23.414019Z  INFO q_api_server:    Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping
+2025-10-27T11:44:23.414023Z  INFO q_api_server:    Network Topics: /qnk/testnet/transactions, /qnk/testnet/blocks, etc.
+2025-10-27T11:44:23.414029Z  INFO q_network::unified_network_manager: 🌉 Gossipsub message forwarding channel established
+2025-10-27T11:44:23.496012Z  INFO q_api_server: 📡 Cached libp2p peer info for bootstrap discovery:
+2025-10-27T11:44:23.496044Z  INFO q_api_server:    Peer ID: 12D3KooWEMBZFq99oz9JH3Ktey1tYihYXA37BC5XFBwnGqrPDWoz
+2025-10-27T11:44:23.496049Z  INFO q_api_server:    Address: /ip4/45.45.218.154/tcp/8081/p2p/12D3KooWEMBZFq99oz9JH3Ktey1tYihYXA37BC5XFBwnGqrPDWoz
+2025-10-27T11:44:23.496133Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: /qnk/database-updates/1.0.0
+2025-10-27T11:44:23.496142Z  INFO q_api_server: 📢 Pre-subscribed to database updates topic for replication
+2025-10-27T11:44:23.496173Z  INFO q_api_server: ✅ libp2p network fully operational
+2025-10-27T11:44:23.496397Z  INFO q_api_server: 🔄 Starting libp2p network event loop...
+2025-10-27T11:44:23.497883Z  INFO q_network::unified_network_manager: 📍 Listening on: /ip4/127.0.0.1/tcp/42559
+2025-10-27T11:44:23.498032Z  INFO q_network::unified_network_manager: 📍 Listening on: /ip6/::1/tcp/37623
+2025-10-27T11:44:23.498063Z  INFO q_network::unified_network_manager: 📍 Listening on: /ip4/45.45.218.154/tcp/42559
+2025-10-27T11:44:23.498084Z  INFO q_network::unified_network_manager: 📍 Listening on: /ip6/fe80::220:d1ff:fe6f:5f73/tcp/37623
+2025-10-27T11:44:23.498100Z  INFO q_network::unified_network_manager: 📍 Listening on: /ip4/172.17.0.1/tcp/42559
+2025-10-27T11:44:23.527162Z  INFO q_network::network_manager: 🌐 Initializing NetworkManager for validator 487b1eb9037399417a00810254af82a88611359605f71766f9ce9b7e28a01742 (Phase Phase1)
+2025-10-27T11:44:49.654331Z  INFO q_api_server: ✅ NetworkManager initialized - DNS-phantom bridge ready
+2025-10-27T11:44:49.654399Z  INFO q_api_server: ✅ Using pre-configured libp2p manager from main.rs
+2025-10-27T11:44:49.654464Z  INFO q_api_server: Loaded 0 wallet balances from persistent storage
+2025-10-27T11:44:49.654481Z  INFO q_api_server: 🪙 Loaded 0 token balances from persistent storage
+2025-10-27T11:44:49.654498Z  INFO q_api_server: 🔐 Loaded 0 password hashes from persistent storage
+2025-10-27T11:44:49.654515Z  INFO q_api_server: 💧 Loaded 0 liquidity pools from persistent storage
+2025-10-27T11:44:49.654681Z  INFO q_api_server: 💳 Found 0 historical transactions in storage (not added to mempool)
+🚀🚀🚀 SMARTCONTRACT ECOSYSTEM INITIALIZATION STARTED 🚀🚀🚀
+Storage engine present: true
+📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚
+✅✅✅ CONTRACT TEMPLATES LOADED SUCCESSFULLY ✅✅✅
+💾💾💾 STORAGE ENGINE IS AVAILABLE - LOADING CONTRACTS 💾💾💾
+✅✅✅ CONTRACT LOADING COMPLETED SUCCESSFULLY ✅✅✅
+🎉🎉🎉 SMARTCONTRACT ECOSYSTEM FULLY INITIALIZED 🎉🎉🎉
+2025-10-27T11:44:50.278317Z  INFO q_api_server: 🏦 Quillon Bank initialized - CDP and quantum banking ready
+2025-10-27T11:44:50.278409Z  INFO q_api_server: 🔐 Initializing AEGIS-QL post-quantum authentication...
+2025-10-27T11:44:50.278469Z  WARN q_api_server: ⚠️  SECURITY WARNING: Using embedded development AEGIS key!
+2025-10-27T11:44:50.278493Z  WARN q_api_server:    For production, set QUILLON_FOUNDER_AEGIS_PUBKEY environment variable
+2025-10-27T11:44:50.278685Z  WARN q_api_server: ⚠️  Founder wallet mismatch - check AEGIS key configuration
+2025-10-27T11:44:50.278697Z  INFO q_api_server: ✅ AEGIS-QL authentication initialized (post-quantum secure)
+2025-10-27T11:44:50.278726Z  INFO q_api_server: 💰 No persisted CollateralVault found, creating new vault
+2025-10-27T11:44:50.278739Z  INFO q_api_server: 💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready
+2025-10-27T11:44:50.278759Z  INFO q_network::connection_manager: 🚀 PHASE 2: Connection manager started with health monitoring and parallel processing
+2025-10-27T11:44:50.278769Z  INFO q_api_server: ✅ Connection manager initialized for DNS-Phantom → Connection bridging
+2025-10-27T11:44:50.278795Z  INFO q_api_server: ✅ ZK-STARK System initialized - Zero-knowledge proofs enabled
+2025-10-27T11:44:50.278805Z  INFO q_api_server: ✅ ZK-SNARK System initialized - Groth16/PLONK proofs enabled
+2025-10-27T11:44:50.279283Z  INFO q_api_server: ✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled
+🚀 Initializing io_uring adapter with dedicated thread pool
+✅ io_uring adapter initialized successfully
+2025-10-27T11:44:50.279402Z  INFO q_api_server: ✅ Kernel I/O Engine initialized with dedicated thread pool
+2025-10-27T11:44:50.279409Z  INFO q_api_server::block_producer: 🚀 Initializing Parallel Block Producer Pool with 8 producers (LOADING FROM STORAGE)
+2025-10-27T11:44:50.279431Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=0)...
+2025-10-27T11:44:50.279452Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279468Z  INFO q_api_server::block_producer:   ✅ Producer #0 initialized and loaded from storage (validator_index=0)
+2025-10-27T11:44:50.279481Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=1)...
+📡 io_uring worker thread started
+2025-10-27T11:44:50.279494Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279544Z  INFO q_api_server::block_producer:   ✅ Producer #1 initialized and loaded from storage (validator_index=1)
+2025-10-27T11:44:50.279558Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=2)...
+2025-10-27T11:44:50.279573Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279586Z  INFO q_api_server::block_producer:   ✅ Producer #2 initialized and loaded from storage (validator_index=2)
+2025-10-27T11:44:50.279599Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=3)...
+2025-10-27T11:44:50.279621Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279633Z  INFO q_api_server::block_producer:   ✅ Producer #3 initialized and loaded from storage (validator_index=3)
+2025-10-27T11:44:50.279647Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=4)...
+2025-10-27T11:44:50.279660Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279672Z  INFO q_api_server::block_producer:   ✅ Producer #4 initialized and loaded from storage (validator_index=4)
+2025-10-27T11:44:50.279687Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=5)...
+2025-10-27T11:44:50.279701Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279725Z  INFO q_api_server::block_producer:   ✅ Producer #5 initialized and loaded from storage (validator_index=5)
+2025-10-27T11:44:50.279800Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=6)...
+2025-10-27T11:44:50.279825Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279839Z  INFO q_api_server::block_producer:   ✅ Producer #6 initialized and loaded from storage (validator_index=6)
+2025-10-27T11:44:50.279857Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=7)...
+2025-10-27T11:44:50.279875Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-10-27T11:44:50.279895Z  INFO q_api_server::block_producer:   ✅ Producer #7 initialized and loaded from storage (validator_index=7)
+2025-10-27T11:44:50.279913Z  INFO q_api_server: 🚀 Phase 2: Parallel Block Production initialized with 8 producers (LOADED FROM STORAGE)
+2025-10-27T11:44:50.279927Z  INFO q_api_server: ⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!
+2025-10-27T11:44:50.279927Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:44:50.279950Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:44:50.279995Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:44:50.280017Z  INFO q_api_server: 🎯 Initialized DAG-Knight consensus engine (f=1, min_nodes=3)
+2025-10-27T11:44:50.280089Z  INFO q_api_server: 📊 Peer count tracking enabled - atomic counter initialized
+2025-10-27T11:44:50.280121Z  INFO q_api_server: 📡 libp2p peer info cached in AppState for bootstrap discovery
+2025-10-27T11:44:50.280138Z  INFO q_api_server: 📊 Atomic peer count integrated into AppState
+2025-10-27T11:44:50.280154Z  INFO q_api_server: 🚀 Initializing High-Performance Consensus System
+2025-10-27T11:44:50.280166Z  INFO q_api_server:    Target: 50,000+ TPS (Phase 1)
+2025-10-27T11:44:50.280178Z  INFO q_api_server:    Future: 200,000+ TPS (Phase 2 - Parallel Workers)
+2025-10-27T11:44:50.280191Z  INFO q_api_server:    Future: 500,000+ TPS (Phase 3 - SIMD Crypto)
+2025-10-27T11:44:50.280214Z  INFO q_api_server:    Future: 1,000,000+ TPS (Phase 4 - io_uring Kernel I/O)
+2025-10-27T11:44:50.280236Z  INFO q_api_server:    Parallel Workers: 64 (16x CPU cores)
+2025-10-27T11:44:50.280248Z  INFO q_api_server: 📦 Initializing Production Mempool...
+2025-10-27T11:44:50.280262Z  INFO q_api_server: ✅ ProductionTorClient initialized successfully
+2025-10-27T11:44:50.280273Z  INFO q_api_server:    Note: Tor connection will be attempted when broadcasting
+2025-10-27T11:44:50.280301Z  INFO q_api_server: ✅ Production Mempool initialized with Tor broadcast
+2025-10-27T11:44:50.280321Z  INFO q_api_server:    Max transactions: 1M
+2025-10-27T11:44:50.280339Z  INFO q_api_server:    Byzantine protection: ENABLED
+2025-10-27T11:44:50.280354Z  INFO q_api_server:    Reliable broadcast: Bracha's protocol over Tor
+2025-10-27T11:44:50.280384Z  INFO q_api_server: ⚔️  Initializing DAG-Knight Consensus...
+2025-10-27T11:44:50.280434Z  INFO q_api_server:    Workers: 64 parallel vertex processors
+2025-10-27T11:44:50.280455Z  INFO q_api_server: ✅ DAG-Knight Consensus initialized successfully
+2025-10-27T11:44:50.280470Z  INFO q_api_server:    Validator ID: 487b1eb9037399417a00810254af82a88611359605f71766f9ce9b7e28a01742
+2025-10-27T11:44:50.280483Z  INFO q_api_server:    Byzantine threshold: f=3 (tolerates 3 Byzantine nodes)
+2025-10-27T11:44:50.280505Z  INFO q_api_server:    Quantum anchor election: VDF-based
+2025-10-27T11:44:50.280518Z  INFO q_api_server:    Zero-message complexity ordering
+2025-10-27T11:44:50.280540Z  INFO q_api_server: 🌊 Initializing Quillon Resonance Consensus with K-Parameter analysis...
+2025-10-27T11:44:50.280555Z  INFO q_api_server: ✅ K-Parameter analyzer initialized
+2025-10-27T11:44:50.280571Z  INFO q_api_server:    Formula: K = 2π √(ΔH · Δs · ℏ) / τ
+2025-10-27T11:44:50.280588Z  INFO q_api_server:    Phase detection: Stable → Approaching → Critical
+2025-10-27T11:44:50.280597Z  INFO q_api_server:    Dynamic parameter tuning: ACTIVE
+2025-10-27T11:44:50.280600Z  INFO q_api_server: 🎭 Initializing Shadow Mode Coordinator...
+2025-10-27T11:44:50.280636Z  INFO q_api_server: ✅ Shadow Mode Coordinator initialized
+2025-10-27T11:44:50.280645Z  INFO q_api_server:    🎯 Primary: DAG-Knight Consensus
+2025-10-27T11:44:50.280649Z  INFO q_api_server:    🌊 Shadow: Quillon Resonance Consensus
+2025-10-27T11:44:50.280653Z  INFO q_api_server:    📊 Agreement Threshold: 85.0%
+2025-10-27T11:44:50.280656Z  INFO q_api_server:    🔄 Observation Rounds: 100
+2025-10-27T11:44:50.280660Z  INFO q_api_server:    ⚖️  Auto-weight adjustment: ENABLED
+2025-10-27T11:44:50.280668Z  INFO q_api_server:    String-theoretic consensus: SHADOW MODE
+2025-10-27T11:44:50.280672Z  INFO q_api_server:    Energy minimization: MONITORING
+2025-10-27T11:44:50.280675Z  INFO q_api_server:    Spectral BFT: COMPARISON
+2025-10-27T11:44:50.280685Z  INFO q_api_server: 🔄 Initializing DAG State Synchronization...
+2025-10-27T11:44:50.280690Z  INFO q_api_server: ✅ PeerRegistry initialized
+2025-10-27T11:44:50.280700Z  INFO q_api_server: ✅ PersistentChannelManager initialized with Tor circuits
+2025-10-27T11:44:50.280705Z  INFO q_api_server: ✅ DagSyncManager initialized - full sync enabled
+2025-10-27T11:44:50.280714Z  INFO q_api_server:    📦 Sync capabilities: DAG vertices, certificates, transactions
+2025-10-27T11:44:50.280718Z  INFO q_api_server:    💰 Sync capabilities: wallet balances, smart contracts
+2025-10-27T11:44:50.280721Z  INFO q_api_server:    🔗 Sync will trigger automatically on peer connection
+2025-10-27T11:44:50.280725Z  INFO q_api_server: ⚡ Initializing mining submission async queue...
+2025-10-27T11:44:50.280730Z  INFO q_api_server: ✅ Mining queue initialized - async processing enabled
+2025-10-27T11:44:50.280738Z  INFO q_api_server:    Non-blocking submission acceptance
+2025-10-27T11:44:50.280742Z  INFO q_api_server:    Background I/O processing
+2025-10-27T11:44:50.280760Z  INFO q_api_server:    Prevents server overload from mining activity
+2025-10-27T11:44:50.280775Z  INFO q_api_server: ✅ HIGH-PERFORMANCE batched processor started (target: sub-60ms finality)
+2025-10-27T11:44:50.280787Z  INFO q_api_server: ✅ Time-based block production loop started
+2025-10-27T11:44:50.280793Z  INFO q_api_server: ✅ Gossipsub transaction/block synchronization enabled
+2025-10-27T11:44:50.280805Z  INFO q_api_server: 💾 Initializing IPFS-RocksDB decentralized storage system...
+2025-10-27T11:44:50.280813Z  INFO q_api_server: ⏰ Starting time-based block production loop...
+2025-10-27T11:44:50.280829Z  INFO q_api_server: 📨 Starting gossipsub transaction/block synchronization processor...
+2025-10-27T11:44:50.280820Z  INFO q_api_server::storage_api: Initializing IPFS-RocksDB storage system
+2025-10-27T11:44:50.280798Z  INFO q_api_server: 🚀 Starting HIGH-PERFORMANCE batch processor (target: 20k+ TPS)
+2025-10-27T11:44:50.281321Z  INFO q_api_server: ✅ IPFS-RocksDB storage system initialized successfully
+2025-10-27T11:44:50.281351Z  INFO q_api_server:    Distributed database backups enabled
+2025-10-27T11:44:50.281365Z  INFO q_api_server:    Content-addressed storage via IPFS
+2025-10-27T11:44:50.281380Z  INFO q_api_server:    libp2p network integration active
+2025-10-27T11:44:50.281394Z  INFO q_api_server: 🔄 Initializing database replication system...
+2025-10-27T11:44:50.281416Z  INFO q_api_server: 🚀 Starting database replication manager...
+2025-10-27T11:44:50.281435Z  INFO q_api_server::database_replication_bridge: 🌉 Creating Database Replication Bridge for gossipsub integration
+2025-10-27T11:44:50.281448Z  INFO q_api_server: 🌉 Starting database replication bridge...
+2025-10-27T11:44:50.281469Z  INFO q_api_server::database_replication_bridge: 🚀 Starting Database Replication Bridge
+2025-10-27T11:44:50.281486Z  INFO q_api_server::database_replication_bridge: ✅ Database Replication Bridge started
+2025-10-27T11:44:50.281499Z  INFO q_api_server::database_replication_bridge:    📤 Outgoing: Replication Manager → Gossipsub
+2025-10-27T11:44:50.281511Z  INFO q_api_server::database_replication_bridge:    📥 Incoming: Gossipsub → Replication Manager
+2025-10-27T11:44:50.281525Z  INFO q_api_server: ✅ Database replication bridge started successfully
+2025-10-27T11:44:50.281542Z  INFO q_api_server: 📢 Database updates topic subscription already active (set during initialization)
+2025-10-27T11:44:50.281555Z  INFO q_api_server::database_replication_bridge: 📥 Starting incoming update forwarder
+2025-10-27T11:44:50.281527Z  INFO q_api_server::database_replication_bridge: 📤 Starting outgoing update forwarder
+2025-10-27T11:44:50.281557Z  WARN q_api_server: ⚠️  Outgoing database update forwarder disabled to prevent deadlock
+2025-10-27T11:44:50.281602Z  WARN q_api_server:    Database replication will work for incoming updates only
+2025-10-27T11:44:50.281615Z  INFO q_api_server: ✅ Database replication integrated with gossipsub
+2025-10-27T11:44:50.281629Z  INFO q_api_server:    Automatic synchronization: ENABLED
+2025-10-27T11:44:50.281649Z  INFO q_api_server:    Snapshot interval: 5 minutes
+2025-10-27T11:44:50.281661Z  INFO q_api_server:    Topic: /qnk/database-updates/1.0.0
+2025-10-27T11:44:50.281674Z  INFO q_api_server: 🔍 DEBUG: Reached after database replication - continuing initialization
+2025-10-27T11:44:50.281686Z  INFO q_api_server: 🎨 Console visualization disabled - TUI mode active
+2025-10-27T11:44:50.281699Z  INFO q_api_server: 🔍 DEBUG: About to show activation banner
+2025-10-27T11:44:50.281711Z  INFO q_api_server: 🌟 ================================
+2025-10-27T11:44:50.281723Z  INFO q_api_server: 🌟   Q-NARWHALKNIGHT ACTIVATED
+2025-10-27T11:44:50.281736Z  INFO q_api_server: 🌟 ================================
+2025-10-27T11:44:50.281748Z  INFO q_api_server: 🆔 Node ID: 487b1eb9037399417a00810254af82a88611359605f71766f9ce9b7e28a01742
+2025-10-27T11:44:50.281761Z  INFO q_api_server: 🧅 Tor Integration: ✅ Active (via NetworkManager)
+2025-10-27T11:44:50.281773Z  INFO q_api_server: ₿  Bitcoin Discovery: ❌ Disabled
+2025-10-27T11:44:50.281786Z  INFO q_api_server: 👻 DNS-Phantom Network: ❌ Disabled
+2025-10-27T11:44:50.281797Z  INFO q_api_server: 🔍 BEP-44 DHT Discovery: ❌ Disabled
+2025-10-27T11:44:50.281813Z  INFO q_api_server: 🚀 Production Peer Discovery: ❌ Disabled
+2025-10-27T11:44:50.281824Z  INFO q_api_server: 🌟 ================================
+2025-10-27T11:44:50.281837Z  INFO q_api_server: 🔍 DEBUG: About to build application router
+2025-10-27T11:44:50.283465Z  INFO q_api_server: ✅ Manual block trigger endpoint DISABLED (secure by default)
+2025-10-27T11:44:50.283694Z  INFO q_api_server: 🚀 Starting parallel worker pool for 16x performance improvement
+2025-10-27T11:44:50.283717Z  INFO q_api_server:    16 parallel workers processing sharded transaction pool
+2025-10-27T11:44:50.283730Z  INFO q_api_server:    Expected TPS: 349072 (16x over 21,817 baseline)
+2025-10-27T11:44:50.283743Z  INFO q_api_server:    Full consensus pipeline: SIMD → Narwhal → DAG-Knight → Bullshark
+2025-10-27T11:44:50.283758Z  INFO q_api_server::parallel_workers: 🔧 Initializing parallel worker pool with 16 workers
+2025-10-27T11:44:50.283767Z  INFO q_api_server::p2p_listener: 🔗 P2P Connection Listener started on 0.0.0.0:8081
+2025-10-27T11:44:50.283786Z  INFO q_api_server::p2p_listener: 📡 Ready to accept peer connections from Alpha nodes
+2025-10-27T11:44:50.283772Z  INFO q_api_server::parallel_workers: 🚀 Starting 16 parallel batch processors
+2025-10-27T11:44:50.283830Z  INFO q_api_server::parallel_workers:    Expected improvement: 16x over single worker
+2025-10-27T11:44:50.283842Z  INFO q_api_server::parallel_workers:    Projected TPS: 349072 (with 21,817 baseline)
+2025-10-27T11:44:50.283889Z DEBUG q_api_server::parallel_workers: Worker 0 starting
+2025-10-27T11:44:50.283903Z DEBUG q_api_server::parallel_workers: Worker 3 starting
+2025-10-27T11:44:50.283908Z DEBUG q_api_server::parallel_workers: Worker 1 starting
+2025-10-27T11:44:50.283915Z DEBUG q_api_server::parallel_workers: Worker 4 starting
+2025-10-27T11:44:50.283924Z DEBUG q_api_server::parallel_workers: Worker 2 starting
+2025-10-27T11:44:50.283930Z DEBUG q_api_server::parallel_workers: Worker 5 starting
+2025-10-27T11:44:50.283941Z DEBUG q_api_server::parallel_workers: Worker 6 starting
+2025-10-27T11:44:50.283946Z DEBUG q_api_server::parallel_workers: Worker 9 starting
+2025-10-27T11:44:50.283961Z DEBUG q_api_server::parallel_workers: Worker 7 starting
+2025-10-27T11:44:50.283891Z  INFO q_api_server::parallel_workers: ✅ All 16 workers started successfully
+2025-10-27T11:44:50.283979Z  INFO q_api_server: ✅ Parallel worker pool initialized successfully
+2025-10-27T11:44:50.283991Z DEBUG q_api_server::parallel_workers: Worker 11 starting
+2025-10-27T11:44:50.284001Z DEBUG q_api_server::parallel_workers: Worker 14 starting
+2025-10-27T11:44:50.284006Z DEBUG q_api_server::parallel_workers: Worker 15 starting
+2025-10-27T11:44:50.283991Z  INFO q_api_server:    Workers will process transactions continuously in background
+2025-10-27T11:44:50.284007Z DEBUG q_api_server::parallel_workers: Worker 12 starting
+2025-10-27T11:44:50.284010Z DEBUG q_api_server::parallel_workers: Worker 8 starting
+2025-10-27T11:44:50.284095Z  INFO q_network::unified_network_manager: ✅ Peer channel set for libp2p → ConnectionManager bridge
+2025-10-27T11:44:50.284108Z  INFO q_network::unified_network_manager: 🌉 P2P peer discovery propagation ENABLED
+2025-10-27T11:44:50.284023Z DEBUG q_api_server::parallel_workers: Worker 13 starting
+2025-10-27T11:44:50.284043Z  INFO q_api_server: ✅ Sent SetPeerChannel command to network manager
+2025-10-27T11:44:50.284154Z  INFO q_api_server: 🌉 libp2p → ConnectionManager bridge ENABLED
+2025-10-27T11:44:50.283971Z DEBUG q_api_server::parallel_workers: Worker 10 starting
+2025-10-27T11:44:50.284172Z  INFO q_api_server: 🌉 Starting libp2p → ConnectionManager bridge receiver...
+2025-10-27T11:44:50.284175Z  INFO q_api_server: ✅ Sent SetGossipsubChannel command to network manager
+2025-10-27T11:44:50.284190Z  INFO q_network::unified_network_manager: ✅ Gossipsub channel set for message propagation
+2025-10-27T11:44:50.284212Z  INFO q_network::unified_network_manager: 🌉 P2P mining reward/transaction propagation ENABLED
+2025-10-27T11:44:50.284220Z  WARN q_api_server: 📨 Gossipsub processor channel closed
+2025-10-27T11:44:50.284203Z  INFO q_api_server: 🌉 Gossipsub → replication bridge ENABLED
+2025-10-27T11:44:50.284268Z  WARN q_api_server: ⚠️  Duplicate event loop spawn disabled (already running from line 565)
+2025-10-27T11:44:50.284282Z  INFO q_api_server: 📥 Starting gossipsub → replication bridge receiver...
+2025-10-27T11:44:50.284283Z  INFO q_api_server: 🔍 DEBUG: About to initialize HTTP server
+2025-10-27T11:44:50.284351Z  INFO q_api_server: 🚀 Initializing High-Performance HTTP Server for 1M+ TPS
+2025-10-27T11:44:50.284367Z  INFO q_api_server:    TCP optimizations: NODELAY, REUSEPORT, 4MB buffers
+2025-10-27T11:44:50.284388Z  INFO q_api_server:    HTTP/2 support: Automatic via client negotiation
+2025-10-27T11:44:50.284411Z  INFO q_api_server: P2P connections will be accepted on port 8081
+2025-10-27T11:44:50.284424Z  INFO q_api_server::high_performance_server: 🚀 Starting High-Performance HTTP Server
+2025-10-27T11:44:50.284437Z  INFO q_api_server::high_performance_server:    Address: 0.0.0.0:8080
+2025-10-27T11:44:50.284450Z  INFO q_api_server::high_performance_server:    TCP buffer size: 4 MB recv, 4 MB send
+2025-10-27T11:44:50.284464Z  INFO q_api_server::high_performance_server:    TCP backlog: 1024 pending connections
+2025-10-27T11:44:50.284476Z  INFO q_api_server::high_performance_server:    Target throughput: 1,000,000+ TPS
+2025-10-27T11:44:50.284503Z  INFO q_api_server::high_performance_server:    ✓ TCP_NODELAY enabled (eliminates 40ms delay)
+2025-10-27T11:44:50.284522Z  INFO q_api_server::high_performance_server:    ✓ SO_REUSEADDR enabled
+2025-10-27T11:44:50.284552Z  INFO q_api_server::high_performance_server:    ✓ SO_REUSEPORT enabled (kernel load balancing)
+2025-10-27T11:44:50.284569Z  INFO q_api_server::high_performance_server:    ✓ TCP buffers configured
+2025-10-27T11:44:50.284589Z  INFO q_api_server::high_performance_server:    ✓ Listening with 1024 connection backlog
+2025-10-27T11:44:50.284611Z  INFO q_api_server::high_performance_server: ✅ TCP listener configured and ready
+2025-10-27T11:44:50.284625Z  INFO q_api_server::high_performance_server: 🌟 High-Performance Server READY - accepting connections...
+2025-10-27T11:44:50.284647Z  INFO q_api_server::high_performance_server:    HTTP/2 will be negotiated automatically per connection
+2025-10-27T11:44:55.280348Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:00.280454Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:05.280277Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:10.280132Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:15.280271Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:20.280157Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:20.280178Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:45:20.280400Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:45:25.280324Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:30.280179Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:34.503579Z DEBUG request{method=GET uri=/api/v1/status version=HTTP/1.1}: tower_http::trace::on_request: started processing request
+2025-10-27T11:45:34.503794Z DEBUG request{method=GET uri=/api/v1/status version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=200
+2025-10-27T11:45:35.280411Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:40.280284Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:45.280622Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:50.280504Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:45:50.280530Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:45:50.280574Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:45:55.280380Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:00.280455Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:05.280567Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:10.280568Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:15.280312Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:20.280241Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:20.280251Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:46:20.280322Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:46:25.280608Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:30.280258Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:35.280192Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:40.280471Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:45.280280Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:50.134199Z DEBUG request{method=GET uri=/ version=HTTP/1.1}: tower_http::trace::on_request: started processing request
+2025-10-27T11:46:50.134597Z DEBUG request{method=GET uri=/ version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=404
+2025-10-27T11:46:50.280365Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:46:50.280393Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:46:50.280401Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:46:55.280290Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:00.280179Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:05.280723Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:10.280198Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:15.280347Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:20.280211Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:20.280249Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:47:20.280300Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:47:25.280203Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:30.280223Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:35.280213Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:40.280478Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:45.280397Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:50.280214Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:47:50.280234Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:47:50.280364Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:47:55.280197Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:00.280296Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:05.280198Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:06.821748Z DEBUG request{method=GET uri=/ version=HTTP/1.1}: tower_http::trace::on_request: started processing request
+2025-10-27T11:48:06.821987Z DEBUG request{method=GET uri=/ version=HTTP/1.1}: tower_http::trace::on_response: finished processing request latency=0 ms status=404
+2025-10-27T11:48:10.280394Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:15.280170Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:20.280288Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:20.280319Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:48:20.280325Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:48:25.280306Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:30.280183Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:35.280247Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:40.280200Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:45.280241Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:50.280179Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-10-27T11:48:50.280216Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-10-27T11:48:50.280178Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-10-27T11:48:55.279752Z DEBUG q_network::connection_manager: 🔍 No new peers to process

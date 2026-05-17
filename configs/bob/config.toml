@@ -1,0 +1,50 @@
+# Q-NarwhalKnight Node Configuration: bob
+# Server Alpha Deployment - Quantum BFT Consensus
+
+[network]
+node_name = "bob"
+listen_address = "127.0.0.1:8002"
+public_address = "127.0.0.1:8002"
+bootstrap_peers = []
+tor_enabled = true
+tor_socks_proxy = "127.0.0.1:9050"
+
+[tor]
+onion_service_enabled = true
+onion_service_key = "ED25519-V3:9mG8yO3wRqM0nS5uU7xB4cD2fI6kZ9rF0eL3gH8iJ1oN="
+onion_service_port = 8000
+hidden_service_dir = "/tmp/q-knight-bob"
+circuit_timeout = "30s"
+connection_pool_size = 50
+
+[consensus]
+validator_id = "bob"
+byzantine_threshold = 7  # 2f+1 for f=3 Byzantine nodes (10 total)
+max_validators = 10
+voting_timeout = "10s"
+finalization_timeout = "5s"
+enable_slashing = true
+min_voting_stake = 1000
+
+[mempool]
+max_transactions = 10000
+transaction_timeout = "60s"
+fee_per_byte = 10
+max_transaction_size = 1048576
+
+[dag]
+max_vertex_age = "300s"
+vertex_cache_size = 1000
+vdf_difficulty = 1024
+quantum_enhancement = 0.8
+
+[api]
+rest_enabled = true
+rest_address = "127.0.0.1:9003"
+websocket_enabled = true
+metrics_enabled = true
+
+[logging]
+level = "info"
+file = "logs/bob.log"
+structured = true

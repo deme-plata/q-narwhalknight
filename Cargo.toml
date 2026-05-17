@@ -1,0 +1,452 @@
+[workspace]
+resolver = "2"
+exclude = ["test_tx_propagation", "crates/crown-ash-client"]
+members = [
+    "crates/q-chat-types",
+    "crates/q-types",
+    "crates/q-wallet",
+    "crates/q-api-server",
+    "crates/q-visualizer",
+    "crates/q-narwhal-core",
+    "crates/q-dag-knight",
+    "crates/q-network",
+    "crates/q-quantum-rng",
+    "crates/q-lattice-vrf",
+    "crates/q-vdf",
+    "crates/q-fairqueue",
+    "crates/q-tor-client",     # Re-enabled: Fixed dependency compatibility
+    "crates/q-tor-circuit",    # Re-enabled: Fixed Tor library compatibility
+    # "crates/q-bitcoin-bridge", # New: Bitcoin network bridge for anonymous peer discovery - DEACTIVATED
+    "crates/q-dandelion",
+    # "crates/q-dns-phantom",    # DEACTIVATED
+    # "crates/q-bep44-discovery", # New: BEP-44 DHT peer discovery (replaces DNS-phantom) - DEACTIVATED
+    "crates/q-storage",
+    "crates/q-mining",
+    "crates/q-precision",
+    "crates/q-vm",
+    "crates/q-robot-control",
+    "crates/q-higgs-hydro",  # Higgs field manipulation for water-based quantum computation
+    "crates/q-higgs-simulator",  # 3D Higgs field simulation with attosecond laser control
+    "crates/q-robot-cli",    # Quantum water robot control CLI
+    "crates/void-walker",
+    "crates/q-miner",        # High-performance CPU/GPU miner
+    "crates/q-sharding",
+    "crates/q-cache",        # Phase 2: Intelligent hierarchical caching system
+    # "crates/q-benchmarks",   # Performance benchmarking and optimization (Server Beta) - TEMPORARILY DISABLED
+    "crates/q-crypto-simd",  # SIMD cryptographic acceleration (Server Beta)
+    "crates/q-kernel-io",    # Kernel I/O optimizations with io_uring and NUMA (Server Beta)
+    "crates/q-cross-shard",  # Cross-shard communication infrastructure (Server Beta)
+    "crates/q-plugin-system", # Plugin system for extensible architecture
+    "crates/q-quantum-crypto", # Quantum cryptography plugin
+    "crates/q-quantum-mixing", # Quantum transaction mixing plugin
+    "crates/q-zk-stark",      # ZK-STARK proofs with GPU acceleration
+    "crates/q-zk-snark",      # ZK-SNARK toolkit (Groth16, PLONK, Marlin)
+    "crates/q-lattice-guard", # Post-quantum lattice-based zk-SNARK (RLWE)
+    "crates/q-ivc",           # IVC circuit gadgets (NTT, Poseidon, Dilithium, BLAKE3 in R1CS)
+    "crates/q-recursive-proofs", # Recursive SNARKs for eliminating weak subjectivity
+    "crates/q-rlwe-vrf",      # Post-quantum VRF based on Ring-LWE for mining
+    "crates/q-zk-p2p",        # Zero-knowledge enhanced P2P networking
+    "crates/q-dex",           # Decentralized exchange with ZK privacy
+    "crates/q-oracle",        # Oracle network for price feeds
+    "crates/q-neural-oracle", # Quantum Neural Oracle - ML prediction infrastructure
+    "crates/q-stablecoin",    # Algorithmic stablecoin management
+    "crates/q-narwhalknight", # High-level developer-friendly API wrapper for proven DNS-Phantom mesh networking
+    "crates/q-tps-benchmark",  # Real-world TPS benchmark tool
+    "crates/q-ipfs-storage",   # IPFS-RocksDB decentralized storage
+    "crates/q-aegis-ql",       # AEGIS-QL post-quantum access control
+    "crates/q-governance",     # Proof-of-Contribution Governance with mining-weighted voting
+    "crates/q-quillon-bank",   # Quantum banking with CDP and PaaS revenue
+    "crates/q-tui",            # Beautiful terminal UI for node monitoring
+    "crates/q-quillon-bank-cli", # Quillon Bank CLI management interface
+    "crates/q-bounty-protocol",  # Testnet bounty protocol with RocksDB + AEGIS-QL
+    "crates/q-bounty-server",    # Bounty API server with Axum REST endpoints
+    "gui",
+    "gui/slint-wallet",
+    "crates/q-resonance",
+    "crates/q-compute",      # Starship Endgame — 100% compute utilization orchestrator
+ "sdk/rust", "crates/q-ai-inference", "crates/q-crypto-advanced", "crates/q-index-fund", "crates/q-mining-pool", "crates/q-temporal-shield", "crates/q-bitnet-ffi", "crates/q-consensus-guard", "crates/q-bio-dsl", "crates/q-eternal-cypher", "crates/q-dune", "crates/q-flux", "crates/q-queue",
+    "crates/q-sqisign-sys",  # SQIsign C reference implementation FFI bindings
+    "crates/q-sqisign",      # Safe Rust wrapper for SQIsign post-quantum signatures
+    "crates/q-log-privacy",  # Privacy-preserving log redaction
+    "crates/crown-ash-types",   # Crown & Ash — shared game data types
+    "crates/crown-ash-sim",     # Crown & Ash — core deterministic simulation
+    "crates/crown-ash-plugin",  # Crown & Ash — WASM plugin (native fallback for tests)
+    "crates/crown-ash-api",     # Crown & Ash — REST API handlers
+    "crates/crown-ash-narrative", # Crown & Ash — narrative text generation (templates + optional LLM)
+    # "crates/crown-ash-client",  # Crown & Ash — Bevy game client (build separately: cargo check --manifest-path crates/crown-ash-client/Cargo.toml)
+    "crates/q-trading-bot",      # Water Robot DCA + Dagknight SIMD trading bot
+    "crates/q-turn",             # Custom STUN/TURN relay server — zero IP leak WebRTC
+    "crates/q-ivc-verifier-wasm", # v10.9.18: WASM verifier scaffolding for browser wallets (Phase 1 placeholder; Phase 2 = real Nova)
+]
+
+[workspace.package]
+version = "10.9.38"  # v10.9.38: ROOT-CAUSE FIX for "stuck at 26K" stall + carries v10.9.37 cap bump. Diagnosed via canary logs (q-sync-test-v10936) + Prometheus (qnk_local_height pinned at 26000, qnk_libp2p_rx_bytes_total ticking, height_progression flat): server's get_qblocks_forward() returns the first available block AT OR AFTER start_height. When there's a storage-format discontinuity (blocks 26001..100440 in an old format the DAG iterator can't traverse), it returns 100441+. Client's GAP_SKIP_REFUSED safety cap (10K) rejects these "200 blocks at heights 100441-105859" responses as too-far-from-contiguous → infinite retry of the same misaligned request. Fix at unified_network_manager.rs:~4041: refuse to return forward-seek blocks if first_height > start_height + 10K; treat as empty response (lets the gap-fill scheduler move the request window forward to where the server actually has data). v10.9.37: BLOCK-PACK CAP 200 → 2000. v10.9.36 proven (canary went 0 → 26K in 2.5 min = ~33 b/s sustained, past v10.9.28 stall) but throughput ceilinged at ~33 b/s because the server's per-response hard cap (line ~4006) caps blocks at 200 per response. With CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER=16 and avg ~3s round-trip, 200×16÷3 ≈ 1066 b/s theoretical max but realistic ~33-66 b/s. Raising cap to 2000 (max 500 MB per response, well under 8 GB container) lifts ceiling to ~10,666 b/s theoretical. Tunable via Q_BLOCK_PACK_MAX env. Previous: v10.9.36: STRUCTURAL FIX (10ms→100ms run_once timeout). — bump run_once() outer-loop timeout 10ms→100ms (main.rs:6248). Code analytics 2026-05-16: 10ms polling slices were starving libp2p Swarm of continuous polling time needed to drive multi-round-trip Noise XX + Identify handshakes; peer mesh never forms (canary qnk_peers_connected=0 after 40+ min uptime even with Q_MAX_MEMORY_BYTES=64GiB env-var disabling memory_connection_limits gate). 100ms still well below the original v1.0.22 deadlock threshold (which was lock-held-forever, several MINUTES). Other tasks needing the manager lock will wait at most 100ms per iteration, vs ~10ms previously — 10x slower lock acquire but enough continuous polling for libp2p to complete handshakes. Carries forward all v10.9.31-35 work. Previous: v10.9.35: SWARM TRACE NOW IN run_once() (the ACTIVE driver). Deep-code analysis found main.rs:6250 calls nm.run_once(), NOT nm.run(). The v10.9.34 [SWARM-EVT] trace was placed in run() which is dead code — never executes. v10.9.35 adds the same [SWARM-EVT-RUN-ONCE] trace inside the run_once() Swarm dispatch arm (line ~5523) so the canary will actually emit trace lines on each Swarm event. This is what tells us if the loop is alive but inert vs dead entirely. v10.9.34: VERBOSE SWARM EVENT TRACING. Adds per-event-variant INFO log at the SwarmEvent dispatch entry (line ~3210 in unified_network_manager.rs) so we can see in canary logs WHICH SwarmEvent variants actually fire vs which never do — diagnoses the "libp2p mesh never forms" symptom where qnk_peers_connected stays at 0 and all libp2p_swarm_* metrics read 0. Logs labelled `[SWARM-EVT]` (variant name) and `[SWARM-EVT-BEHAVIOUR]` (behaviour type). Carries forward v10.9.33 self-dial filter, v10.9.32 metric wiring, v10.9.31 permits bump, and QUG add_liquidity counter. Previous: v10.9.33: BOOTSTRAP SELF-DIAL FILTER. Agent-A deep diagnostic (2026-05-16) found P1-4: Epsilon's own peer_id is in its own HARDCODED_BOOTSTRAP_PEERS list, so every bootstrap iteration spent a scheduler slot dialing itself, hit the [PEER CHECK] fast-fail at unified_network_manager.rs:6070, and emitted a noisy ERROR. New helper priority_ordered_bootstrap_filtered(map, local) filters out the local peer_id before returning the dial set; existing call site at line ~2377 switched over. Stops the self-dial spam and frees a scheduler slot per cycle. Carries forward v10.9.32 (metrics wiring), v10.9.31 (BLOCK_PACK_BASE_PERMITS 4→16), and the QUG add_liquidity debit-counter fix. Previous: v10.9.32: SYNC FIX + LIBP2P METRICS WIRED. Adds the diagnostic infrastructure that should have shipped with v10.9.27. The qnk_libp2p_rx_bytes_total + qnk_libp2p_tx_bytes_total + qnk_block_pack_response_bytes histogram were all DECLARED in metrics.rs but NEVER INCREMENTED anywhere in the codebase — every dashboard read 0 forever. Wired three increments in unified_network_manager.rs: server-side request receive (line ~3899), client-side response receive (line ~4047), server-side response send (line ~5449). Uses bincode::serialized_size for accurate byte counts. With these live, the next canary will tell us in 30s whether libp2p block-pack is actually carrying traffic vs the HTTP turbo-sync fallback. Carries forward v10.9.31's BLOCK_PACK_BASE_PERMITS 4→16 bump and the QUG add_liquidity debit-counter fix. v10.9.31:  SYNC THROUGHPUT FIX. (1) BLOCK_PACK_BASE_PERMITS bumped 4 → 16 in unified_network_manager.rs (line ~1125). Diagnosed via deep code analysis after v10.9.30 canary still synced at only ~13 b/s with qnk_libp2p_rx_bytes_total=0: the server-side block-pack handler at line ~3939 returns an EMPTY BlockPackResponse when the per-peer permit semaphore is exhausted, and the client cannot distinguish empty-because-saturated from empty-because-no-blocks-at-this-height — so it backs off retries on legitimate-looking misses. With v9.1.8's 200-block per-response cap (~50 MB max), 16 base permits = ~800 MB peak allocation (well under the 50 GB cgroup high-water mark). Lifts unsynced-server throughput from 4 concurrent block-packs to 16, and total fully-synced capacity from 16 to 28 (16 base + 12 extra). (2) Includes the QUG add_liquidity debit-counter fix: liquidity_api.rs::add_liquidity now calls record_dex_qug_debit on both native-QUG paths so LP deposits survive on-chain replay (apply_dex_qug_adjustments idempotency restored). (3) MUST cargo clean --package q-api-server before building this release so the API-reported version actually reads 10.9.31, not the cached prior string. Previous: v10.9.30: LIBP2P PEER-ADDR CACHE FIX. Wireshark+log forensics on Epsilon Docker (v10.9.29 stalled at 26K) revealed real cause: [PEER CHECK] in unified_network_manager.rs:6040 reads from self.peer_addresses, which was constructed as empty HashMap at line 2675 even though bootstrap-resolution built fully-populated `all_peer_addresses` (Epsilon /ip4/89.149.241.126/tcp/9001, Beta, Gamma, Delta). Bootstrap addrs flowed into Kademlia DHT but NOT into the cache the block-pack scheduler consults — every chunk targeting Epsilon (only peer with full historical chain) hit "NOT connected and has NO cached address!" and round-robin'd to random tip peers whose block-pack returns empty for ranges <18M. Fix (one line): seed peer_addresses from all_peer_addresses.clone() at construction. PLUS: QNarwhalEvent::Identify(Received) was previously debug-logged and discarded — now inserts info.listen_addrs into peer_addresses so we keep learning addresses post-bootstrap. v10.9.29 chunk-end-clip stays in place (verified working: height 0 → 26K past v10.9.28 plateau). Previous: v10.9.29: SYNC CHUNK-END CLIP + BALANCE INTEGRITY. (1) Genesis-window cap now clips chunk END to window_cap, not just filters by chunk start — fixes v10.9.28 stall at 26K where a single oversized chunk (ML predictor picked huge size) spanned 26K→18M, passed the start≤cap filter, then failed ingest because the response body covered heights far beyond the 10K window. With end-clipping every dispatched chunk's response is guaranteed ingestable. Applied to all 3 cap sites (split_into_chunks, gap-fill, sync_to_height). (2) CRITICAL: save_wallet_balance (singular) now has max-wins guard per CLAUDE.md Rule 1. Stale writes that would LOWER a balance are now SKIPPED with ERROR log, on-disk value preserved. The plural save_wallet_balances had this guard but the singular form was missing it — production was observing 5% balance fluctuation on Epsilon because of this gap. Previous: v10.9.28: SYNC INGESTION FIX + METRIC WIRING. (1) Q_GENESIS_LOOKAHEAD_BLOCKS default lowered 1M → 10K to match the pre-existing GAP_SKIP_REFUSED ingestion safety cap — v10.9.27 dispatched chunks within 1M of contiguous but >90% got refused at ingest with "Gap exceeds safety cap 10000", causing 0 height advance + 50MB/min RSS leak from the retry-storm. With 10K window, every dispatched chunk is ingestable. (2) Wired qnk_local_height + qnk_blocks_synced_total gauges from the existing 5s height reconciler so /metrics emits an honest sync-progress signal (was stuck at 0 in v10.9.27 due to missing callers). Remaining metric wiring (chunks_in_flight, retry_total, bootstrap_dial, block_pack_request, libp2p_swarm_*) tracked as follow-up commits — those need turbo_sync + unified_network_manager hooks. Previous: v10.9.27: "WORKS OUT OF THE BOX" — auto-defaults for fresh nodes (Q_GENESIS_SYNC_ONLY + Q_SKIP_CHECKPOINT auto-set when DB is empty), P2P port 9001 auto-fallback to 9100-9999 on EADDRINUSE, comprehensive Prometheus /metrics endpoint (qnk_peers_connected, qnk_block_pack_request_total, qnk_chunk_retry_total, libp2p_swarm_connections_closed_total{cause} — see crates/q-network/src/metrics.rs), client-side per-peer block-pack semaphore (CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER=4) + retry-storm dampener (ClientThrottle errors don't consume retry budget), libp2p memory-connection-limits behaviour wired (1 GiB default, Q_MAX_MEMORY_BYTES tunable), connection-close WARN diagnostic with cause string (journalctl-visible at Epsilon's WARN level), banner network_id resolution fixed to match runtime (env-first, not clap-default-first). Diagnostic-by-curl: `curl :PORT/metrics | grep libp2p_swarm_connections_closed_total` shows close reasons; `qnk_bootstrap_dial_total{result="failed"}` shows dial outcomes; `qnk_block_pack_request_total{direction="out",result="throttle"}` shows client back-pressure. Previous: v10.9.26: GENESIS-WINDOW SCHEDULER (FULL COVERAGE). v10.9.25 only patched sync_to_height; multiple other chunk-building call sites (split_into_chunks at line 4167, gap-fill at line 3576+) bypassed the cap and produced requests at heights > local + 1M, causing the "synced 26k blocks then stops" symptom on Beta + Epsilon docker tests. Both v10.9.25 and v10.9.26 honor Q_GENESIS_SYNC_ONLY=1. Previous: v10.9.25: GENESIS-WINDOW SCHEDULER. Fixes "synced 4045 blocks then gravity-assist spins forever" pattern in genesis mode. When Q_GENESIS_SYNC_ONLY=1, turbo_sync.rs::sync_to_height filters the chunk set to chunks within Q_GENESIS_LOOKAHEAD_BLOCKS (default 1M) of contiguous height. Without the cap, gravity-assist's parallel streams were saving blocks at heights 6M, 9M, 13M while the contiguous chain crawled forward from genesis at ~22 bps — wasting bandwidth on blocks that couldn't unblock progress until the gap below filled. With the cap, every in-flight chunk directly extends the contiguous chain. Checkpoint and endgame modes unaffected. Previous: v10.9.24: SYNC-UNWEDGE FIXES. (1) qblock:latest pointer heal at startup — if scan_highest_contiguous returns N > current qblock:latest, force qblock:latest = N. Unsticks turbo-sync request building after a checkpoint apply (was producing range:0-0 forever because pointer-cap could never walk past gap). (2) Readiness ArchiveComplete now requires `contiguous >= max(local_tip, peer_max_height)` AND at least one peer-height-proof seen — fixes premature ArchiveComplete at 21k blocks when peer-heights haven't propagated yet. Previous: v10.9.22: SYNC-LIVE FIX. Stops the mining-rejection feedback loop that wedged Epsilon (1342% CPU / 52GB RSS / VDF spawn_blocking timeouts). Two changes: (1) handlers.rs:9794 — rate-limit the 503 mining-reject `warn!` to once per 30s (was firing 2K+/sec with 400 miners, matching the success-log rate-limit at line 9837). (2) main.rs:25321 — custom TraceLayer on_failure that suppresses ERROR logs for 503 SERVICE_UNAVAILABLE so tower stops doubling the storm. Together these prevent the journald-saturation → libp2p-starvation cascade that left Epsilon perpetually 10K+ blocks behind tip and unable to serve new-node bootstrap. Previous: v10.9.21: HONEST LIQUIDITY. bootstrap_bridge_pools no longer auto-mints unbacked wBTC at boot — pools start as empty shells; real LPs must deposit. handlers.rs swap path returns "No wBTC liquidity yet — be the first LP" instead of silently trading against fake supply. NEW one-click LP flow: POST /api/v1/bitcoin/lp/intent escrows QUG, generates Knots deposit address, and on finalize atomically mints wBTC + pulls escrowed QUG + adds liquidity, minting LP tokens to the user (cancel/refund + finalize/list/get endpoints, LP intent persisted in CF_MANIFEST under btc_lp_intent:*). Frontend gains a "Bridge LP" tab in BitcoinSwapModal with the wizard. Previous: v10.9.20: wBTC reserve check gated on `use_oracle` so AMM-pool swaps work without a configured Bitcoin bridge. bootstrap_bridge_pools preserves traded reserves across restarts (only reseeds when drained below 1% of bootstrap). /api/v1/bitcoin/withdraw gains real bitcoin::Address mainnet validation + optional fee_priority (economy/normal/fast → Knots conf_target 30/6/2). DepositBridge::send_to_address_with_target + send_withdrawal(conf_target). Frontend BitcoinSwapModal: real user-pasted compressed BTC pubkey required for HTLC swaps (no more fake 0x02||qnk_addr fabrication); confirmation text 3→6 blocks to match BTC_MIN_CONFIRMATIONS. sendBitcoin() in services/api.ts now hits the real /v1/bitcoin/withdraw instead of the nonexistent /v1/bitcoin/send.  Previous: v10.9.19: huge "hum" release. (1) Track A TUI readiness banner Bootstrapping/FastReady/CheckpointTrust/GenesisSync/ArchiveComplete. (2) GET /api/v1/engine/pulse — comprehensive live vitals JSON with sync heights, mining counters, P2P bytes, mempool size, gap-to-tip, wallet count, decentralization EMA. (3) GET /api/v1/proof/tip — Phase 1 placeholder recursive-SNARK endpoint (wallet integration unblocked). (4) K-parameter gauge extended to 5 cards with new Engine Pulse column (data integrity / quorum / API count / P2P). (5) Boot tracker step 10 shows Q_BOOTSTRAP_MIN_PEERS knob. (6) HEALTH log cosmetic fix — "unbounded" instead of "0.0G (0%)" when cgroup has no limit. (7) Phase 2 trigger requires 3 consecutive ready ticks (~90s) before firing to avoid false-positives on small peer sets. (8) max_established_per_peer raised 2→4, tunable via Q_MAX_CONNS_PER_PEER. New q-ivc-verifier-wasm Phase 1 scaffold crate. DeepSeek job-board doc shipped covering Jobs A-K. Track C dilithium fixtures + Track D network instrumentation still deferred (submitted patches had compile/math issues).
+edition = "2021"
+description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
+homepage = "https://quillon.xyz"
+repository = "https://code.quillon.xyz"
+keywords = ["quantum", "consensus", "dag-bft", "distributed-ai"]
+categories = ["science", "network-programming"]
+license = "Apache-2.0"
+rust-version = "1.86"
+authors = ["Quantum-DAG Labs Core Contributors"]
+
+# Architecture compatibility - removed core_arch patch for stable Rust compatibility
+
+# Examples are defined in individual crate Cargo.toml files
+
+[workspace.dependencies]
+# Core Rust ecosystem
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+
+# Web framework
+axum = { version = "0.7", features = ["ws"] }
+tower = { version = "0.4", features = ["limit"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs", "timeout"] }
+hyper = "1.0"
+
+# Networking - Enhanced for real network connectivity (libp2p 0.56 upgrade)
+# mdns removed from default features - will be added conditionally in q-network for Linux only
+# 🔥 v2.0.0: Upgraded to libp2p 0.56 with WebRTC support via separate crate
+# NOTE: connection-limits is built-in to libp2p 0.56, not a feature flag
+# v10.9.27: enabled "memory-connection-limits" (OOM-safety: refuse new conns under memory pressure)
+# and "metrics" (Prometheus-format /metrics endpoint with peer count, gossipsub mesh, connection
+# close reasons, request-response latency — diagnostic gold for "why did this peer disconnect")
+libp2p = { version = "0.56", features = ["noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad", "upnp", "macros", "tokio", "request-response", "dns", "quic", "websocket", "autonat", "relay", "dcutr", "memory-connection-limits", "metrics"] }
+# 🌐 WebRTC-Direct transport for browser P2P connectivity (alpha) - NOT in workspace (optional per-crate)
+reqwest = { version = "0.12", features = ["json", "socks", "stream", "rustls-tls", "blocking"] }
+
+# Real network implementations
+arti-client = "0.9"
+arti-hyper = "0.9"
+tor-rtcompat = "0.9"
+tor-hsservice = "0.9"
+hickory-dns = "0.24"
+# Use bitcoin 0.30 for compatibility with bitcoincore-rpc 0.17
+bitcoin = { version = "0.30", features = ["serde"] }
+crc32fast = "1.3"
+# base64 = "0.21" # Removed duplicate, using 0.22.1 below
+hex = "0.4"
+
+# Cryptography (Phase 0: Classical)
+ring = "0.17"
+sha3 = "0.10"
+sha2 = "0.10"
+rand = "0.9.1"
+rand_chacha = "0.9"
+
+# v2.5.1-beta: AEAD encryption for P2P AI message privacy
+chacha20poly1305 = "0.10"
+
+# Post-quantum cryptography (Phase 1+) - GLIBC compatible versions
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.7"
+pqcrypto-falcon = "0.3"
+pqcrypto-traits = "0.3"
+dilithium = "0.1"
+
+# Safetensors and tokenizers for model weights (required by mistralrs-core)
+safetensors = "0.6.0"
+tokenizers = { version = "0.21.2", default-features = false }
+
+# Additional mistralrs-core dependencies (avoiding duplicates)
+utoipa = "5.3.1"
+hf-hub = { version = "0.4.2", default-features = false, features = ["ureq", "tokio", "rustls-tls"] }
+tqdm = "0.7.0"
+minijinja = { version = "2.10.2", features = ["builtins", "json"] }
+minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
+regex-automata = { version = "0.4.9", features = ["meta"] }
+rustc-hash = "2.1.1"
+vob = "3.0.4"
+cfgrammar = "0.13.10"
+lrtable = "0.13.10"
+galil-seiferas = "0.1.5"
+radix_trie = "0.2.1"
+bytemuck = "1.23.0"
+tokio-rayon = "2.1.0"
+rand_isaac = "0.4.0"
+indicatif = { version = "0.17.11", features = ["rayon"] }
+strum = { version = "0.27.1", features = ["derive"] }
+derive_more = { version = "2.0.1", default-features = false, features = ["from"] }
+akin = "0.4.0"
+variantly = "0.4.0"
+derive-new = "0.7.0"
+sysinfo = "0.30.13"
+bytemuck_derive = "1.9.3"
+schemars = "0.8.22"
+serde_yaml = "0.9.34"
+serde_plain = "1.0.2"
+as-any = "0.3.2"
+llguidance = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", default-features = false, features = ["lark"], rev = "c432092" }
+toktrie_hf_tokenizers = { git = "https://github.com/guidance-ai/llguidance.git", version = "1.0.0", rev = "c432092" }
+serde-big-array = "0.5.1"
+interprocess = "2.2.3"
+urlencoding = "2.1.3"
+scraper = "0.23.1"
+html2text = "0.14.4"
+ordered-float = "5.0.0"
+hashbrown = "0.15.3"
+bm25 = "2.2.1"
+rubato = "0.16.2"  # Audio resampling for mistral.rs audio processing
+rustfft = "6.2.0"
+hound = "3.5.1"
+apodize = "1.0.0"
+symphonia = { version = "0.5.4", default-features = false, features = ["mp3", "flac", "vorbis", "wav", "isomp4", "ogg", "pcm"] }
+statrs = "0.17.1"
+
+# Additional dependencies needed by q-ai-inference and mistralrs-core
+ahash = "0.8.12"
+libc = "0.2.172"
+csv = "1.3.1"
+dirs = "6.0.0"
+objc = "0.2.7"  # macOS/iOS only
+memmap2 = "0.9.5"
+# Note: parking_lot, num-traits, async-trait, yoke, pyo3-build-config, ctrlc, directories already exist elsewhere
+
+# v8.5.0: Auto-update binary swap + version comparison
+self-replace = "1.5"
+semver = "1"
+
+# Database - RocksDB for quantum storage (no SQLite needed)
+# sqlx removed - we use custom RocksDB implementation
+
+# Metrics and observability - compatible versions
+prometheus = "0.13.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+
+# Async utilities (updated for mistral.rs compatibility)
+futures = { version = "0.3", features = ["std"] }
+futures-util = { version = "0.3.31", features = ["std"] }
+futures-core = "0.3"
+pin-project-lite = "0.2"
+
+# WebSocket for visualizer (updated version for mistral.rs compatibility)
+tokio-tungstenite = "0.24.0"
+
+# Serialization
+bincode = "1.3"
+postcard = { version = "1.0", features = ["alloc"] }
+
+# VDF and quantum entropy
+vdf = "0.1"
+rand_core = "0.6"
+
+# Hashing
+blake3 = { version = "1.5", features = ["std", "rayon", "prefer_intrinsics"] } # v5.1.1: prefer_intrinsics ensures SIMD via C intrinsics (works with mingw cross-compile)
+
+# Zero-knowledge proofs
+risc0-zkvm = "1.0"
+
+# Configuration
+config = "0.13"
+
+# CLI/TUI utilities
+console = "0.15"
+ratatui = "0.28"
+crossterm = "0.28"
+
+# Testing
+proptest = "1.0"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }  # Disabled plotters/font-kit
+tempfile = "3.8"
+
+# Tor integration - using SOCKS proxy approach to avoid crypto conflicts
+tokio-socks = "0.5"
+# Crypto for core types - only ed25519-dalek needed in workspace
+ed25519-dalek = "2.0"
+
+# BEP-44 DHT dependencies
+dht = "0.7"
+bencode = "0.4" 
+sha1 = "0.10"
+hkdf = "0.12"
+
+# High-performance storage - unified version to avoid conflicts
+rocksdb = { version = "0.22", features = ["multi-threaded-cf"] }
+rusqlite = { version = "0.31", features = ["bundled"] }  # Tor dependency with bundled SQLite for cross-compilation
+lz4 = "1.24"
+
+# Linear algebra and mathematics
+ndarray = { version = "0.15", features = ["serde"] }
+nalgebra = { version = "0.32", features = ["serde-serialize"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+bulletproofs = "4.0"
+
+# Additional dependencies for testing
+zeroize = { version = "1.5", features = ["derive"] }  # v0.9.14 FIX: Enable derive macros for q-aegis-ql
+pin-project = "1.1"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+idna = "0.4"
+
+# Bitcoin integration for anonymous peer discovery - using workspace version
+bitcoin_hashes = "0.11"
+bitcoincore-rpc = "0.17"
+lz4_flex = "0.11"
+
+# GUI framework
+slint = "1.7"
+slint-build = "1.7"
+
+# Financial/decimal math for DeFi components
+bigdecimal = { version = "0.4", features = ["serde"] }
+rust_decimal = "1.33"
+
+# Collections and concurrency for performance
+dashmap = "6.1"
+crossbeam = "0.8"
+rayon = "1.10"
+
+# Additional crypto dependencies for ZK proofs
+ark-ff = "0.4"
+ark-ec = "0.4" 
+ark-serialize = "0.4"
+ark-std = "0.4"
+ark-bn254 = "0.4"
+ark-bls12-381 = "0.5"
+ark-groth16 = "0.4"
+ark-marlin = "0.3"
+ark-poly = "0.4"
+ark-poly-commit = "0.4"
+ark-r1cs-std = "0.4"
+ark-relations = "0.4"
+ark-snark = "0.4"
+
+# GPU acceleration for STARK proofs
+wgpu = "0.17"
+# bytemuck moved to mistralrs-core dependencies section above (v1.23.0)
+
+# Additional utilities
+lazy_static = "1.4"
+once_cell = "1.19"
+num_cpus = "1.16"
+parking_lot = "0.12"
+clear_on_drop = "0.2"
+constant_time_eq = "0.3"
+arrayref = "0.3"
+arrayvec = "0.7"
+base-x = "0.2"
+bs58 = "0.5"
+data-encoding = "2.5"
+either = { version = "1.15.0", features = ["serde"] }
+indexmap = { version = "2.9.0", features = ["serde"] }
+pyo3 = { version = "0.25.0", features = ["full", "extension-module", "either"] }
+image = { version = "0.25.6", default-features = false, features = [
+    'bmp',
+    'dds', 
+    'exr',
+    'ff',
+    'gif',
+    'hdr',
+    'ico',
+    'jpeg',
+    'png',
+    'pnm',
+    'qoi',
+    'tga',
+    'tiff',
+    'webp',
+] }
+
+# Mistral.rs dependencies - AI model inference (v1.4.5-beta: Updated to match upstream mistral.rs)
+candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.9.2-alpha.2", rev = "a4ad7c7" }
+candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.9.2-alpha.2", rev = "a4ad7c7" }
+candle-flash-attn-v3 = { git = "https://github.com/huggingface/candle.git", version = "0.9.2-alpha.2", rev = "a4ad7c7" }
+candle-flash-attn = { git = "https://github.com/huggingface/candle.git", version = "0.9.2-alpha.2", rev = "a4ad7c7" }
+candle-metal-kernels = { git = "https://github.com/huggingface/candle.git", version = "0.9.2-alpha.2", rev = "a4ad7c7" }
+# v1.4.5-beta: New dependencies for mistral.rs update
+objc2-metal = "0.3.1"
+objc2-foundation = "0.3.1"
+accelerate-src = { version = "0.3.2" }
+intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"] }
+base64 = "0.22.1"
+half = "2.6.0"
+url = "2.5.4"
+walkdir = "2.5.0"
+data-url = "0.3.1"
+float8 = "0.5.0"
+regex = "1.11.1"
+metal = { version = "0.27.0", features = ["mps"] }
+toml = "0.8.22"
+itertools = "0.14.0"
+rand_distr = "0.5.0"
+cli-table = "0.5.0"
+# Note: Removed duplicate mistralrs-core dependencies (dirs, tqdm, minijinja, etc.)
+# They are already defined in lines 129-172 above
+paste = "1.0.15"
+byteorder = "1.5.0"
+x509-parser = "0.16"
+yoke = "0.7.5"
+pyo3-build-config = "0.25.0"
+ctrlc = "3.4.7"
+directories = "6.0.0"
+rustyline = { version = "15.0.0", default-features = false, features = ["with-file-history"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+axum_static = "1.7.1"
+mime_guess = "2.0.5"
+include_dir = "0.7.4"
+http = "1.3.1"
+httparse = "1.8"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+socket2 = "0.5"
+rust-mcp-sdk = { version = "0.4.2", default-features = false, features = ["server", "hyper-server", "2025_03_26"] }
+rust-mcp-schema = { version = "0.1.11", default-features = false, features = ["schema_utils", "2024_11_05"] }
+bindgen_cuda = { git = "https://github.com/guoqingbao/bindgen_cuda.git", version = "0.1.6" }
+# Note: rubato, rustfft, hound, apodize, statrs already defined above (lines 167-172)
+
+# Mistral.rs internal dependencies
+mistralrs-core = { path = "mistral.rs/mistralrs-core" }
+mistralrs-paged-attn = { path = "mistral.rs/mistralrs-paged-attn" }
+mistralrs-quant = { path = "mistral.rs/mistralrs-quant" }
+mistralrs-vision = { path = "mistral.rs/mistralrs-vision" }
+mistralrs-server-core = { path = "mistral.rs/mistralrs-server-core" }
+mistralrs = { path = "mistral.rs/mistralrs" }
+mistralrs-audio = { path = "mistral.rs/mistralrs-audio" }
+mistralrs-mcp = { path = "mistral.rs/mistralrs-mcp" }
+
+# Note: hf-hub already defined above (line 131)
+# Note: Benchmarks are defined in individual crate Cargo.toml files
+
+# ═══════════════════════════════════════════════════════════════════
+# v7.4.3: Release profile optimizations for maximum mining performance
+# ═══════════════════════════════════════════════════════════════════
+# Dev profile: faster incremental builds (Issue #033)
+# codegen-units=16 parallelizes LLVM codegen; opt-level=1 gives
+# enough optimization for debug runs without full release overhead.
+# ═══════════════════════════════════════════════════════════════════
+[profile.dev]
+opt-level = 1               # Basic optimizations — prevents debug-mode slowness
+codegen-units = 16           # Parallel codegen for faster incremental builds
+debug = "line-tables-only"   # Minimal debug info — saves link time, still get backtraces
+
+[profile.dev.package."*"]
+opt-level = 2               # Optimize dependencies more than local code
+
+# LTO + codegen-units=1 enables cross-crate inlining and whole-program optimization
+# This allows blake3's SIMD routines to be fully inlined into the mining hot loop
+# ═══════════════════════════════════════════════════════════════════
+[profile.release]
+lto = "thin"            # Link-Time Optimization: enables cross-crate inlining (+10-15%)
+codegen-units = 1       # Single codegen unit: best optimization, slower compile (+5-10%)
+opt-level = 3           # Maximum optimization level
+strip = "symbols"       # Strip debug symbols for smaller binary
+panic = "abort"         # Abort on panic: eliminates unwinding overhead
+
+# Also optimize blake3 specifically since it's the mining hot path
+[profile.release.package.blake3]
+opt-level = 3
+codegen-units = 1

@@ -1,0 +1,46 @@
+# q-flux configuration for Delta (5.79.79.158)
+# 8-core, 31GB RAM — secondary node with super-cluster failover
+
+[server]
+listen = ["0.0.0.0:443", "0.0.0.0:80"]
+workers = 0  # auto-detect (8 cores on Delta)
+admin_listen = "127.0.0.1:9090"
+
+[tls]
+cert = "/etc/letsencrypt/live/dl.quillon.xyz/fullchain.pem"
+key = "/etc/letsencrypt/live/dl.quillon.xyz/privkey.pem"
+
+[upstream]
+backends = ["127.0.0.1:8080"]
+max_conns_per_worker = 16
+keepalive_timeout = "30s"
+connect_timeout = "3s"
+response_timeout = "120s"
+health_check_interval = "2s"
+health_check_path = "/api/v1/status"
+health_check_timeout = "3s"
+failure_threshold = 1
+healthy_threshold = 1
+
+# Super-cluster: if local q-api-server goes down, route to Epsilon or Beta
+[cluster]
+peers = [
+    "89.149.241.126:8080",   # Epsilon (10Gbit supernode — primary failover)
+    "185.182.185.227:8080",  # Beta (bootstrap node — secondary failover)
+]
+health_check_interval = "5s"
+
+[limits]
+max_connections = 100000
+max_conns_per_ip = 50
+request_body_limit = 26214400  # 25MB
+rate_limit_per_ip = 100
+rate_limit_burst = 200
+rate_limit_global_rps = 50000
+
+[logging]
+level = "info"
+
+[static_files]
+root = "/opt/orobit/shared/q-narwhalknight/dist-final"
+spa_fallback = true

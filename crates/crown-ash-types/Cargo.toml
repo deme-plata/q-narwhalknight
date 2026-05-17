@@ -1,0 +1,10 @@
+[package]
+name = "crown-ash-types"
+version.workspace = true
+edition.workspace = true
+description = "Crown & Ash — shared data types for medieval grand strategy on Q-NarwhalKnight blockchain"
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"

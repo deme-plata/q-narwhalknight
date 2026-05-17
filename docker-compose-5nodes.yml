@@ -1,0 +1,216 @@
+version: '3.8'
+
+services:
+  # Node 1 - Bootstrap Leader
+  node1:
+    image: q-narwhalknight:tor-enabled-fixed
+    container_name: qnk-node1
+    hostname: node1
+    environment:
+      - NODE_NAME=node1
+      - NODE_ID=12D3KooWNode1Example
+      - API_PORT=8081
+      - P2P_PORT=9001
+      - METRICS_PORT=9091
+      - IS_BOOTSTRAP=true
+      - RUST_LOG=info,q_api_server=debug,q_network=debug
+    ports:
+      - "8091:8080"  # API
+      - "9001:9001"  # P2P
+      - "9091:9091"  # Metrics
+    volumes:
+      - ./data/node1:/data
+      - ./configs/node1:/config
+    networks:
+      qnk-network:
+        ipv4_address: 172.20.0.11
+
+  # Node 2
+  node2:
+    image: q-narwhalknight:tor-enabled-fixed
+    container_name: qnk-node2
+    hostname: node2
+    environment:
+      - NODE_NAME=node2
+      - NODE_ID=12D3KooWNode2Example
+      - API_PORT=8082
+      - P2P_PORT=9002
+      - METRICS_PORT=9092
+      - BOOTSTRAP_PEERS=/ip4/172.20.0.11/tcp/9001/p2p/12D3KooWNode1Example
+      - RUST_LOG=info,q_api_server=debug
+    ports:
+      - "8092:8080"
+      - "9002:9002"
+      - "9092:9092"
+    volumes:
+      - ./data/node2:/data
+      - ./configs/node2:/config
+    networks:
+      qnk-network:
+        ipv4_address: 172.20.0.12
+    depends_on:
+      - node1
+
+  # Node 3
+  node3:
+    image: q-narwhalknight:tor-enabled-fixed
+    container_name: qnk-node3
+    hostname: node3
+    environment:
+      - NODE_NAME=node3
+      - NODE_ID=12D3KooWNode3Example
+      - API_PORT=8083
+      - P2P_PORT=9003
+      - METRICS_PORT=9093
+      - BOOTSTRAP_PEERS=/ip4/172.20.0.11/tcp/9001/p2p/12D3KooWNode1Example
+      - RUST_LOG=info,q_api_server=debug
+    ports:
+      - "8093:8080"
+      - "9003:9003"
+      - "9093:9093"
+    volumes:
+      - ./data/node3:/data
+      - ./configs/node3:/config
+    networks:
+      qnk-network:
+        ipv4_address: 172.20.0.13
+    depends_on:
+      - node1
+
+  # Node 4
+  node4:
+    image: q-narwhalknight:tor-enabled-fixed
+    container_name: qnk-node4
+    hostname: node4
+    environment:
+      - NODE_NAME=node4
+      - NODE_ID=12D3KooWNode4Example
+      - API_PORT=8084
+      - P2P_PORT=9004
+      - METRICS_PORT=9094
+      - BOOTSTRAP_PEERS=/ip4/172.20.0.11/tcp/9001/p2p/12D3KooWNode1Example
+      - RUST_LOG=info,q_api_server=debug
+    ports:
+      - "8094:8080"
+      - "9004:9004"
+      - "9094:9094"
+    volumes:
+      - ./data/node4:/data
+      - ./configs/node4:/config
+    networks:
+      qnk-network:
+        ipv4_address: 172.20.0.14
+    depends_on:
+      - node1
+      - node2
+
+  # Node 5
+  node5:
+    image: q-narwhalknight:tor-enabled-fixed
+    container_name: qnk-node5
+    hostname: node5
+    environment:
+      - NODE_NAME=node5
+      - NODE_ID=12D3KooWNode5Example
+      - API_PORT=8085
+      - P2P_PORT=9005
+      - METRICS_PORT=9095
+      - BOOTSTRAP_PEERS=/ip4/172.20.0.11/tcp/9001/p2p/12D3KooWNode1Example
+      - RUST_LOG=info,q_api_server=debug
+    ports:
+      - "8095:8080"
+      - "9005:9005"
+      - "9095:9095"
+    volumes:
+      - ./data/node5:/data
+      - ./configs/node5:/config
+    networks:
+      qnk-network:
+        ipv4_address: 172.20.0.15
+    depends_on:
+      - node1
+      - node2
+
+  # Monitoring Dashboard
+  monitor:
+    image: curlimages/curl:latest
+    container_name: qnk-monitor
+    networks:
+      - qnk-network
+    depends_on:
+      - node1
+      - node2
+      - node3
+      - node4
+      - node5
+    command: >
+      sh -c "
+        sleep 20 &&
+        echo '📊 Starting Network Monitor' &&
+        while true; do
+          echo '';
+          echo '=== Q-NarwhalKnight 5-Node Network Status ===';
+          echo 'Time:' $$(date);
+          echo '';
+          
+          for i in 1 2 3 4 5; do
+            echo -n \"Node $$i: \";
+            if curl -s http://172.20.0.1$$i:808$$i/health > /dev/null 2>&1; then
+              echo '✅ ONLINE';
+              echo -n '  Peers: ';
+              curl -s http://172.20.0.1$$i:808$$i/peers | grep -o 'peer_count\":[0-9]*' | cut -d: -f2 || echo '0';
+            else
+              echo '❌ OFFLINE';
+            fi;
+          done;
+          
+          echo '';
+          echo '📡 Testing Data Propagation...';
+          
+          # Send test transaction from Node 1
+          TX_RESPONSE=$$(curl -s -X POST http://172.20.0.11:8081/api/v1/transaction \
+            -H 'Content-Type: application/json' \
+            -d '{\"from\":\"node1\",\"to\":\"node5\",\"amount\":100,\"nonce\":1}' 2>/dev/null);
+          
+          if [ ! -z \"$$TX_RESPONSE\" ]; then
+            echo '✅ Transaction submitted to Node 1';
+            sleep 2;
+            
+            # Check if transaction reached other nodes
+            for i in 2 3 4 5; do
+              echo -n \"  Node $$i mempool: \";
+              MEMPOOL=$$(curl -s http://172.20.0.1$$i:808$$i/api/v1/mempool 2>/dev/null);
+              if echo \"$$MEMPOOL\" | grep -q 'transaction'; then
+                echo '✅ Received';
+              else
+                echo '⏳ Waiting';
+              fi;
+            done;
+          fi;
+          
+          echo '';
+          echo '🔄 Consensus Status:';
+          for i in 1 2 3 4 5; do
+            echo -n \"  Node $$i round: \";
+            curl -s http://172.20.0.1$$i:808$$i/api/v1/consensus/status | grep -o 'round\":[0-9]*' | cut -d: -f2 || echo '0';
+          done;
+          
+          echo '';
+          echo '===============================';
+          sleep 30;
+        done
+      "
+
+networks:
+  qnk-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:

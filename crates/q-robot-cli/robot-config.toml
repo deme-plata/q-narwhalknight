@@ -1,0 +1,187 @@
+# Quantum Water Robot Control Configuration
+# Generated example configuration for Q-NarwhalKnight robot CLI
+
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/0", "/ip6/::/tcp/0"]
+bootstrap_nodes = [
+    "/ip4/192.168.1.1/tcp/4001/p2p/12D3KooWExample1", 
+    "/ip4/192.168.1.2/tcp/4001/p2p/12D3KooWExample2"
+]
+max_connections = 100
+connection_timeout = 30
+quantum_secure = true
+
+[quantum]
+enable_qrng = true
+coherence_monitor_interval = 1.0
+
+[quantum.entanglement]
+auto_establish = true
+target_fidelity = 0.9
+decoherence_threshold = 0.1
+bell_state_type = "PhiPlus"
+
+[quantum.visualization]
+enable_realtime = true
+update_frequency = 10.0
+color_scheme = "rainbow"
+export_format = "json"
+
+[security.post_quantum]
+enable_signatures = true
+signature_algorithm = "Dilithium5"
+enable_key_exchange = true
+key_exchange_algorithm = "Kyber1024"
+hybrid_mode = true
+
+[security.authentication]
+method = "certificate"
+credential_path = "./certs/robot-client.pem"
+token_refresh_interval = 3600
+enable_mfa = false
+
+[security.access_control]
+admin_users = ["claude"]
+operator_users = ["operator"]
+readonly_users = ["observer"]
+
+[security.access_control.permissions]
+robot_control = "admin,operator"
+swarm_control = "admin,operator"
+quantum_measure = "admin,operator,readonly"
+system_config = "admin"
+
+[logging]
+level = "debug"
+format = "text"
+console = true
+metrics = true
+
+# Robot Configurations
+[robots.quantum_jelly_001]
+robot_type = "QuantumJellyfish"
+endpoint = "tcp://192.168.1.100:8080"
+capabilities = ["bioluminescence", "superposition_glow", "quantum_sensing"]
+
+[robots.quantum_jelly_001.auth]
+auth_type = "certificate"
+username = "jelly_001"
+certificate = "./certs/jelly_001.pem"
+private_key = "./certs/jelly_001.key"
+
+[robots.quantum_jelly_001.parameters]
+max_depth = 100.0
+bioluminescence_intensity = 1000.0
+coherence_time = 0.001
+
+[robots.dolphin_alpha_002]
+robot_type = "EntangledDolphin"
+endpoint = "tcp://192.168.1.101:8080"
+capabilities = ["quantum_echolocation", "entanglement_comm", "swarm_leadership"]
+
+[robots.dolphin_alpha_002.auth]
+auth_type = "certificate"
+username = "dolphin_002"
+certificate = "./certs/dolphin_002.pem"
+private_key = "./certs/dolphin_002.key"
+
+[robots.dolphin_alpha_002.parameters]
+max_speed = 15.0
+echolocation_range = 500.0
+comm_fidelity = 0.95
+
+[robots.octopus_stealth_003]
+robot_type = "TunnelingOctopus"
+endpoint = "tcp://192.168.1.102:8080"
+capabilities = ["quantum_tunneling", "phase_camouflage", "precision_manipulation"]
+
+[robots.octopus_stealth_003.auth]
+auth_type = "certificate"
+username = "octopus_003"
+certificate = "./certs/octopus_003.pem"
+private_key = "./certs/octopus_003.key"
+
+[robots.octopus_stealth_003.parameters]
+tunneling_probability = 0.15
+camouflage_effectiveness = 0.9
+manipulation_precision = 0.01
+
+[robots.whale_song_004]
+robot_type = "WaveParticleWhale"
+endpoint = "tcp://192.168.1.103:8080"
+capabilities = ["wave_particle_song", "quantum_sonar", "ecosystem_monitoring"]
+
+[robots.whale_song_004.auth]
+auth_type = "certificate"
+username = "whale_004"
+certificate = "./certs/whale_004.pem"
+private_key = "./certs/whale_004.key"
+
+[robots.whale_song_004.parameters]
+song_frequency_range = 1000.0
+sonar_range = 2000.0
+monitoring_radius = 500.0
+
+[robots.seahorse_precision_005]
+robot_type = "SuperpositionSeahorse"
+endpoint = "tcp://192.168.1.104:8080"
+capabilities = ["position_superposition", "quantum_grasp", "micro_manipulation"]
+
+[robots.seahorse_precision_005.auth]
+auth_type = "certificate"
+username = "seahorse_005"
+certificate = "./certs/seahorse_005.pem"
+private_key = "./certs/seahorse_005.key"
+
+[robots.seahorse_precision_005.parameters]
+position_uncertainty = 2.0
+grasp_precision = 0.001
+superposition_time = 0.1
+
+[robots.nano_swarm_006]
+robot_type = "NanoQuantumonas"
+endpoint = "tcp://192.168.1.105:8080"
+capabilities = ["cellular_tunneling", "molecular_sensing", "nano_repair"]
+
+[robots.nano_swarm_006.auth]
+auth_type = "certificate"
+username = "nano_006"
+certificate = "./certs/nano_006.pem"
+private_key = "./certs/nano_006.key"
+
+[robots.nano_swarm_006.parameters]
+cell_penetration_rate = 0.8
+molecular_detection_limit = 1e-18
+repair_efficiency = 0.95
+
+[robots.school_leader_007]
+robot_type = "SchoolingRobotichthys"
+endpoint = "tcp://192.168.1.106:8080"
+capabilities = ["collective_coherence", "swarm_entanglement", "formation_control"]
+
+[robots.school_leader_007.auth]
+auth_type = "certificate"
+username = "school_007"
+certificate = "./certs/school_007.pem"
+private_key = "./certs/school_007.key"
+
+[robots.school_leader_007.parameters]
+swarm_coordination_range = 100.0
+entanglement_fidelity = 0.92
+formation_stability = 0.88
+
+[robots.cyber_guardian_008]
+robot_type = "CyberCetus"
+endpoint = "tcp://192.168.1.107:8080"
+capabilities = ["quantum_consciousness", "ecosystem_monitoring", "threat_assessment"]
+
+[robots.cyber_guardian_008.auth]
+auth_type = "certificate"
+username = "guardian_008"
+certificate = "./certs/guardian_008.pem"
+private_key = "./certs/guardian_008.key"
+
+[robots.cyber_guardian_008.parameters]
+consciousness_coherence = 0.85
+monitoring_area = 10000.0
+threat_detection_sensitivity = 0.99

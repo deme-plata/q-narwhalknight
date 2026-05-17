@@ -1,0 +1,169 @@
+// VDF Progress and Consensus Integration
+// Verifiable Delay Function visualization components
+
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Colors } from "colors.slint";
+
+// VDF Metric Card Helper Component
+component VDFMetricCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <string> value;
+    in-out property <string> icon;
+    in-out property <color> metric-color;
+    
+    background: Colors.card-background;
+    border-radius: 6px;
+    height: 60px;
+    width: 120px;
+    
+    VerticalBox {
+        padding: 8px;
+        spacing: 4px;
+        
+        HorizontalBox {
+            spacing: 5px;
+            alignment: start;
+            
+            Text {
+                text: icon;
+                font-size: 14px;
+            }
+            
+            Text {
+                text: title;
+                color: Colors.text-secondary;
+                font-size: 10px;
+            }
+        }
+        
+        Text {
+            text: value;
+            color: metric-color;
+            font-size: 14px;
+            font-weight: 600;
+        }
+    }
+}
+
+// VDF Progress Tracker Component
+export component VDFProgressTracker inherits Rectangle {
+    // VDF computation properties
+    in-out property <float> progress: 0.0; // 0.0 to 1.0
+    in-out property <string> vdf-status: "Computing";
+    in-out property <int> iterations: 1000000;
+    in-out property <int> current-iteration: 0;
+    in-out property <float> estimated-time: 120.5; // seconds
+    in-out property <float> elapsed-time: 45.2;
+    
+    background: Colors.background-secondary;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        // Header
+        Text {
+            text: "⏳ VDF Computation Progress";
+            color: Colors.text-primary;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        // Progress bar
+        Rectangle {
+            height: 20px;
+            background: #1e293b;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #334155;
+            
+            Rectangle {
+                width: parent.width * progress;
+                height: parent.height;
+                background: vdf-status == "Computing" ? Colors.quantum-blue : Colors.quantum-green;
+                border-radius: 10px;
+            }
+        }
+        
+        // Status info
+        HorizontalBox {
+            spacing: 20px;
+            
+            VDFMetricCard {
+                title: "Progress";
+                value: Math.round(progress * 100) + "%";
+                icon: "⏳";
+                metric-color: Colors.quantum-blue;
+            }
+            
+            VDFMetricCard {
+                title: "Status";
+                value: vdf-status;
+                icon: "🔄";
+                metric-color: Colors.quantum-purple;
+            }
+            
+            VDFMetricCard {
+                title: "ETA";
+                value: Math.round(estimated-time - elapsed-time) + "s";
+                icon: "⏱️";
+                metric-color: Colors.quantum-gold;
+            }
+        }
+    }
+}
+
+// VDF Consensus Integration Component
+export component VDFConsensusIntegration inherits Rectangle {
+    // Consensus integration properties
+    in-out property <bool> vdf-verified: false;
+    in-out property <string> consensus-status: "Active";
+    in-out property <int> round-number: 847;
+    in-out property <float> consensus-latency: 2.3;
+    
+    background: Colors.background-secondary;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Colors.border-color;
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 10px;
+        
+        Text {
+            text: "🏛️ VDF Consensus Integration";
+            color: Colors.text-primary;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        
+        HorizontalBox {
+            spacing: 15px;
+            
+            VDFMetricCard {
+                title: "Round";
+                value: round-number + "";
+                icon: "🔄";
+                metric-color: Colors.quantum-blue;
+            }
+            
+            VDFMetricCard {
+                title: "Status";
+                value: consensus-status;
+                icon: vdf-verified ? "✅" : "⏳";
+                metric-color: vdf-verified ? Colors.quantum-green : Colors.quantum-gold;
+            }
+            
+            VDFMetricCard {
+                title: "Latency";
+                value: Math.round(consensus-latency * 10) / 10 + "ms";
+                icon: "⚡";
+                metric-color: Colors.quantum-purple;
+            }
+        }
+    }
+}
+

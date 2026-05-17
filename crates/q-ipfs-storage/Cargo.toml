@@ -1,0 +1,56 @@
+[package]
+name = "q-ipfs-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Internal crates
+q-types = { path = "../q-types" }
+q-network = { path = "../q-network" }
+
+# IPFS via libp2p (using request-response for block exchange instead of bitswap)
+libp2p = { workspace = true, features = ["kad", "request-response"] }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+
+# Compression
+zstd = "0.13"
+lz4 = "1.24"
+
+# Hashing
+blake3 = { workspace = true }
+sha2 = "0.10"
+multihash-codetable = "0.1"
+cid = "0.11"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+bytes = "1.5"
+hex = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# RocksDB (not available on Windows)
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"

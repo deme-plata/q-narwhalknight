@@ -1,0 +1,476 @@
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+
+export struct TxRecord {
+    direction: string,
+    amount: string,
+    counterparty: string,
+    timestamp: string,
+    tx-hash: string,
+    fee: string,
+    token: string,
+}
+
+export component HistoryScreen inherits Rectangle {
+    in property <[TxRecord]> transactions: [];
+    in property <bool> loading: false;
+
+    // Detail modal state
+    property <bool> show-detail: false;
+    property <int> detail-index: -1;
+    property <string> detail-direction: "";
+    property <string> detail-amount: "";
+    property <string> detail-counterparty: "";
+    property <string> detail-timestamp: "";
+    property <string> detail-hash: "";
+    property <string> detail-fee: "";
+    property <string> detail-token: "";
+    in-out property <bool> hash-copied: false;
+    in-out property <bool> addr-copied: false;
+
+    callback go-back();
+    callback refresh();
+    callback copy-text(string);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                    }
+                }
+            }
+
+            Text {
+                text: "Transaction History";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            if root.transactions.length > 0 : Text {
+                text: root.transactions.length + " tx";
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                width: 80px;
+                border-radius: Theme.radius-sm;
+                background: refresh-touch.has-hover ? Theme.bg-hover : transparent;
+
+                refresh-touch := TouchArea {
+                    clicked => { root.refresh(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Icon {
+                        source: @image-url("icons/refresh-cw.svg");
+                        icon-color: Theme.accent-blue;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Refresh";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        if root.loading : Text {
+            text: "Loading...";
+            color: Theme.text-muted;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        if root.transactions.length == 0 && !root.loading : Text {
+            text: "No transactions yet";
+            color: Theme.text-muted;
+            font-size: Theme.font-md;
+            horizontal-alignment: center;
+        }
+
+        // Transaction list
+        Flickable {
+            viewport-height: root.transactions.length * 80px;
+
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+
+                for tx[i] in root.transactions : Card {
+                    height: 72px;
+                    elevated: true;
+
+                    Rectangle {
+                        border-radius: Theme.radius-md;
+                        background: tx-touch.has-hover ? Theme.bg-hover.with-alpha(0.3) : transparent;
+
+                        tx-touch := TouchArea {
+                            clicked => {
+                                root.detail-index = i;
+                                root.detail-direction = tx.direction;
+                                root.detail-amount = tx.amount;
+                                root.detail-counterparty = tx.counterparty;
+                                root.detail-timestamp = tx.timestamp;
+                                root.detail-hash = tx.tx-hash;
+                                root.detail-fee = tx.fee;
+                                root.detail-token = tx.token;
+                                root.hash-copied = false;
+                                root.addr-copied = false;
+                                root.show-detail = true;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Theme.spacing-md;
+                            padding-right: Theme.spacing-md;
+                            spacing: Theme.spacing-sm;
+
+                            // Direction indicator — SVG icons
+                            VerticalLayout {
+                                alignment: center;
+                                width: 36px;
+
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 18px;
+                                    background: tx.direction == "Sent"
+                                        ? Theme.accent-red.with-alpha(0.15)
+                                        : (tx.direction == "Mining" ? Theme.accent-yellow.with-alpha(0.15) : Theme.accent-green.with-alpha(0.15));
+
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        if tx.direction == "Sent" : Icon {
+                                            source: @image-url("icons/arrow-up-right.svg");
+                                            icon-color: Theme.accent-red;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
+                                        if tx.direction == "Mining" : Icon {
+                                            source: @image-url("icons/pickaxe.svg");
+                                            icon-color: Theme.accent-yellow;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
+                                        if tx.direction != "Sent" && tx.direction != "Mining" : Icon {
+                                            source: @image-url("icons/arrow-down-left.svg");
+                                            icon-color: Theme.accent-green;
+                                            width: 18px;
+                                            height: 18px;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Details
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+
+                                Text {
+                                    text: tx.direction;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: 500;
+                                }
+                                Text {
+                                    text: tx.counterparty;
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-xs;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: tx.timestamp;
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-xs;
+                                }
+                            }
+
+                            // Amount
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+
+                                Text {
+                                    text: tx.amount;
+                                    color: tx.direction == "Sent" ? Theme.accent-red : Theme.accent-green;
+                                    font-size: Theme.font-md;
+                                    font-weight: 600;
+                                    horizontal-alignment: right;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ Transaction Detail Modal ═══
+    if root.show-detail : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.7);
+
+        TouchArea {}
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 340px;
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-lg;
+                    border-width: 2px;
+                    border-color: root.detail-direction == "Sent"
+                        ? Theme.accent-red.with-alpha(0.5)
+                        : (root.detail-direction == "Mining" ? Theme.accent-yellow.with-alpha(0.5) : Theme.accent-green.with-alpha(0.5));
+                    drop-shadow-blur: 20px;
+                    drop-shadow-color: #000000.with-alpha(0.4);
+
+                    VerticalLayout {
+                        padding: Theme.spacing-lg;
+                        spacing: Theme.spacing-md;
+
+                        // Type badge — SVG icons
+                        HorizontalLayout {
+                            alignment: center;
+
+                            Rectangle {
+                                width: 56px;
+                                height: 56px;
+                                border-radius: 28px;
+                                background: root.detail-direction == "Sent"
+                                    ? Theme.accent-red.with-alpha(0.15)
+                                    : (root.detail-direction == "Mining" ? Theme.accent-yellow.with-alpha(0.15) : Theme.accent-green.with-alpha(0.15));
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    if root.detail-direction == "Sent" : Icon {
+                                        source: @image-url("icons/arrow-up-right.svg");
+                                        icon-color: Theme.accent-red;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
+                                    if root.detail-direction == "Mining" : Icon {
+                                        source: @image-url("icons/pickaxe.svg");
+                                        icon-color: Theme.accent-yellow;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
+                                    if root.detail-direction != "Sent" && root.detail-direction != "Mining" : Icon {
+                                        source: @image-url("icons/arrow-down-left.svg");
+                                        icon-color: Theme.accent-green;
+                                        width: Theme.icon-lg;
+                                        height: Theme.icon-lg;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Direction label
+                        Text {
+                            text: root.detail-direction;
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+
+                        // Amount
+                        Text {
+                            text: root.detail-amount;
+                            color: root.detail-direction == "Sent" ? Theme.accent-red : Theme.accent-green;
+                            font-size: Theme.font-xl;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+
+                        // Timestamp
+                        Text {
+                            text: root.detail-timestamp;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                        }
+
+                        // Details rows
+                        Card {
+                            VerticalLayout {
+                                padding: Theme.spacing-sm;
+                                spacing: Theme.spacing-sm;
+
+                                // Counterparty
+                                VerticalLayout {
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: root.detail-direction == "Sent" ? "To:" : "From:";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: Theme.spacing-xs;
+
+                                        Text {
+                                            text: root.detail-counterparty;
+                                            color: Theme.text-secondary;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        Rectangle {
+                                            width: 52px;
+                                            height: 24px;
+                                            border-radius: 4px;
+                                            background: addr-cp.has-hover ? Theme.bg-hover : transparent;
+
+                                            addr-cp := TouchArea {
+                                                clicked => {
+                                                    root.copy-text(root.detail-counterparty);
+                                                    root.addr-copied = true;
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 2px;
+                                                Icon {
+                                                    source: @image-url("icons/copy.svg");
+                                                    icon-color: root.addr-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    width: 12px;
+                                                    height: 12px;
+                                                }
+                                                Text {
+                                                    text: root.addr-copied ? "OK" : "Copy";
+                                                    color: root.addr-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    font-size: Theme.font-xs;
+                                                    font-weight: 500;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // TX Hash
+                                if root.detail-hash != "" : VerticalLayout {
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: "Transaction Hash:";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: Theme.spacing-xs;
+
+                                        Text {
+                                            text: root.detail-hash;
+                                            color: Theme.text-secondary;
+                                            font-size: 10px;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+
+                                        Rectangle {
+                                            width: 52px;
+                                            height: 24px;
+                                            border-radius: 4px;
+                                            background: hash-cp.has-hover ? Theme.bg-hover : transparent;
+
+                                            hash-cp := TouchArea {
+                                                clicked => {
+                                                    root.copy-text(root.detail-hash);
+                                                    root.hash-copied = true;
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                spacing: 2px;
+                                                Icon {
+                                                    source: @image-url("icons/copy.svg");
+                                                    icon-color: root.hash-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    width: 12px;
+                                                    height: 12px;
+                                                }
+                                                Text {
+                                                    text: root.hash-copied ? "OK" : "Copy";
+                                                    color: root.hash-copied ? Theme.accent-green : Theme.accent-blue;
+                                                    font-size: Theme.font-xs;
+                                                    font-weight: 500;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Fee
+                                if root.detail-fee != "" && root.detail-fee != "0" : HorizontalLayout {
+                                    spacing: Theme.spacing-sm;
+                                    Text { text: "Fee:"; color: Theme.text-muted; font-size: Theme.font-xs; vertical-alignment: center; }
+                                    Text { text: root.detail-fee + " QUG"; color: Theme.text-secondary; font-size: Theme.font-sm; vertical-alignment: center; }
+                                }
+
+                                // Token
+                                if root.detail-token != "" && root.detail-token != "QUG" : HorizontalLayout {
+                                    spacing: Theme.spacing-sm;
+                                    Text { text: "Token:"; color: Theme.text-muted; font-size: Theme.font-xs; vertical-alignment: center; }
+                                    Text { text: root.detail-token; color: Theme.accent-cyan; font-size: Theme.font-sm; font-weight: 500; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        // Close button
+                        QButton {
+                            label: "Close";
+                            button-color: Theme.accent-blue;
+                            clicked => { root.show-detail = false; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

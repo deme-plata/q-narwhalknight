@@ -1,0 +1,59 @@
+[Unit]
+Description=Q-NarwhalKnight API Server - Phase 12 (Post-Quantum Security - v1.0.44-beta)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight
+
+# ✅ v1.0.44-beta Phase 12 Configuration (Post-Quantum Security + Mandatory Encryption)
+Environment="Q_DB_PATH=./data-mine12"
+Environment="Q_NETWORK_ID=testnet-phase12"
+Environment="Q_IS_VALIDATOR=true"
+Environment="Q_P2P_PORT=9001"
+Environment="Q_ENABLE_AI=1"
+Environment="RUST_LOG=info"
+Environment="Q_ALLOW_SOLO_MINING=true"
+
+# AI Resource Limits (prevent CPU overload)
+Environment="Q_AI_THREADS=4"
+Environment="Q_AI_MAX_CONCURRENT=2"
+
+# 🔐 v1.0.44-beta: Mandatory RocksDB Encryption with Auto-Generated Passphrases
+# NOTE: Encryption keys and passphrases are auto-generated on first run!
+# Your passphrase will be saved to: ./data-mine12/encryption_passphrase.txt
+# IMPORTANT: Backup this file to recover your encrypted database!
+#
+# Optional: Set custom encryption passphrase (otherwise auto-generated):
+# Environment="Q_ENCRYPTION_PASSPHRASE=your-secure-passphrase-here"
+#
+# Optional: Set custom keys file location (otherwise auto-generated in data dir):
+# Environment="Q_ENCRYPTION_KEYS_FILE=/path/to/encryption.keys"
+
+# v1.4.0-beta: Recursive Proofs Service — trustless light client bootstrap (~10ms verification)
+# Activates 8 endpoints under /api/v1/recursive-proofs/. Q_ENABLE_PROVER intentionally left off (CPU-heavy, optional).
+Environment="Q_ENABLE_RECURSIVE_PROOFS=1"
+
+ExecStart=/opt/orobit/shared/q-narwhalknight/target/release/q-api-server --port 8080
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=q-api-server
+
+# ✅ Graceful shutdown timeout (5 minutes to prevent data loss)
+TimeoutStopSec=300
+KillMode=mixed
+SendSIGKILL=yes
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

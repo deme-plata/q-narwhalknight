@@ -1,0 +1,36 @@
+\contentsline {chapter}{\numberline {1}The Zürich Handoff}{5}{chapter.1}%
+\contentsline {section}{\numberline {1.1}Chapter 1: Digital Shadows}{5}{section.1.1}%
+\contentsline {subsection}{\numberline {1.1.1}Scene 1: Ghost Protocol}{5}{subsection.1.1.1}%
+\contentsline {subsection}{\numberline {1.1.2}Scene 2: The Hunt Begins}{6}{subsection.1.1.2}%
+\contentsline {subsection}{\numberline {1.1.3}Scene 3: Quantum Entanglement}{7}{subsection.1.1.3}%
+\contentsline {subsection}{\numberline {1.1.4}Chapter Notes}{9}{subsection.1.1.4}%
+\contentsline {chapter}{\numberline {2}The Singapore Protocol}{11}{chapter.2}%
+\contentsline {section}{\numberline {2.1}Chapter 2: The Architect's Game}{11}{section.2.1}%
+\contentsline {subsection}{\numberline {2.1.1}Scene 1: Underground Network}{11}{subsection.2.1.1}%
+\contentsline {subsection}{\numberline {2.1.2}Scene 2: The Handler's Voice}{12}{subsection.2.1.2}%
+\contentsline {subsection}{\numberline {2.1.3}Scene 3: The Convergence}{14}{subsection.2.1.3}%
+\contentsline {subsection}{\numberline {2.1.4}Chapter Notes}{17}{subsection.2.1.4}%
+\contentsline {chapter}{\numberline {3}Phoenix Rising}{19}{chapter.3}%
+\contentsline {section}{\numberline {3.1}Chapter 3: Quantum Entanglement}{19}{section.3.1}%
+\contentsline {subsection}{\numberline {3.1.1}Scene 1: The Zurich Dead Drop}{19}{subsection.3.1.1}%
+\contentsline {subsection}{\numberline {3.1.2}Scene 2: Phoenix Revealed}{20}{subsection.3.1.2}%
+\contentsline {subsection}{\numberline {3.1.3}Scene 3: The Kronos Files}{22}{subsection.3.1.3}%
+\contentsline {subsection}{\numberline {3.1.4}Scene 4: The Zurich Escape}{24}{subsection.3.1.4}%
+\contentsline {subsection}{\numberline {3.1.5}Chapter Notes}{26}{subsection.3.1.5}%
+\contentsline {chapter}{\numberline {4}The Singapore Endgame}{27}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Chapter 4: The Singapore Protocol}{27}{section.4.1}%
+\contentsline {subsection}{\numberline {4.1.1}Scene 1: Lion City Arrival}{27}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {4.1.2}Scene 2: The Quantum Lab Infiltration}{29}{subsection.4.1.2}%
+\contentsline {subsection}{\numberline {4.1.3}Scene 3: The Hawker Center Confrontation}{31}{subsection.4.1.3}%
+\contentsline {subsection}{\numberline {4.1.4}Scene 4: The Safe House Revelation}{33}{subsection.4.1.4}%
+\contentsline {subsection}{\numberline {4.1.5}Scene 5: The Moscow Decision}{34}{subsection.4.1.5}%
+\contentsline {subsection}{\numberline {4.1.6}Scene 5.5: The Architect's Message}{36}{subsection.4.1.6}%
+\contentsline {subsection}{\numberline {4.1.7}Chapter Notes}{39}{subsection.4.1.7}%
+\contentsline {chapter}{\numberline {5}The Moscow Gambit}{41}{chapter.5}%
+\contentsline {section}{\numberline {5.1}Chapter 5: The Moscow Gambit}{41}{section.5.1}%
+\contentsline {subsection}{\numberline {5.1.1}Scene 1: Arrival in the Cold}{41}{subsection.5.1.1}%
+\contentsline {subsection}{\numberline {5.1.2}Scene 2: The Ghost Market}{43}{subsection.5.1.2}%
+\contentsline {subsection}{\numberline {5.1.3}Scene 3: The Underground Vault}{47}{subsection.5.1.3}%
+\contentsline {subsection}{\numberline {5.1.4}Scene 4: The Architect's Revelation}{51}{subsection.5.1.4}%
+\contentsline {subsection}{\numberline {5.1.5}Scene 5: The Mother's Message}{53}{subsection.5.1.5}%
+\contentsline {subsection}{\numberline {5.1.6}Epilogue: The First Domino}{56}{subsection.5.1.6}%

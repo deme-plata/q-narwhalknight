@@ -1,0 +1,51 @@
+[package]
+name = "q-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Secure WASM plugin framework for Q-NarwhalKnight with capability-based permissions"
+
+[dependencies]
+# WASM runtime with component model support
+wasmtime = { version = "14.0", features = ["component-model", "async", "cranelift"] }
+wasmtime-wasi = "14.0"
+
+# Cryptography for plugin verification
+sha3 = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+
+# Serialization
+serde = { workspace = true }
+bincode = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Versioning
+semver = "1.0"
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }
+
+[features]
+default = ["full"]
+full = ["async-runtime", "component-model"]
+async-runtime = []
+component-model = []

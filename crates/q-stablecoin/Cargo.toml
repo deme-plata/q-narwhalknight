@@ -1,0 +1,42 @@
+[package]
+name = "q-stablecoin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace dependencies
+q-types = { path = "../q-types" }
+q-quantum-crypto = { path = "../q-quantum-crypto" }
+q-tor-client = { path = "../q-tor-client" }
+q-zk-snark = { path = "../q-zk-snark" }
+q-zk-stark = { path = "../q-zk-stark" }
+
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Financial/decimal math
+bigdecimal = { workspace = true }
+rust_decimal = { workspace = true }
+
+# Collections and concurrency
+dashmap = { workspace = true }
+
+# Cryptography
+sha3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }

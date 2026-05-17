@@ -1,0 +1,401 @@
+[center][size=18pt][b][color=#FFD700]Q-NarwhalKnight v2.2.0[/color][/b][/size]
+[size=16pt][b][color=#00D9FF]DATA INTEGRITY HARDENING + 12-WEEK OPTIMIZATION ROADMAP[/color][/b][/size]
+[size=12pt][i]Race Condition Fixes & Mission Control to 100+ BPS[/i][/size][/center]
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]CRITICAL DATA INTEGRITY FIX[/color][/b][/size]
+
+This release addresses a [b][color=#FF0000]critical race condition[/color][/b] discovered during deep code analysis. The issue could cause [b]height pointer regression[/b] under concurrent write conditions - potentially orphaning blocks and creating database gaps.
+
+[b]The Problem:[/b]
+[code]Thread A: reads height pointer = 100
+Thread B: reads height pointer = 100
+Thread A: writes blocks 101-200, sets pointer = 200
+Thread B: writes blocks 101-150, sets pointer = 150
+RESULT: Pointer regresses from 200 to 150, blocks 151-200 become orphans![/code]
+
+[b]The Solution:[/b]
+[code]Thread A: acquires global_write_lock, writes 101-200, sets pointer = 200, releases
+Thread B: acquires global_write_lock, reads pointer = 200, writes 201-250, releases
+RESULT: All blocks contiguous, no data loss[/code]
+
+[b][color=#00FF94]v2.2.0 introduces three critical fixes:[/color][/b]
+
+[list]
+[li][b]Global Write Lock Accessor[/b] - New [font=courier]acquire_global_write_lock()[/font] method for external code to safely coordinate writes[/li]
+[li][b]TurboSync Legacy Mode Protection[/b] - All Transaction writes now acquire global lock first[/li]
+[li][b]TOCTOU Race Elimination[/b] - Height pointer updates re-verify under lock to prevent time-of-check/time-of-use vulnerabilities[/li]
+[/list]
+
+[hr]
+
+[size=14pt][b]Download v2.2.0[/b][/size]
+
+[b]Pre-compiled Binary (Linux x86_64):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-v2.2.0 && chmod +x q-api-server-v2.2.0[/code]
+
+[b]Official Repository:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+
+[hr]
+
+[size=16pt][b][color=#FFD700]12-WEEK OPTIMIZATION ROADMAP: MISSION CONTROL[/color][/b][/size]
+
+We're launching an ambitious 12-week optimization program to achieve [b][color=#00FF94]100+ blocks per second sync[/color][/b] and [b][color=#00FF94]near-zero CPU overhead[/color][/b]. Each phase is named after orbital mechanics concepts - because we're going to the moon with engineering precision.
+
+[center][size=14pt][b][color=#FF00FF]THE MISSION PHASES[/color][/b][/size][/center]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 1: SCRAMJET (Week 1-2)[/color][/b][/size]
+[i]High-speed atmospheric optimization - reduce drag, increase velocity[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]1.1 CBOR Response Serialization[/b] - Replace JSON with compact binary format[/li]
+[li][b]1.2 LZ4 Standardization[/b] - Switch from zstd to ultra-fast LZ4 compression[/li]
+[li][b]1.3 Decompression Parallelism Match[/b] - Parallel decode matching compression speed[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]Current State:
+- JSON serialization: ~5ms per 10k blocks
+- zstd compression: ~20ms at level 1
+- Sequential decompression: single-threaded bottleneck
+
+SCRAMJET Optimization:
+- CBOR: 3x smaller than JSON, 5x faster to parse
+- LZ4: 10x faster than zstd, 90% compression ratio
+- Parallel decompress: utilize all CPU cores[/code]
+
+[table]
+[tr][td][b]Metric[/b][/td][td][b]Before[/b][/td][td][b]After[/b][/td][td][b]Improvement[/b][/td][/tr]
+[tr][td]Serialization[/td][td]5ms[/td][td]1ms[/td][td][color=#00FF94]5x faster[/color][/td][/tr]
+[tr][td]Compression[/td][td]20ms[/td][td]5ms[/td][td][color=#00FF94]4x faster[/color][/td][/tr]
+[tr][td]Bandwidth[/td][td]100%[/td][td]60%[/td][td][color=#00FF94]40% reduction[/color][/td][/tr]
+[/table]
+
+[b][color=#FFD700]Expected Result: 40% bandwidth reduction, 3x faster compression[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 2: LAMINAR (Week 3-4)[/color][/b][/size]
+[i]Smooth, turbulence-free flow - eliminate lock contention[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]2.1 DashMap Migration[/b] - Replace [font=courier]RwLock<HashMap>[/font] with lock-free [font=courier]DashMap[/font] for high-contention maps[/li]
+[li][b]2.2 Tokio Mutex Migration[/b] - Replace [font=courier]std::sync::Mutex[/font] with [font=courier]tokio::sync::Mutex[/font] for async compatibility[/li]
+[li][b]2.3 Batched spawn_blocking[/b] - Reduce thread pool overhead with batch operations[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]Lock Contention Analysis:
+- Peer map: 10,000+ reads/sec, 100 writes/sec
+- Block cache: 50,000+ reads/sec, 1,000 writes/sec
+- Height pointer: 1,000+ reads/sec, 10 writes/sec
+
+Current: RwLock causes reader starvation under write pressure
+LAMINAR: DashMap allows concurrent readers during writes[/code]
+
+[b]DashMap Performance:[/b]
+[table]
+[tr][td][b]Operation[/b][/td][td][b]RwLock<HashMap>[/b][/td][td][b]DashMap[/b][/td][td][b]Improvement[/b][/td][/tr]
+[tr][td]Concurrent reads[/td][td]Blocked during write[/td][td]Never blocked[/td][td][color=#00FF94]Lock-free[/color][/td][/tr]
+[tr][td]Write latency[/td][td]50-100us[/td][td]1-5us[/td][td][color=#00FF94]20x faster[/color][/td][/tr]
+[tr][td]Throughput[/td][td]100k ops/s[/td][td]10M ops/s[/td][td][color=#00FF94]100x higher[/color][/td][/tr]
+[/table]
+
+[b][color=#FFD700]Expected Result: 20-30% throughput increase[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 3: HOHMANN (Week 5-6)[/color][/b][/size]
+[i]Optimal transfer orbit - minimum energy, maximum efficiency[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]3.1 Header-First Staged Sync[/b] - Download block headers first, validate chain, then fetch bodies[/li]
+[li][b]3.2 Checkpoint Jump Points[/b] - Pre-verified checkpoints every 100k blocks for instant sync start[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]Traditional Sync (current):
+1. Request full blocks 1-1000
+2. Validate each block fully
+3. Request blocks 1001-2000
+4. Repeat... (hours to sync 1M blocks)
+
+HOHMANN Header-First Sync:
+1. Download all headers (1M headers = 50MB, takes 10 seconds)
+2. Verify header chain (PoW/signatures, takes 5 seconds)
+3. Jump to checkpoint at block 900,000
+4. Download only 100,000 blocks of bodies
+5. Full sync in MINUTES, not hours![/code]
+
+[b]Checkpoint Format:[/b]
+[code]{
+  "height": 900000,
+  "block_hash": "0x7f3a...",
+  "state_root": "0x9b2c...",
+  "utxo_commitment": "0x4d8e...",
+  "signatures": [
+    {"validator": "0x...", "sig": "0x..."},
+    // 67%+ of validators signed
+  ]
+}[/code]
+
+[b][color=#FFD700]Expected Result: Initial sync from hours to minutes[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 4: SLINGSHOT (Week 7-8)[/color][/b][/size]
+[i]Gravity assist acceleration - use existing momentum[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]4.1 Hot Cache Peer Selection[/b] - Prefer peers that recently served the block range you need[/li]
+[li][b]4.2 Continuous Stream Protocol[/b] - Keep connection open, stream blocks without per-request overhead[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]Current Peer Selection:
+- Round-robin across all peers
+- No memory of what peer served what blocks
+- Cache miss rate: 60-80%
+
+SLINGSHOT Hot Cache Selection:
+- Track last 10 block ranges served by each peer
+- Prefer peer whose cache contains your requested range
+- Cache hit rate: 90%+[/code]
+
+[b]Continuous Stream Protocol:[/b]
+[code]Current (request-response):
+Request 1 → [network latency] → Response 1
+Request 2 → [network latency] → Response 2
+Request 3 → [network latency] → Response 3
+Overhead: 3x network round-trips
+
+SLINGSHOT (streaming):
+Stream request (1-1000) →
+  Block 1 → Block 2 → Block 3 → ... → Block 1000
+Overhead: 1x network round-trip for 1000 blocks![/code]
+
+[b][color=#FFD700]Expected Result: 3-5x cache hit improvement[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 5: KALMAN (Week 9-10)[/color][/b][/size]
+[i]Optimal state estimation - predict and adapt in real-time[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]5.1 PID Rate Controller[/b] - Proportional-Integral-Derivative control for request rate[/li]
+[li][b]5.2 Kalman Network Predictor[/b] - Predict peer latency and adjust proactively[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]PID Controller for Sync Rate:
+- Setpoint: Target 50 blocks/s
+- P (Proportional): Increase rate when below target
+- I (Integral): Correct persistent undershoot
+- D (Derivative): Dampen oscillations
+
+Kalman Filter for Latency:
+- State: [estimated_latency, latency_trend]
+- Measurement: actual_round_trip_time
+- Prediction: next_expected_latency
+- Adaptation: pre-adjust request timing[/code]
+
+[b]Self-Tuning Parameters:[/b]
+[table]
+[tr][td][b]Parameter[/b][/td][td][b]Manual Tuning[/b][/td][td][b]Kalman Auto-Tune[/b][/td][/tr]
+[tr][td]Request batch size[/td][td]Fixed 10,000[/td][td]Dynamic 1k-100k[/td][/tr]
+[tr][td]Timeout duration[/td][td]Fixed 30s[/td][td]Dynamic 2x predicted RTT[/td][/tr]
+[tr][td]Concurrent requests[/td][td]Fixed 3[/td][td]Dynamic 1-10 based on bandwidth[/td][/tr]
+[tr][td]Compression level[/td][td]Fixed level 1[/td][td]Dynamic based on CPU/bandwidth ratio[/td][/tr]
+[/table]
+
+[b][color=#FFD700]Expected Result: Self-tuning optimal parameters for any network condition[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#00D9FF]PHASE 6: DELTA-V (Week 11-12)[/color][/b][/size]
+[i]Maximum velocity change - final burn to orbit[/i]
+
+[b]Objectives:[/b]
+[list]
+[li][b]6.1 Rkyv Zero-Copy Integration[/b] - Deserialize directly from network buffer without allocation[/li]
+[li][b]6.2 Pre-Compressed Storage[/b] - Store blocks already compressed, skip compression on sync[/li]
+[li][b]6.3 io_uring Integration[/b] - Linux kernel async I/O for maximum disk throughput[/li]
+[/list]
+
+[b]Technical Details:[/b]
+[code]Rkyv Zero-Copy:
+- Traditional: Network buffer → Deserialize → Allocate → Copy → Process
+- Rkyv: Network buffer → Cast pointer → Process (NO COPY!)
+- Memory savings: 50% reduction
+- Speed improvement: 10x faster deserialization
+
+Pre-Compressed Storage:
+- Current: Decompress → Process → Compress → Store
+- DELTA-V: Store compressed → Serve compressed → Decompress only on read
+- CPU savings: 2x compression removed from hot path
+
+io_uring:
+- Traditional: syscall per I/O operation (expensive context switch)
+- io_uring: Batch 1000s of I/O ops in single syscall
+- Throughput: 1M IOPS vs 100k IOPS[/code]
+
+[b]Final Performance Target:[/b]
+[table]
+[tr][td][b]Metric[/b][/td][td][b]v2.2.0[/b][/td][td][b]After DELTA-V[/b][/td][td][b]Improvement[/b][/td][/tr]
+[tr][td]Sync speed[/td][td]12 blocks/s[/td][td]100+ blocks/s[/td][td][color=#00FF94]8x faster[/color][/td][/tr]
+[tr][td]CPU usage[/td][td]60%[/td][td]10%[/td][td][color=#00FF94]6x lower[/color][/td][/tr]
+[tr][td]Memory usage[/td][td]500MB[/td][td]250MB[/td][td][color=#00FF94]50% reduction[/color][/td][/tr]
+[tr][td]I/O latency[/td][td]1ms[/td][td]0.1ms[/td][td][color=#00FF94]10x faster[/color][/td][/tr]
+[/table]
+
+[b][color=#FFD700]Expected Result: Near-zero CPU overhead for I/O operations[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#FFD700]MISSION TIMELINE SUMMARY[/color][/b][/size]
+
+[table]
+[tr][td][b]Week[/b][/td][td][b]Phase[/b][/td][td][b]Focus[/b][/td][td][b]Key Deliverable[/b][/td][/tr]
+[tr][td]1-2[/td][td][color=#00D9FF]SCRAMJET[/color][/td][td]Serialization & Compression[/td][td]40% bandwidth reduction[/td][/tr]
+[tr][td]3-4[/td][td][color=#00D9FF]LAMINAR[/color][/td][td]Lock-Free Concurrency[/td][td]20-30% throughput increase[/td][/tr]
+[tr][td]5-6[/td][td][color=#00D9FF]HOHMANN[/color][/td][td]Header-First Sync[/td][td]Hours → Minutes sync[/td][/tr]
+[tr][td]7-8[/td][td][color=#00D9FF]SLINGSHOT[/color][/td][td]Cache Optimization[/td][td]3-5x cache hit rate[/td][/tr]
+[tr][td]9-10[/td][td][color=#00D9FF]KALMAN[/color][/td][td]Adaptive Control[/td][td]Self-tuning parameters[/td][/tr]
+[tr][td]11-12[/td][td][color=#00D9FF]DELTA-V[/color][/td][td]Zero-Copy I/O[/td][td]Near-zero CPU overhead[/td][/tr]
+[/table]
+
+[b][color=#00FF94]Combined Result: 8x faster sync, 6x lower CPU, 50% less memory[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]V2.2.0 TECHNICAL CHANGES[/color][/b][/size]
+
+[b]Files Modified:[/b]
+
+[b]1. crates/q-storage/src/lib.rs:899-927[/b]
+[code]/// v2.2.0: CRITICAL DATA INTEGRITY FIX
+/// Acquire global write lock BEFORE any Transaction writes to prevent race conditions.
+///
+/// Race condition scenario WITHOUT this lock:
+/// 1. Thread A: reads height pointer = 100
+/// 2. Thread B: reads height pointer = 100
+/// 3. Thread A: writes blocks 101-200, sets pointer = 200
+/// 4. Thread B: writes blocks 101-150, sets pointer = 150
+/// 5. RESULT: Pointer regresses from 200 to 150, blocks 151-200 become orphans!
+///
+pub async fn acquire_global_write_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    self.global_write_lock.lock().await
+}[/code]
+
+[b]2. crates/q-storage/src/turbo_sync.rs:2724-2732[/b]
+[code]// v2.2.0: CRITICAL DATA INTEGRITY FIX
+// Acquire global write lock BEFORE any Transaction writes to prevent race conditions.
+let _global_guard = self.storage.acquire_global_write_lock().await;
+debug!("Legacy mode acquired global write lock for {} blocks", blocks.len());[/code]
+
+[b]3. crates/q-storage/src/turbo_sync.rs:2821-2859[/b]
+[code]// v2.2.0: TOCTOU Race Elimination
+// Re-read current height UNDER LOCK to prevent time-of-check/time-of-use race
+let _global_guard = self.storage.acquire_global_write_lock().await;
+let actual_current = self.storage.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
+
+if highest_contiguous > actual_current {
+    let tx = self.storage.begin_transaction().await?;
+    let latest_height_bytes = highest_contiguous.to_be_bytes().to_vec();
+    tx.put("blocks", b"qblock:latest", &latest_height_bytes).await?;
+    tx.commit().await?;
+
+    // WAL sync AFTER pointer update for durability
+    self.storage.sync_wal().await?;
+}[/code]
+
+[hr]
+
+[size=14pt][b][color=#00FF94]POST-QUANTUM CRYPTOGRAPHY[/color][/b][/size]
+
+All data integrity fixes are compatible with our quantum-resistant infrastructure:
+
+[list]
+[li][b]Dilithium5 signatures[/b] (NIST PQC standard) - 4.6KB signatures[/li]
+[li][b]Kyber1024 key encapsulation[/b] (NIST PQC standard) - Quantum-safe key exchange[/li]
+[li][b]AEGIS-QL access control[/b] (Sparse Ring-LWE) - 50%+ faster than Kyber-768[/li]
+[li][b]Quantum Mixer[/b] with ZK-STARK proofs - Complete transaction privacy[/li]
+[li][b]VDF-based randomness[/b] - Genus-2 Jacobians for ASIC-resistant mining[/li]
+[li][b]Tor integration[/b] - Network-level anonymity[/li]
+[/list]
+
+[hr]
+
+[size=14pt][b][color=#FFD700]BUILD FROM SOURCE[/color][/b][/size]
+
+[code]git clone https://code.quillon.xyz/repo.git q-narwhalknight
+cd q-narwhalknight
+git checkout v2.2.0
+
+# Build with extended timeout for quantum components
+timeout 36000 cargo build --release --package q-api-server
+
+# Run full node
+./target/release/q-api-server --port 8080 --tui
+
+# Verify data integrity protections are active
+journalctl -u q-api-server | grep "global_write_lock"[/code]
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]WHY THIS MATTERS[/color][/b][/size]
+
+[b]1. Data Integrity is Non-Negotiable[/b]
+On a blockchain, data corruption means lost funds. The race conditions we fixed could theoretically cause block orphaning under high load. v2.2.0 eliminates this risk entirely.
+
+[b]2. 12-Week Roadmap is Engineering-Driven[/b]
+Each phase targets a specific, measurable bottleneck. No vaporware - just systematic optimization with clear metrics.
+
+[b]3. Named Phases for Accountability[/b]
+SCRAMJET, LAMINAR, HOHMANN, SLINGSHOT, KALMAN, DELTA-V - each phase has a name, timeline, and expected outcome. Track our progress week by week.
+
+[b]4. Foundation Before Speed[/b]
+We fixed the data integrity issues FIRST, before launching the optimization roadmap. A fast database that corrupts data is worthless.
+
+[hr]
+
+[size=14pt][b][color=#00FF94]CURRENT NETWORK STATUS[/color][/b][/size]
+
+[b]Bootstrap Node:[/b] 185.182.185.227:9001
+[b]Network ID:[/b] testnet-phase16
+[b]Current Height:[/b] 744,000+ blocks
+[b]Sync Speed:[/b] 12+ blocks/s
+[b]Connected Peers:[/b] 10-20 nodes globally
+
+[b]Peer ID:[/b] [font=courier]12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu[/font]
+[b]Multiaddr:[/b] [font=courier]/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWQbKp6RYgZpC3dUCYou5LrVmd7pFa74rQj7rsK1sWUnfu[/font]
+
+[hr]
+
+[center][size=14pt][b][color=#00FF94]Mission Control Active[/color][/b][/size]
+
+[size=12pt][i]12 weeks to 100+ blocks per second. Watch us fly.[/i][/size]
+
+[b]Q-NarwhalKnight v2.2.0[/b]
+[i]Data Integrity Hardening | 12-Week Optimization Roadmap | Quantum-Resistant Security[/i]
+
+[size=10pt][color=#FFD700]"First, make it correct. Then, make it fast." - Engineering wisdom[/color][/size]
+
+[b]Download:[/b] [url=https://quillon.xyz/downloads/q-api-server-v2.2.0]quillon.xyz/downloads/q-api-server-v2.2.0[/url]
+[b]Repository:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url][/center]
+
+[hr]
+
+[size=10pt][i]v2.2.0 represents our commitment to building a production-grade blockchain. The data integrity fixes ensure your blocks are never lost. The 12-week roadmap shows our path to world-class sync performance. With quantum-resistant cryptography already in place, Q-NarwhalKnight is ready for both today's threats and tomorrow's quantum computers.[/i][/size]
+
+[size=8pt]License: Apache 2.0 | Technology: Rust + Post-Quantum Cryptography | Consensus: DAG-Knight + Quantum Enhancements | Tokenomics: Time-Based Halving | Token: [size=14pt][b]QUG[/b][/size] (21M max supply) | Current Height: 744,000+[/size]

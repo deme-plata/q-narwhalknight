@@ -1,0 +1,222 @@
+// ═══════════════════════════════════════════════════════════════
+// NOT READY — Feature incomplete, do not import in app.slint
+// This screen is excluded from navigation until implementation
+// is complete and approved. Icons: icons/mail.svg / calendar.svg / bot.svg
+// ═══════════════════════════════════════════════════════════════
+
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+
+export struct CalendarEvent {
+    id: string,
+    title: string,
+    description: string,
+    event-date: string,
+    event-type: string,  // "personal" | "community" | "scheduled_tx"
+    amount: string,
+    token: string,
+    recipient: string,
+    status: string,      // "pending" | "executed" | "cancelled"
+}
+
+export component CalendarScreen inherits Rectangle {
+    in property <[CalendarEvent]> events: [];
+    in property <bool> loading: false;
+    in property <string> today: "";
+
+    callback go-back();
+    callback refresh-events();
+    callback cancel-event(string);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+                back-touch := TouchArea { clicked => { root.go-back(); } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/arrow-left.svg"); icon-color: Theme.text-primary; }
+                }
+            }
+
+            Text {
+                text: "Calendar";
+                font-size: Theme.font-lg;
+                font-weight: 700;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: refresh-touch.has-hover ? Theme.bg-hover : transparent;
+                refresh-touch := TouchArea { clicked => { root.refresh-events(); } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/refresh-cw.svg"); icon-color: Theme.text-secondary; width: 18px; height: 18px; }
+                }
+            }
+        }
+
+        // Today
+        if root.today != "" : Text {
+            text: root.today;
+            font-size: Theme.font-sm;
+            color: Theme.text-muted;
+        }
+
+        if root.loading : HorizontalLayout {
+            alignment: center;
+            height: 40px;
+            Text { text: "Loading..."; color: Theme.text-muted; font-size: Theme.font-sm; }
+        }
+
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: root.events.length * 96px + 80px;
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+
+                if root.events.length == 0 && !root.loading : Rectangle {
+                    height: 80px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Text {
+                            text: "No upcoming events";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                        }
+                    }
+                }
+
+                for ev[i] in root.events : Rectangle {
+                    height: ev.amount != "" ? 88px : 68px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-card;
+                    border-width: 1px;
+                    border-color: ev.event-type == "scheduled_tx" ? Theme.accent-purple.with-alpha(0.4) : Theme.border;
+
+                    HorizontalLayout {
+                        padding: Theme.spacing-sm;
+                        spacing: Theme.spacing-sm;
+
+                        // Color indicator
+                        Rectangle {
+                            width: 4px;
+                            border-radius: 2px;
+                            background: ev.event-type == "scheduled_tx" ? Theme.accent-purple
+                                : ev.event-type == "community" ? Theme.accent-cyan
+                                : Theme.accent-blue;
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 3px;
+                            alignment: center;
+
+                            Text {
+                                text: ev.title;
+                                font-size: Theme.font-sm;
+                                font-weight: 600;
+                                color: Theme.text-primary;
+                                overflow: elide;
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.spacing-xs;
+                                Icon {
+                                    source: @image-url("icons/clock.svg");
+                                    icon-color: Theme.text-muted;
+                                    width: 12px; height: 12px;
+                                }
+                                Text {
+                                    text: ev.event-date;
+                                    font-size: Theme.font-xs;
+                                    color: Theme.text-muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            if ev.description != "" : Text {
+                                text: ev.description;
+                                font-size: Theme.font-xs;
+                                color: Theme.text-secondary;
+                                overflow: elide;
+                            }
+
+                            if ev.amount != "" : HorizontalLayout {
+                                spacing: Theme.spacing-xs;
+                                Text {
+                                    text: ev.amount + " " + ev.token;
+                                    font-size: Theme.font-xs;
+                                    color: Theme.accent-green;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: "→ " + ev.recipient;
+                                    font-size: Theme.font-xs;
+                                    color: Theme.text-muted;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: Theme.spacing-xs;
+
+                            // Status badge
+                            Rectangle {
+                                height: 20px;
+                                width: 64px;
+                                border-radius: 10px;
+                                background: ev.status == "executed" ? Theme.accent-green.with-alpha(0.2)
+                                    : ev.status == "cancelled" ? Theme.accent-red.with-alpha(0.2)
+                                    : Theme.accent-yellow.with-alpha(0.2);
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: ev.status;
+                                        font-size: 9px;
+                                        color: ev.status == "executed" ? Theme.accent-green
+                                            : ev.status == "cancelled" ? Theme.accent-red
+                                            : Theme.accent-yellow;
+                                    }
+                                }
+                            }
+
+                            if ev.status == "pending" : Rectangle {
+                                height: 22px;
+                                width: 64px;
+                                border-radius: Theme.radius-sm;
+                                background: cancel-touch.has-hover ? Theme.accent-red.with-alpha(0.3) : Theme.accent-red.with-alpha(0.15);
+                                cancel-touch := TouchArea { clicked => { root.cancel-event(ev.id); } }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: "Cancel";
+                                        font-size: 10px;
+                                        color: Theme.accent-red;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

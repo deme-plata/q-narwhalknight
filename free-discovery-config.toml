@@ -1,0 +1,148 @@
+# Q-NarwhalKnight FREE Peer Discovery Configuration
+# Completely eliminates Bitcoin transaction costs while maintaining security
+
+[discovery]
+# Enable ONLY free methods - disable expensive ones
+free_methods_only = true
+max_cost_per_day = 0.00  # Enforce ZERO cost operation
+
+# Free discovery methods (enabled by default)
+tor_dht_enabled = true           # FREE - Tor DHT discovery
+bootstrap_enabled = true         # FREE - Community bootstrap nodes  
+gossip_enabled = true           # FREE - Viral peer sharing
+
+# Expensive methods (disabled by default to prevent costs)
+bitcoin_discovery_enabled = false   # EXPENSIVE - $1-$50 per transaction
+dns_discovery_enabled = false       # CHEAP - ~$10/year but still costs money
+
+# Emergency fallback settings
+emergency_paid_discovery = false    # Never use paid methods even in emergency
+max_emergency_cost = 0.00          # Maximum to spend in emergency
+
+[tor_dht]
+# Tor DHT configuration - completely FREE
+enabled = true
+publish_interval_seconds = 600      # Announce every 10 minutes (FREE)
+query_interval_seconds = 300        # Search every 5 minutes (FREE)
+record_ttl_seconds = 3600          # Records valid for 1 hour
+max_hop_count = 5                  # Prevent gossip loops
+namespace = "qnk-discovery"        # DHT namespace for Q-NarwhalKnight
+
+[bootstrap_nodes]
+# Community-operated FREE bootstrap nodes
+# These are volunteer-operated servers that provide initial peer lists
+enabled = true
+query_interval_seconds = 300       # Query every 5 minutes (FREE)
+peer_ttl_seconds = 3600           # Peer info valid for 1 hour
+
+# Primary bootstrap nodes (FREE community servers)
+nodes = [
+    "bootstrap1.qnk.onion:8333",
+    "bootstrap2.qnk.onion:8333", 
+    "bootstrap3.qnk.onion:8333",
+    "bootstrap4.qnk.onion:8333",
+    "bootstrap5.qnk.onion:8333",
+]
+
+# Backup bootstrap nodes
+backup_nodes = [
+    "backup1.qnk.onion:8333",
+    "backup2.qnk.onion:8333",
+]
+
+[gossip_protocol]
+# Viral peer sharing - completely FREE
+enabled = true
+gossip_interval_seconds = 60       # Share peers every minute (FREE)
+max_peers_per_gossip = 10         # Share top 10 peers each time
+max_hop_count = 5                 # Prevent infinite gossip loops
+reputation_decay_rate = 0.99      # 1% reputation decay per interval
+
+# Gossip message types
+enable_peer_announcements = true   # Announce new peers (FREE)
+enable_peer_list_sharing = true    # Share known peers (FREE) 
+enable_heartbeats = true          # Send periodic heartbeats (FREE)
+
+[bitcoin_bridge]
+# Bitcoin OP_RETURN discovery - DISABLED to prevent costs
+enabled = false                    # CRITICAL: Keep disabled for free operation
+simulate_only = true              # Only simulate for testing
+max_transactions_per_day = 0      # ZERO Bitcoin transactions allowed
+
+# If accidentally enabled, these limits prevent runaway costs
+max_cost_per_transaction = 50.00  # Never spend more than $50 per tx
+daily_transaction_limit = 0       # ZERO transactions per day
+emergency_override = false        # Never allow emergency override
+
+# Bitcoin network settings (unused when disabled)
+network = "testnet"               # Use testnet if testing
+confirmation_blocks = 1           # Minimum confirmations
+fee_rate_sat_per_byte = 1         # Conservative fee rate
+
+[dns_discovery]
+# DNS TXT record discovery - disabled by default
+enabled = false                   # Keep disabled for zero-cost operation
+domains = []                     # No DNS domains to check
+ttl_seconds = 86400              # 24 hour TTL for DNS records
+
+[cost_tracking]
+# Monitor and enforce zero-cost operation
+track_all_operations = true       # Track even free operations
+alert_on_any_cost = true         # Alert if ANY cost is incurred
+daily_cost_limit = 0.00          # Hard limit: $0.00 per day
+weekly_cost_limit = 0.00         # Hard limit: $0.00 per week
+monthly_cost_limit = 0.00        # Hard limit: $0.00 per month
+
+# Cost alert settings
+send_cost_alerts = true          # Send alerts for any costs
+cost_alert_email = "admin@qnk.local"  # Email for cost alerts
+cost_alert_threshold = 0.01      # Alert if cost exceeds $0.01
+
+[security]
+# Security settings for free discovery
+verify_peer_signatures = true    # Verify cryptographic signatures
+rate_limit_dht_queries = true    # Prevent DHT spam
+max_peers_from_single_source = 50 # Limit peers from one source
+bootstrap_reputation_threshold = 0.5  # Min reputation for bootstrap
+
+# Tor security
+require_onion_addresses = true    # Only accept .onion addresses
+validate_onion_format = true     # Validate v3 onion address format
+max_circuit_reuse = 100          # Rotate circuits for security
+
+[performance]
+# Performance tuning for free methods
+concurrent_discovery_methods = 3  # Run 3 methods in parallel
+max_concurrent_connections = 20   # Max simultaneous connections
+connection_timeout_seconds = 30   # Timeout for peer connections
+discovery_timeout_seconds = 120   # Overall discovery timeout
+
+# Caching to reduce repeated queries
+enable_peer_caching = true       # Cache discovered peers
+peer_cache_ttl_seconds = 1800    # Cache for 30 minutes
+bootstrap_cache_ttl_seconds = 600 # Cache bootstrap results
+
+[logging]
+# Logging configuration
+log_discovery_operations = true   # Log all discovery attempts
+log_cost_tracking = true         # Log cost information
+log_peer_connections = true      # Log peer connection attempts
+log_level = "info"               # info, debug, warn, error
+
+# Highlight free operations
+emphasize_free_operations = true  # Highlight FREE in logs
+show_cost_summary = true         # Show daily cost summary
+
+[advanced]
+# Advanced settings for power users
+enable_experimental_methods = false  # Disable experimental features
+fallback_to_simulation = true       # Use simulation if real methods fail
+strict_free_mode = true             # Absolutely no costs allowed
+
+# Development settings
+development_mode = false            # Disable development features
+mock_expensive_operations = true    # Mock costly operations in dev
+
+# Example usage in Rust:
+# let config = FreeDiscoveryConfig::from_file("free-discovery-config.toml")?;
+# let coordinator = FreeDiscoveryCoordinator::new(tor_client, config.discovery, node_id, port);

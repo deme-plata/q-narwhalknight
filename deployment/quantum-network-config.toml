@@ -1,0 +1,237 @@
+# Q-NarwhalKnight Quantum Consensus Network Deployment Configuration
+# Production-ready quantum-enhanced distributed consensus system
+
+[network]
+name = "Q-NarwhalKnight Quantum Network"
+version = "1.0.0-quantum"
+consensus_protocol = "DAG-BFT-Quantum"
+network_id = "q-quantum-mainnet-001"
+chain_id = 1337
+
+# Network topology
+total_validators = 10
+initial_validators = 4
+min_validators = 3
+max_validators = 100
+target_committee_size = 7
+
+# Performance targets
+target_tps = 50000
+target_finality_seconds = 2.5
+target_block_time_seconds = 1.0
+batch_size = 1000
+
+[quantum_enhancements]
+# Quantum cryptography settings
+enable_quantum_crypto = true
+enable_qkd_protocols = true
+quantum_key_refresh_interval_seconds = 300
+require_quantum_signatures = true
+
+# Quantum mixing settings  
+enable_quantum_mixing = true
+default_mixing_privacy_level = "Enhanced"
+enable_stark_privacy_proofs = true
+quantum_entropy_pool_size = 1048576  # 1MB quantum entropy
+
+# STARK proof system
+enable_gpu_acceleration = true
+stark_proof_batch_size = 10
+stark_security_parameter = 128
+stark_proof_cache_size = 10000
+
+[nodes]
+# Quantum-enhanced validator node configurations
+
+[nodes.validator-alpha-001]
+name = "Quantum Validator Alpha-001"
+node_id = "qv-alpha-001"
+public_key = "qpub-alpha-001-quantum-enhanced"
+network_address = "quantum-alpha-001.q-narwhal.network:8080"
+consensus_address = "quantum-alpha-001.q-narwhal.network:8081"
+api_address = "quantum-alpha-001.q-narwhal.network:8082"
+quantum_crypto_enabled = true
+mixing_enabled = true
+stake_amount = 10000000
+region = "us-east-1"
+quantum_hardware = false  # Simulation mode
+
+[nodes.validator-beta-002]
+name = "Quantum Validator Beta-002"
+node_id = "qv-beta-002"
+public_key = "qpub-beta-002-quantum-enhanced"
+network_address = "quantum-beta-002.q-narwhal.network:8080"
+consensus_address = "quantum-beta-002.q-narwhal.network:8081"
+api_address = "quantum-beta-002.q-narwhal.network:8082"
+quantum_crypto_enabled = true
+mixing_enabled = true
+stake_amount = 10000000
+region = "eu-west-1"
+quantum_hardware = false
+
+[nodes.validator-gamma-003]
+name = "Quantum Validator Gamma-003"
+node_id = "qv-gamma-003"
+public_key = "qpub-gamma-003-quantum-enhanced"
+network_address = "quantum-gamma-003.q-narwhal.network:8080"
+consensus_address = "quantum-gamma-003.q-narwhal.network:8081"
+api_address = "quantum-gamma-003.q-narwhal.network:8082"
+quantum_crypto_enabled = true
+mixing_enabled = true
+stake_amount = 10000000
+region = "asia-pacific-1"
+quantum_hardware = false
+
+[nodes.validator-delta-004]
+name = "Quantum Validator Delta-004"
+node_id = "qv-delta-004"
+public_key = "qpub-delta-004-quantum-enhanced"
+network_address = "quantum-delta-004.q-narwhal.network:8080"
+consensus_address = "quantum-delta-004.q-narwhal.network:8081"
+api_address = "quantum-delta-004.q-narwhal.network:8082"
+quantum_crypto_enabled = true
+mixing_enabled = true
+stake_amount = 10000000
+region = "us-west-2"
+quantum_hardware = false
+
+[plugins]
+# Quantum plugin system configuration
+
+[plugins.quantum_crypto]
+enabled = true
+plugin_id = "q-quantum-crypto"
+version = "1.0.0"
+auto_start = true
+qkd_protocols = ["BB84", "E91", "MDI-QKD"]
+quantum_signature_scheme = "LamportOTS"
+entropy_sources = ["quantum_rng", "hardware_rng", "atmospheric_noise"]
+key_refresh_policy = "time_based"
+forward_secrecy = true
+
+[plugins.quantum_mixing]
+enabled = true
+plugin_id = "q-quantum-mixing"
+version = "1.0.0"
+auto_start = true
+mixing_levels = ["QuickMix", "StandardMix", "DeepMix", "CustomMix"]
+enable_decoy_transactions = true
+enable_temporal_spreading = true
+quantum_noise_injection = true
+stark_proof_generation = true
+batch_processing = true
+
+[plugins.zk_stark]
+enabled = true
+plugin_id = "q-zk-stark"
+version = "1.0.0"
+auto_start = true
+gpu_acceleration = true
+proof_cache_enabled = true
+batch_proof_size = 10
+verification_parallelism = true
+
+[security]
+# Quantum security parameters
+quantum_security_level = 128
+post_quantum_ready = true
+information_theoretic_security = true
+
+# Classical security (backup)
+classical_security_level = 256
+rsa_key_size = 4096
+ecdsa_curve = "secp256k1"
+
+# Network security
+require_tls_1_3 = true
+enable_perfect_forward_secrecy = true
+quantum_key_distribution_mandatory = true
+
+[consensus]
+# DAG-BFT consensus parameters enhanced with quantum features
+dag_width = 10
+dag_depth_limit = 100
+anchor_election_quantum_enhanced = true
+vdf_quantum_seeded = true
+
+# Quantum consensus enhancements
+quantum_randomness_beacon = true
+quantum_timestamp_verification = true
+quantum_signature_verification = true
+
+# Performance
+mempool_size = 100000
+transaction_timeout_seconds = 30
+consensus_timeout_seconds = 5
+sync_batch_size = 1000
+
+[storage]
+# Quantum-safe storage configuration
+storage_backend = "quantum_safe_storage"
+encryption = "post_quantum_aes_256_gcm"
+key_derivation = "quantum_pbkdf2"
+backup_quantum_keys = true
+forward_secure_storage = true
+
+[monitoring]
+# Network monitoring and observability
+enable_prometheus_metrics = true
+enable_jaeger_tracing = true
+enable_quantum_metrics = true
+
+metrics_port = 9090
+tracing_port = 14268
+log_level = "info"
+
+# Quantum-specific metrics
+track_qkd_performance = true
+track_mixing_statistics = true
+track_stark_proof_performance = true
+track_quantum_entropy_quality = true
+
+[api]
+# Quantum-enhanced API configuration
+rest_api_port = 8080
+websocket_port = 8081
+grpc_port = 8082
+
+# Quantum API endpoints
+enable_quantum_crypto_api = true
+enable_mixing_api = true
+enable_stark_proof_api = true
+
+# Rate limiting
+api_rate_limit_per_minute = 1000
+quantum_ops_rate_limit_per_minute = 100
+
+[bootstrap]
+# Network bootstrap configuration
+genesis_quantum_entropy = "0x1234567890abcdef"  # Real quantum entropy for production
+initial_stake_distribution = [
+    { node = "qv-alpha-001", stake = 10000000 },
+    { node = "qv-beta-002", stake = 10000000 },
+    { node = "qv-gamma-003", stake = 10000000 },
+    { node = "qv-delta-004", stake = 10000000 }
+]
+
+# Quantum initialization
+quantum_crypto_bootstrap = true
+initial_qkd_key_generation = true
+stark_system_initialization = true
+
+[deployment]
+# Deployment automation settings
+deployment_mode = "production"
+auto_scaling = true
+health_check_interval_seconds = 30
+restart_policy = "always"
+
+# Resource requirements
+cpu_cores = 8
+memory_gb = 32
+storage_gb = 1000
+gpu_memory_gb = 16  # For STARK acceleration
+
+# Docker configuration
+docker_image = "q-narwhalknight/quantum-node:1.0.0"
+container_registry = "quantum-registry.q-narwhal.network"

@@ -1,0 +1,37 @@
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="400" height="400" viewBox="0,0,400,400">
+  <defs>
+    <linearGradient id="gradient1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d9ff;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#6b46c1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#ff0080;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <g fill="url(#gradient1)" stroke="none" stroke-width="1" stroke-linecap="butt" stroke-linejoin="miter" stroke-miterlimit="10" stroke-dasharray="" stroke-dashoffset="0" font-family="none" font-weight="none" font-size="none" text-anchor="none" style="mix-blend-mode: normal">
+    <circle cx="200" cy="200" r="180" fill="url(#gradient1)" opacity="0.1"/>
+    <circle cx="200" cy="200" r="160" fill="none" stroke="url(#gradient1)" stroke-width="2"/>
+    <circle cx="200" cy="200" r="140" fill="none" stroke="url(#gradient1)" stroke-width="2" opacity="0.7"/>
+    <circle cx="200" cy="200" r="120" fill="none" stroke="url(#gradient1)" stroke-width="3"/>
+
+    <!-- Central quantum symbol -->
+    <circle cx="200" cy="200" r="40" fill="url(#gradient1)" opacity="0.8"/>
+    <circle cx="200" cy="200" r="30" fill="none" stroke="#ffffff" stroke-width="2"/>
+    <circle cx="200" cy="200" r="20" fill="none" stroke="url(#gradient1)" stroke-width="2"/>
+    <circle cx="200" cy="200" r="10" fill="#ffffff"/>
+
+    <!-- Quantum particles/nodes -->
+    <circle cx="120" cy="120" r="8" fill="url(#gradient1)"/>
+    <circle cx="280" cy="120" r="8" fill="url(#gradient1)"/>
+    <circle cx="120" cy="280" r="8" fill="url(#gradient1)"/>
+    <circle cx="280" cy="280" r="8" fill="url(#gradient1)"/>
+
+    <!-- Connection lines -->
+    <line x1="120" y1="120" x2="200" y2="200" stroke="url(#gradient1)" stroke-width="2" opacity="0.6"/>
+    <line x1="280" y1="120" x2="200" y2="200" stroke="url(#gradient1)" stroke-width="2" opacity="0.6"/>
+    <line x1="120" y1="280" x2="200" y2="200" stroke="url(#gradient1)" stroke-width="2" opacity="0.6"/>
+    <line x1="280" y1="280" x2="200" y2="200" stroke="url(#gradient1)" stroke-width="2" opacity="0.6"/>
+
+    <!-- Orbital paths -->
+    <path d="M200,60 A140,140 0 0,1 340,200 A140,140 0 0,1 200,340 A140,140 0 0,1 60,200 A140,140 0 0,1 200,60"
+          fill="none" stroke="url(#gradient1)" stroke-width="1" opacity="0.4" stroke-dasharray="5,5"/>
+  </g>
+</svg>

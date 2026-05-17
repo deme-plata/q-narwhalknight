@@ -1,0 +1,213 @@
+[package]
+name = "q-miner"
+version.workspace = true
+edition = "2021"
+description = "Q-NarwhalKnight High-Performance CPU/GPU Miner with CUDA Support"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/deme-plata/q-narwhalknight"
+
+[dependencies]
+# Core Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-vdf = { path = "../q-vdf" }
+q-network = { path = "../q-network", optional = true }
+q-storage = { path = "../q-storage", optional = true }
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-mining = { path = "../q-mining", optional = true, default-features = false }
+
+# Core Rust ecosystem  
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# CLI framework
+clap = { workspace = true, features = ["derive", "color"] }
+indicatif = { workspace = true }
+console = { workspace = true }
+dialoguer = "0.11"
+
+# High-performance computing
+rayon = "1.8"
+crossbeam = "0.8"
+num_cpus = "1.16"
+parking_lot = "0.12"
+
+# CUDA support (optional)
+cudarc = { version = "0.10", optional = true }
+half = { version = "2.3", optional = true }
+
+# OpenCL support (optional) 
+opencl3 = { version = "0.9", optional = true }
+
+# Vulkan compute (optional)
+vulkano = { version = "0.34", optional = true }
+vulkano-shaders = { version = "0.34", optional = true }
+
+# CPU optimizations
+target-lexicon = "0.12"
+raw-cpuid = "10.7"
+core_affinity = "0.8" # For CPU pinning on multi-socket systems
+
+# Memory management
+memmap2 = "0.9"
+tikv-jemallocator = { version = "0.6", optional = true }
+
+# Networking for pool mining
+# v9.0.2: Use rustls with bundled Mozilla CA roots — works in Docker/minimal installs
+# without requiring system ca-certificates package
+reqwest = { version = "0.12", features = ["json", "blocking", "socks", "stream", "rustls-tls-webpki-roots", "gzip", "brotli", "deflate"], default-features = false }
+
+# LZ4 compression for bandwidth optimization
+lz4_flex = { workspace = true }
+
+# P2P networking for direct challenge relay and solution broadcast
+libp2p = { version = "0.56", features = [
+    "noise", "yamux", "tcp", "gossipsub", "identify", "ping", "kad",
+    "macros", "tokio",
+], optional = true }
+rmp-serde = { version = "1.3", optional = true }
+# v10.1.9: openssl with vendored feature — statically links OpenSSL to avoid
+# "libssl.so version not found" errors on systems with different OpenSSL versions.
+# Needed because hf-hub (AI) transitively pulls native-tls → openssl-sys.
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+url = "2.5"
+# rustls = { workspace = true } # Not needed for miner, using native-tls
+tokio-socks = "0.5"
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# SSE client for real-time mining rewards
+eventsource-client = "0.12"
+# v9.0.2: Check for TLS certs before SSE/MinerLink (hyper-rustls panics without them)
+rustls-native-certs = "0.6"
+futures = { workspace = true }
+
+# WebSocket for miner-link relay connection
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# JSON-RPC for Stratum protocol
+jsonrpc-core = "18.0"
+serde_with = "3.4"
+
+# Performance monitoring
+sysinfo = "0.30"
+prometheus = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+toml = { workspace = true }
+dirs = "5.0"
+
+# GUI framework (optional)
+eframe = { version = "0.24", optional = true }
+egui = { version = "0.24", optional = true }
+egui_plot = { version = "0.24", optional = true }
+
+# TUI framework
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+tui-textarea = { version = "0.4", optional = true }
+unicode-width = "0.1"
+
+# Terminal detection
+atty = "0.2"
+
+# Embedded Tor (arti) for --tor flag without system Tor daemon
+# v10.1.9: Use rustls instead of native-tls to avoid dynamic OpenSSL dependency
+# (native-tls pulls openssl-sys → requires matching libssl on target system)
+arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"], optional = true }
+tor-rtcompat = { version = "0.37.0", default-features = false, features = ["tokio", "rustls"], optional = true }
+
+# QR code for wallet TUI
+qrcode = "0.14"
+
+# Auto-update
+self-replace = { workspace = true }
+semver = { workspace = true }
+
+# Math and cryptography
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+ring = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+
+# VDF computation
+vdf = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["processthreadsapi", "sysinfoapi", "timeapi", "winbase"] }
+mimalloc = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["cpu-mining", "opencl-mining", "network", "cli", "jemalloc", "tui", "tor-support", "p2p", "vendored-openssl"]
+vendored-openssl = ["openssl/vendored"]  # v10.1.9: Statically link OpenSSL for portable binaries
+
+# Mining backends
+cpu-mining = []
+cuda-mining = ["cudarc", "half"]
+opencl-mining = ["opencl3", "q-mining/gpu-mining"]
+vulkan-mining = ["vulkano", "vulkano-shaders"]
+
+# User interfaces
+gui = ["eframe", "egui", "egui_plot"]
+tui = ["ratatui", "crossterm", "tui-textarea"]
+cli = []
+
+# Network features
+network = ["q-network"]
+pool-mining = []
+tor-support = ["arti-client", "tor-rtcompat"]
+p2p = ["libp2p", "rmp-serde"]
+
+# Performance features
+jemalloc = ["tikv-jemallocator"]
+avx2 = []
+avx512 = []
+neon = []
+
+# Development features
+benchmarks = []
+profiling = []
+
+[[bin]]
+name = "q-miner"
+path = "src/main.rs"
+
+[[bin]]
+name = "q-miner-benchmark"
+path = "src/benchmark.rs"
+required-features = ["benchmarks"]
+
+[[bin]]
+name = "q-miner-gui"
+path = "src/gui_main.rs"
+required-features = ["gui"]
+
+[build-dependencies]
+cc = "1.0"
+bindgen = "0.69"
+
+[package.metadata.docs.rs]
+features = ["cuda-mining", "opencl-mining", "gui"]

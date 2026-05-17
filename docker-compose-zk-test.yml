@@ -1,0 +1,292 @@
+version: '3.8'
+
+services:
+  # Node 1 - Bootstrap Leader with ZK P2P
+  zk-node1:
+    image: q-narwhalknight:zk-p2p-latest
+    container_name: qnk-zk-node1
+    hostname: zk-node1
+    environment:
+      - NODE_NAME=zk-node1
+      - NODE_ID=12D3KooWZkNode1Example
+      - API_PORT=8081
+      - P2P_PORT=9001
+      - METRICS_PORT=9091
+      - IS_BOOTSTRAP=true
+      - ENABLE_ZK_P2P=true
+      - ZK_STAKE_AMOUNT=1000000
+      - ZK_REPUTATION_SCORE=95
+      - ZK_MIN_STAKE_REQUIRED=500000
+      - ZK_MIN_REPUTATION_REQUIRED=80
+      - RUST_LOG=info,q_api_server=debug,q_network=debug,q_zk_p2p=debug
+    ports:
+      - "8091:8080"  # API
+      - "9001:9001"  # P2P
+      - "9091:9091"  # Metrics
+    volumes:
+      - ./data/zk-node1:/data
+      - ./configs/zk-node1:/config
+    networks:
+      zk-qnk-network:
+        ipv4_address: 172.21.0.11
+
+  # Node 2 - ZK-Enhanced Validator
+  zk-node2:
+    image: q-narwhalknight:zk-p2p-latest
+    container_name: qnk-zk-node2
+    hostname: zk-node2
+    environment:
+      - NODE_NAME=zk-node2
+      - NODE_ID=12D3KooWZkNode2Example
+      - API_PORT=8082
+      - P2P_PORT=9002
+      - METRICS_PORT=9092
+      - ENABLE_ZK_P2P=true
+      - ZK_STAKE_AMOUNT=800000
+      - ZK_REPUTATION_SCORE=88
+      - ZK_MIN_STAKE_REQUIRED=500000
+      - ZK_MIN_REPUTATION_REQUIRED=80
+      - BOOTSTRAP_PEERS=/ip4/172.21.0.11/tcp/9001/p2p/12D3KooWZkNode1Example
+      - RUST_LOG=info,q_api_server=debug,q_zk_p2p=debug
+    ports:
+      - "8092:8080"
+      - "9002:9002"
+      - "9092:9092"
+    volumes:
+      - ./data/zk-node2:/data
+      - ./configs/zk-node2:/config
+    networks:
+      zk-qnk-network:
+        ipv4_address: 172.21.0.12
+    depends_on:
+      - zk-node1
+
+  # Node 3 - ZK-Enhanced Validator
+  zk-node3:
+    image: q-narwhalknight:zk-p2p-latest
+    container_name: qnk-zk-node3
+    hostname: zk-node3
+    environment:
+      - NODE_NAME=zk-node3
+      - NODE_ID=12D3KooWZkNode3Example
+      - API_PORT=8083
+      - P2P_PORT=9003
+      - METRICS_PORT=9093
+      - ENABLE_ZK_P2P=true
+      - ZK_STAKE_AMOUNT=1200000
+      - ZK_REPUTATION_SCORE=92
+      - ZK_MIN_STAKE_REQUIRED=500000
+      - ZK_MIN_REPUTATION_REQUIRED=80
+      - BOOTSTRAP_PEERS=/ip4/172.21.0.11/tcp/9001/p2p/12D3KooWZkNode1Example
+      - RUST_LOG=info,q_api_server=debug,q_zk_p2p=debug
+    ports:
+      - "8093:8080"
+      - "9003:9003"
+      - "9093:9093"
+    volumes:
+      - ./data/zk-node3:/data
+      - ./configs/zk-node3:/config
+    networks:
+      zk-qnk-network:
+        ipv4_address: 172.21.0.13
+    depends_on:
+      - zk-node1
+
+  # Node 4 - ZK-Enhanced Validator
+  zk-node4:
+    image: q-narwhalknight:zk-p2p-latest
+    container_name: qnk-zk-node4
+    hostname: zk-node4
+    environment:
+      - NODE_NAME=zk-node4
+      - NODE_ID=12D3KooWZkNode4Example
+      - API_PORT=8084
+      - P2P_PORT=9004
+      - METRICS_PORT=9094
+      - ENABLE_ZK_P2P=true
+      - ZK_STAKE_AMOUNT=600000
+      - ZK_REPUTATION_SCORE=85
+      - ZK_MIN_STAKE_REQUIRED=500000
+      - ZK_MIN_REPUTATION_REQUIRED=80
+      - BOOTSTRAP_PEERS=/ip4/172.21.0.11/tcp/9001/p2p/12D3KooWZkNode1Example
+      - RUST_LOG=info,q_api_server=debug,q_zk_p2p=debug
+    ports:
+      - "8094:8080"
+      - "9004:9004"
+      - "9094:9094"
+    volumes:
+      - ./data/zk-node4:/data
+      - ./configs/zk-node4:/config
+    networks:
+      zk-qnk-network:
+        ipv4_address: 172.21.0.14
+    depends_on:
+      - zk-node1
+      - zk-node2
+
+  # Node 5 - ZK-Enhanced Validator
+  zk-node5:
+    image: q-narwhalknight:zk-p2p-latest
+    container_name: qnk-zk-node5
+    hostname: zk-node5
+    environment:
+      - NODE_NAME=zk-node5
+      - NODE_ID=12D3KooWZkNode5Example
+      - API_PORT=8085
+      - P2P_PORT=9005
+      - METRICS_PORT=9095
+      - ENABLE_ZK_P2P=true
+      - ZK_STAKE_AMOUNT=2000000
+      - ZK_REPUTATION_SCORE=98
+      - ZK_MIN_STAKE_REQUIRED=500000
+      - ZK_MIN_REPUTATION_REQUIRED=80
+      - BOOTSTRAP_PEERS=/ip4/172.21.0.11/tcp/9001/p2p/12D3KooWZkNode1Example
+      - RUST_LOG=info,q_api_server=debug,q_zk_p2p=debug
+    ports:
+      - "8095:8080"
+      - "9005:9005"
+      - "9095:9095"
+    volumes:
+      - ./data/zk-node5:/data
+      - ./configs/zk-node5:/config
+    networks:
+      zk-qnk-network:
+        ipv4_address: 172.21.0.15
+    depends_on:
+      - zk-node1
+      - zk-node2
+
+  # ZK P2P Connection Monitor
+  zk-monitor:
+    image: curlimages/curl:latest
+    container_name: qnk-zk-monitor
+    networks:
+      - zk-qnk-network
+    depends_on:
+      - zk-node1
+      - zk-node2
+      - zk-node3
+      - zk-node4
+      - zk-node5
+    command: >
+      sh -c "
+        sleep 30 &&
+        echo '🔐 Starting ZK-Enhanced P2P Network Monitor' &&
+        while true; do
+          echo '';
+          echo '=== Q-NarwhalKnight ZK P2P 5-Node Network Status ===';
+          echo 'Time:' $$(date);
+          echo '';
+          
+          for i in 1 2 3 4 5; do
+            echo -n \"ZK-Node $$i: \";
+            if curl -s http://172.21.0.1$$i:808$$i/health > /dev/null 2>&1; then
+              echo '✅ ONLINE';
+              
+              echo -n '  ZK P2P Status: ';
+              ZK_STATUS=$$(curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/status 2>/dev/null);
+              if echo \"$$ZK_STATUS\" | grep -q 'enabled'; then
+                echo '🔐 ZK ENABLED';
+                
+                echo -n '  ZK Connections: ';
+                curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/connections | grep -o 'verified_connections\":[0-9]*' | cut -d: -f2 || echo '0';
+                
+                echo -n '  Eligibility Proof: ';
+                curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/proofs/eligibility | grep -q 'verified' && echo '✅ Valid' || echo '⏳ Generating';
+                
+                echo -n '  Membership Proof: ';
+                curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/proofs/membership | grep -q 'verified' && echo '✅ Valid' || echo '⏳ Generating';
+                
+                echo -n '  Quality Proof: ';
+                QUALITY=$$(curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/proofs/quality 2>/dev/null);
+                if echo \"$$QUALITY\" | grep -q 'Elite'; then
+                  echo '🏆 Elite';
+                elif echo \"$$QUALITY\" | grep -q 'Premium'; then
+                  echo '⭐ Premium';
+                elif echo \"$$QUALITY\" | grep -q 'Standard'; then
+                  echo '✅ Standard';
+                else
+                  echo '📊 Basic';
+                fi;
+              else
+                echo '❌ ZK DISABLED';
+              fi;
+              
+              echo -n '  Regular Peers: ';
+              curl -s http://172.21.0.1$$i:808$$i/peers | grep -o 'peer_count\":[0-9]*' | cut -d: -f2 || echo '0';
+            else
+              echo '❌ OFFLINE';
+            fi;
+          done;
+          
+          echo '';
+          echo '🔐 ZK P2P Network Discovery Test...';
+          
+          # Test anonymous peer discovery
+          for i in 1 2 3 4 5; do
+            echo -n \"  Node $$i DNS Phantom: \";
+            PHANTOM=$$(curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/discovery/phantom 2>/dev/null);
+            if echo \"$$PHANTOM\" | grep -q 'broadcasting'; then
+              echo '📡 Broadcasting';
+            elif echo \"$$PHANTOM\" | grep -q 'discovered'; then
+              echo '🔍 Discovered peers';
+            else
+              echo '⏳ Initializing';
+            fi;
+          done;
+          
+          echo '';
+          echo '🤝 ZK Connection Verification Test...';
+          
+          # Test ZK proof verification between nodes
+          VERIFIED_CONNECTIONS=0;
+          for i in 1 2 3 4 5; do
+            CONNECTIONS=$$(curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/connections 2>/dev/null | grep -o 'verified_connections\":[0-9]*' | cut -d: -f2);
+            if [ ! -z \"$$CONNECTIONS\" ] && [ \"$$CONNECTIONS\" -gt 0 ]; then
+              VERIFIED_CONNECTIONS=$$((VERIFIED_CONNECTIONS + CONNECTIONS));
+            fi;
+          done;
+          
+          echo \"  Total ZK Verified Connections: $$VERIFIED_CONNECTIONS\";
+          
+          if [ \"$$VERIFIED_CONNECTIONS\" -ge 10 ]; then
+            echo '  🎉 ZK P2P Network Formation: SUCCESS!';
+          elif [ \"$$VERIFIED_CONNECTIONS\" -ge 5 ]; then
+            echo '  🔄 ZK P2P Network Formation: IN PROGRESS';
+          else
+            echo '  ⏳ ZK P2P Network Formation: INITIALIZING';
+          fi;
+          
+          echo '';
+          echo '📊 ZK Proof Performance Metrics:';
+          for i in 1 2 3 4 5; do
+            echo -n \"  Node $$i Proof Times: \";
+            METRICS=$$(curl -s http://172.21.0.1$$i:808$$i/api/v1/zk-p2p/metrics 2>/dev/null);
+            if echo \"$$METRICS\" | grep -q 'avg_proving_time'; then
+              PROVING_TIME=$$(echo \"$$METRICS\" | grep -o 'avg_proving_time\":[0-9]*' | cut -d: -f2);
+              VERIFICATION_TIME=$$(echo \"$$METRICS\" | grep -o 'avg_verification_time\":[0-9]*' | cut -d: -f2);
+              echo \"Proving: $${PROVING_TIME}ms, Verification: $${VERIFICATION_TIME}ms\";
+            else
+              echo 'Not available yet';
+            fi;
+          done;
+          
+          echo '';
+          echo '===============================';
+          sleep 45;
+        done
+      "
+
+networks:
+  zk-qnk-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+volumes:
+  zk-node1-data:
+  zk-node2-data:
+  zk-node3-data:
+  zk-node4-data:
+  zk-node5-data:

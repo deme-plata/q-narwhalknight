@@ -1,0 +1,292 @@
+[package]
+name = "q-api-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "q-api-server"
+path = "src/main.rs"
+
+# Temporarily disabled - depends on q-dns-phantom which is deactivated
+# [[bin]]
+# name = "phantom-node"
+# path = "src/bin/phantom-node.rs"
+
+# v3.9.1-beta: Quillon Bank CLI for bank administration
+[[bin]]
+name = "quillon-bank-cli"
+path = "src/bin/quillon-bank-cli.rs"
+
+[dependencies]
+# v6.1.0: libc for THP disable + malloc tuning (prevents OOM on 8GB servers)
+libc = "0.2"
+
+# Ring buffer for TUI log layer
+ringbuf = "0.3"
+
+# v6.2.1: jemalloc - see [target.'cfg(unix)'.dependencies] section below
+
+# Vendored OpenSSL for cross-compilation (ARM64, etc.)
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+q-chat-types = { path = "../q-chat-types" }          # Nova-chat wire types (P2P chat, calls, routing)
+q-types = { path = "../q-types", features = ["signing"] }  # ✨ v1.0.15-beta: Enable PQC signing
+q-wallet = { path = "../q-wallet" }
+# 🔐 v1.3.12-beta: Required for SQIsign post-quantum consensus signatures
+q-crypto-advanced = { path = "../q-crypto-advanced" }  # Was optional, now required for consensus
+q-eternal-cypher = { path = "../q-eternal-cypher" }  # v7.2.12: Unified cryptographic framework (NodeCypher)
+q-aegis-ql = { path = "../q-aegis-ql" }
+libp2p = { version = "0.53", features = ["gossipsub", "identify", "ping"] }
+q-bitcoin-bridge = { path = "../q-bitcoin-bridge" }
+# q-dns-phantom = { path = "../q-dns-phantom" } # DEACTIVATED
+# q-bep44-discovery = { path = "../q-bep44-discovery" } # DEACTIVATED
+q-tor-client = { path = "../q-tor-client" } # Re-enabled for consensus integration
+q-dandelion = { path = "../q-dandelion" } # v2.5.0-beta: Dandelion++ for mandatory Tor anonymity
+q-vm = { path = "../q-vm" }
+q-quantum-mixing = { path = "../q-quantum-mixing" }
+q-mining = { path = "../q-mining", features = ["mining-vrf"] }  # v1.3.1-beta: Ring-LWE VRF mining enabled by default
+q-mining-pool = { path = "../q-mining-pool" }  # v2.2.1-beta: Stratum pool server (always enabled)
+q-tui = { path = "../q-tui", optional = true }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "http1", "http2"] }
+socket2 = "0.5"  # Advanced socket configuration for 1M+ TPS
+
+# PaaS production-grade middleware
+governor = "0.6"  # Token-bucket rate limiting with burst support
+tower_governor = "0.3"  # Governor integration for Axum/Tower
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# 🔍 v1.0.17-beta-v3: Tokio Console for deep deadlock debugging
+# DISABLED: Removed to allow normal compilation without tokio_unstable
+# console-subscriber = "0.2"
+
+# Lock-free data structures for Phase 2.2 optimization
+crossbeam = "0.8"  # Lock-free queues for 10x performance gain
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+urlencoding = "2.1"  # URL encoding for OAuth2
+uuid = { workspace = true }
+bincode = { workspace = true }
+
+# HTTP client for automatic bootstrap discovery
+# v10.0.8: default-features=false + rustls-tls to avoid native-tls (schannel) on Windows.
+# MinGW cross-compiled binaries with native-tls fail HTTPS cert validation on some Windows
+# installs, causing bootstrap peer discovery to silently fail → zero peers → no sync.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls"] }
+
+# v7.3.2: Quillon Mail - DNS resolver for MX/SPF/DKIM lookups
+hickory-resolver = "0.24"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Async traits for AI intent executor
+async-trait = "0.1"
+
+# CLI
+clap = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+dotenvy = "0.15"  # Load .env file for environment variables (Stripe keys, etc.)
+open = "5"  # Cross-platform browser opening for setup wizard
+dirs = "5.0"  # Home directory detection for AEGIS-QL key loading
+once_cell = "1.19"  # v1.1.9: Lazy static for P2P balance deduplication cache
+lru = "0.12"  # v1.1.9: LRU cache for P2P balance update deduplication
+
+# Database - using RocksDB quantum storage
+q-storage = { path = "../q-storage" }
+crown-ash-types = { path = "../crown-ash-types" }
+crown-ash-sim = { path = "../crown-ash-sim" }
+crown-ash-api = { path = "../crown-ash-api" }
+
+# IPFS decentralized storage for database backups
+q-ipfs-storage = { path = "../q-ipfs-storage" }
+
+# Performance optimizations for 6M+ TPS
+q-crypto-simd = { path = "../q-crypto-simd" }
+
+# Critical missing integrations for complete functionality
+q-zk-stark = { path = "../q-zk-stark" } # ✅ ENABLED - compilation successful!
+q-zk-snark = { path = "../q-zk-snark" } # ✅ ENABLED - arkworks compatibility resolved!
+q-lattice-guard = { path = "../q-lattice-guard" } # ✅ Post-quantum lattice-based zk-SNARK (RLWE)
+q-sharding = { path = "../q-sharding" }
+# q-cache = { path = "../q-cache" } # Temporarily disabled due to compilation errors
+q-dag-knight = { path = "../q-dag-knight", features = ["advanced-crypto"] }  # v1.0.60-beta: Genus-2 VDF enabled by default
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-resonance = { path = "../q-resonance", optional = true } # K-Parameter quantum phase analysis
+q-vdf = { path = "../q-vdf" }
+q-quantum-crypto = { path = "../q-quantum-crypto" }
+q-dex = { path = "../q-dex" } # ✅ ENABLED - BigDecimal issues fixed!
+q-dune = { path = "../q-dune" } # ✅ v8.6.5: Dune Analytics data pipeline
+q-oracle = { path = "../q-oracle" } # ✅ ENABLED - All compilation errors resolved!
+# q-stablecoin = { path = "../q-stablecoin" } # Disabled - depends on q-dex
+q-quillon-bank = { path = "../q-quillon-bank" } # ✅ ENABLED - Quantum banking with CDP
+q-tor-circuit = { path = "../q-tor-circuit" }
+q-robot-control = { path = "../q-robot-control" } # Re-enabled: CCC convergence for deploy pipeline
+q-network = { path = "../q-network" }
+q-compute = { path = "../q-compute" } # v9.5.0: Starship Endgame — 100% compute utilization orchestrator
+q-log-privacy = { path = "../q-log-privacy" } # Privacy-preserving log redaction
+q-governance = { path = "../q-governance" } # ✅ v1.0.1 - Proof-of-Contribution governance
+q-plugin-system = { path = "../q-plugin-system" }
+q-ai-inference = { path = "../q-ai-inference", default-features = false } # AI inference with KV-cache
+candle-core = { workspace = true } # For Device type in AI inference
+
+# ✨ v1.4.0-beta: Recursive SNARKs for eliminating weak subjectivity
+q-recursive-proofs = { path = "../q-recursive-proofs" } # Post-quantum recursive proofs for ~10ms light client bootstrap
+
+# Metrics
+prometheus = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# CLI colored output
+colored = "2.1"
+
+# WebSocket and SSE support
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tokio-tungstenite = "0.21"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+
+# File upload support for AI chat attachments
+multer = "3.1"  # Multipart form data parsing
+mime = "0.3"    # MIME type detection
+mime_guess = "2.0"  # MIME type guessing from filenames
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp"] }  # Image processing for vision models
+pdf-extract = "0.7"  # PDF text extraction
+lopdf = "0.32"  # Low-level PDF manipulation
+
+# Real-time event streaming
+tokio-util = { version = "0.7", features = ["codec"] }
+async-stream = "0.3"  # async stream! macro for SSE streaming
+zstd = "0.13"  # v1.0.2: ZStd compression for P2P peer height announcements
+pin-project-lite = "0.2"
+hex = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"
+base64 = "0.22"
+bip39 = "2.0"
+blake3 = { workspace = true }
+self-replace = { workspace = true }  # v8.5.0: Atomic binary swap for auto-update
+sha2 = "0.10"
+sha3 = "0.10"
+ciborium = "0.2"  # CBOR serialization for bridge attestation gossipsub messages
+bcrypt = "0.15"  # Password hashing for wallet authentication
+argon2 = { version = "0.5", features = ["std"] }  # OWASP-recommended password hashing for API keys
+
+# High-performance concurrent collections for lock-free concurrency
+dashmap = { workspace = true }
+
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks (10-20% speedup in hot paths)
+parking_lot = "0.12"
+
+# CPU detection and optimization
+num_cpus = "1.16"
+sysinfo = "0.30"  # System information for TUI metrics
+
+# Serialization for consensus payloads
+postcard = { workspace = true }
+
+# Binary protocol for high-performance ingestion (1000x improvement)
+rmp-serde = "1.3"  # MessagePack for Rust - 10x faster than JSON
+bytes = "1.5"      # Zero-copy byte manipulation
+core_affinity = "0.8"  # CPU core pinning for NUMA-aware workers
+
+# Parallel processing for CPU-bound work (signature verification)
+rayon = "1.8"  # Data parallelism for transaction validation
+ed25519-dalek = { workspace = true }  # Signature verification
+secp256k1 = { version = "0.29", features = ["recovery", "global-context"] }  # ECDSA signature verification for PaaS
+pqcrypto-dilithium = { workspace = true }  # Dilithium5 post-quantum signatures for PaaS
+pqcrypto-traits = "0.3"  # PQCrypto trait definitions
+
+# Stripe payment processing integration - ✅ ENABLED (Rust 1.90.0)
+async-stripe = { version = "0.38", default-features = false, features = ["runtime-tokio-hyper-rustls"] }
+hmac = "0.12"  # HMAC-SHA256 for Stripe webhook signature verification
+tokio-rustls = { workspace = true }   # v8.7.5: STARTTLS for inbound SMTP
+rustls-pemfile = { workspace = true } # v8.7.5: PEM cert/key parsing for SMTP TLS
+rustls = { workspace = true }         # v8.7.5: TLS config for SMTP STARTTLS
+rust_decimal = "1.33"  # For precise USD amount handling
+
+# TemporalShield: Post-quantum secure secret sharing with zk-STARK (NO TRUSTED SETUP)
+q-temporal-shield = { path = "../q-temporal-shield" }
+
+# 🛡️ v2.5.1-beta: Consensus Guard - automatic mainnet safety enforcement
+q-consensus-guard = { path = "../q-consensus-guard" }
+
+# Platform-specific dependencies
+# q-kernel-io uses io_uring (Linux kernel async I/O)
+# q-benchmarks uses procfs (Linux /proc filesystem monitoring)
+[target.'cfg(target_os = "linux")'.dependencies]
+q-kernel-io = { path = "../q-kernel-io" }
+q-benchmarks = { path = "../q-benchmarks" }
+tokio-uring = "0.4"
+
+# v6.4.0: jemalloc only on unix (doesn't cross-compile to Windows with MinGW)
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = "0.6"
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+
+# v9.1.7: mimalloc on Windows — 30-50% faster than HeapAlloc, prevents
+# catastrophic heap fragmentation that causes OOM after hours of sync
+[target.'cfg(windows)'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[features]
+# v1.0.60-beta: Post-quantum mining-vrf enabled via q-mining dependency
+# 🔐 v1.3.12-beta: q-crypto-advanced is now REQUIRED for SQIsign consensus
+# ✨ v2.2.1-beta: Mining pool ALWAYS enabled - Stratum + PPLNS
+default = ["tui"]
+# v8.2.8: llama-cpp REMOVED from defaults — each inference takes 600-930s at 0.3 tok/s,
+# starving the tokio runtime and making the entire API unresponsive.
+# BitNet (q-bitnet-ffi) remains available. Re-enable with: --features llama-cpp
+# v6.2.0: resonance DISABLED - causes OOM (coupling_matrix leaks ~200MB/round,
+# energy minimization always produces NaN, falls back to DAG-Knight anyway)
+tui = ["q-tui"]
+# v5.1.0: llama.cpp inference engine (10-50x faster than mistral.rs)
+llama-cpp = ["q-ai-inference/llama-cpp"]
+vendored-openssl = ["openssl"]
+resonance = ["q-resonance", "q-network/resonance"]
+# ✨ v1.0.58-beta: Enable FROST threshold signing for validator committees
+# Note: q-crypto-advanced is now always included for SQIsign consensus
+advanced-crypto = []  # Feature flag kept for backwards compat, but dep is always included
+
+# 🚀 v1.4.12-beta: GPU acceleration for AI inference
+# Build with: cargo build --release --features cuda
+# Requires: NVIDIA GPU with CUDA 12.0+ and cuDNN 8.0+
+# Tested on: RTX 3090, RTX 4090, A100, A6000
+# Expected speedup: 8-20x for Mistral-7B inference
+cuda = ["q-ai-inference/cuda", "q-network/cuda"]
+
+# 🍎 v1.4.12-beta: Metal acceleration for macOS (Apple Silicon)
+# Build with: cargo build --release --features metal
+# Tested on: M1, M2, M3 series chips
+metal = ["q-ai-inference/metal", "q-network/metal"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+axum-test = "14.0"
+q-vm = { path = "../q-vm" }
+
+[build-dependencies]
+chrono = "0.4"
+q-consensus-guard = { path = "../q-consensus-guard" }  # Mainnet safety enforcement

@@ -1,0 +1,80 @@
+[package]
+name = "q-kernel-io"
+version = "0.1.0"
+edition = "2021"
+authors = ["Server Alpha <server-alpha@q-narwhalknight.dev>"]
+description = "Kernel-level I/O optimizations for Q-NarwhalKnight consensus"
+license = "Apache-2.0"
+
+[[bench]]
+name = "kernel_io_benchmarks"
+harness = false
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+tokio-uring = "0.4"        # io_uring support for Linux
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Memory management
+libc = "0.2"
+memmap2 = "0.9"            # Memory-mapped files
+parking_lot = "0.12"       # Lock-free synchronization
+
+# Zero-copy networking
+socket2 = "0.5"            # Raw socket operations
+mio = "0.8"                # Cross-platform I/O
+
+# System information
+sysinfo = "0.30"           # System topology detection
+num_cpus = { workspace = true }  # CPU count detection
+nix = { version = "0.27", features = ["mman", "socket", "zerocopy", "sched", "process", "net"] }  # Unix system calls with needed features
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+bincode = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Temporary files (for testing and examples)
+tempfile = { workspace = true }
+
+# Benchmarking
+criterion = { workspace = true }
+
+# Internal crates
+q-types = { path = "../q-types" }
+q-crypto-simd = { path = "../q-crypto-simd" }
+q-cache = { path = "../q-cache" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-specific optimizations
+io-uring = "0.6"           # Direct io_uring bindings
+epoll = "4.3"              # epoll for event notifications
+procfs = "0.16"            # /proc filesystem access
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS-specific optimizations
+kqueue = "1.0"             # kqueue for event notifications
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows-specific optimizations
+winapi = "0.3"             # Windows API access
+windows = "0.52"           # Modern Windows API bindings
+
+[features]
+default = ["io_uring", "numa_aware"]
+io_uring = []              # Enable io_uring optimizations (Linux only)
+numa_aware = []            # Enable NUMA-aware memory allocation
+zero_copy = []             # Enable zero-copy networking
+memory_mapped = []         # Enable memory-mapped I/O
+kernel_bypass = []         # Enable kernel bypass techniques

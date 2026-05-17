@@ -1,0 +1,59 @@
+[package]
+name = "q-zk-stark"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Q-NarwhalKnight Phase 3 Team"]
+description = "Zero-Knowledge STARK (Scalable Transparent Arguments of Knowledge) implementation with GPU acceleration"
+repository = "https://github.com/quantum-dag-labs/Q-NarwhalKnight"
+keywords = ["zero-knowledge", "stark", "gpu", "blockchain", "cryptography"]
+categories = ["cryptography", "algorithms", "mathematics", "science"]
+
+[dependencies]
+# Async runtime and error handling
+tokio = { workspace = true, features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+bincode = "1.3"
+chrono = "0.4"
+
+# Cryptographic operations  
+sha3 = "0.10"
+blake3 = "1.0"
+
+# GPU acceleration with WebGPU
+wgpu = { version = "0.17" }
+bytemuck = { version = "1.0", features = ["derive"] }
+
+# Mathematics and field operations
+# Note: These are simplified dependencies for Phase 3 implementation
+num-bigint = "0.4"
+num-traits = "0.2"
+
+# Performance and benchmarking
+# criterion temporarily disabled due to font-kit fontconfig FFI issues
+rayon = "1.8"  # Parallel processing for batch operations
+
+# Logging and metrics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# criterion temporarily disabled due to font-kit fontconfig FFI issues
+tokio-test = "0.4"
+
+[features]
+default = ["gpu-acceleration"]
+gpu-acceleration = []
+cpu-only = []
+benchmark-mode = []
+
+# Benchmarks will be added in separate PR
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

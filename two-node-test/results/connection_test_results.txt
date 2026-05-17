@@ -1,0 +1,27 @@
+TWO-NODE DNS-PHANTOM CONNECTION TEST RESULTS
+============================================
+
+Test Configuration:
+- Node A Port: 9001
+- Node B Port: 9002  
+- Test Duration: 60s
+- Binary: ./target/release/q-api-server
+
+Node A Results:
+- DNS-Phantom Events: 
+- Peer Discoveries: 
+- Connections: 
+- Status: Stopped
+
+Node B Results:
+- DNS-Phantom Events:   
+- Peer Discoveries: 
+- Connections: 
+- Status: Running
+
+Total Results:
+- Combined DNS-Phantom Events: 0
+- Combined Peer Discoveries: 0
+- Combined Connections: 0
+
+Test Result: FAILED

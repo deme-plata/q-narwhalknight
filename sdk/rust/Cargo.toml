@@ -1,0 +1,65 @@
+[package]
+name = "q-paas-sdk"
+version.workspace = true
+edition.workspace = true
+description = "Q-NarwhalKnight Privacy-as-a-Service SDK for Rust"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# HTTP client with retry logic
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Bitcoin support (optional)
+bitcoin = { version = "0.31", features = ["serde"], optional = true }
+
+# Ethereum support (optional)
+ethers = { version = "2.0", features = ["abigen", "ws"], optional = true }
+
+# Logger for examples
+env_logger = "0.11"
+
+# Cryptography
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.21"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+
+# Retry logic
+backoff = { version = "0.4", features = ["tokio"] }
+
+[dev-dependencies]
+mockito = "1.2"
+tokio-test = "0.4"
+
+[features]
+default = ["bitcoin-support", "ethereum-support"]
+bitcoin-support = ["bitcoin"]
+ethereum-support = ["ethers"]
+full = ["bitcoin-support", "ethereum-support"]
+
+[[example]]
+name = "bitcoin_mixing"
+path = "examples/bitcoin_mixing.rs"
+
+[[example]]
+name = "ethereum_mixing"
+path = "examples/ethereum_mixing.rs"

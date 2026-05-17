@@ -1,0 +1,24 @@
+# Tor configuration for Q-NarwhalKnight nodes
+SocksPort 0.0.0.0:9050
+ControlPort 0.0.0.0:9051
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
+
+# Enable hidden services
+HiddenServiceDir /app/data/tor/qnk-service
+HiddenServicePort 8334 127.0.0.1:8334
+HiddenServiceVersion 3
+
+# Performance optimizations
+CircuitBuildTimeout 10
+LearnCircuitBuildTimeout 0
+MaxCircuitDirtiness 600
+NewCircuitPeriod 30
+NumEntryGuards 8
+
+# Logging
+Log notice stdout
+Log info file /app/logs/tor.log
+
+# Directory settings
+DataDirectory /app/data/tor

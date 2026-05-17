@@ -1,0 +1,994 @@
+import { Theme, QButton, QInput, Card, GradientCard, Icon } from "theme.slint";
+
+export struct AddressEntry {
+    label: string,
+    address: string,
+}
+
+// Compact toggle switch styled like a pill (used for the Quantum Mixer option).
+component PillToggle inherits Rectangle {
+    in-out property <bool> active: false;
+    in property <color> accent: Theme.accent-purple;
+    callback toggled(bool);
+
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.active ? root.accent : Theme.bg-input;
+    border-width: 1px;
+    border-color: root.active ? root.accent : Theme.border;
+    animate background, border-color { duration: 150ms; }
+
+    TouchArea {
+        clicked => {
+            root.active = !root.active;
+            root.toggled(root.active);
+        }
+    }
+
+    // Thumb
+    Rectangle {
+        x: root.active ? parent.width - self.width - 2px : 2px;
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: Theme.text-primary;
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+}
+
+export component SendScreen inherits Rectangle {
+    in-out property <string> recipient: "";
+    in-out property <string> amount: "";
+    in-out property <string> memo: "";
+    in-out property <string> seed-phrase: "";
+    in-out property <string> contact-label: "";
+    in property <string> balance-display: "0.00 QUG";
+    in-out property <string> status-message: "";
+    in property <bool> sending: false;
+    in property <bool> needs-seed-phrase: false;
+    in property <[AddressEntry]> contacts: [];
+    in-out property <bool> show-confirm: false;
+    in property <string> confirm-amount: "";
+    in property <string> confirm-recipient: "";
+    in-out property <bool> contact-saved: false;
+    property <bool> contacts-expanded: false;
+
+    // Token selector
+    in property <[string]> available-tokens: ["QUG"];
+    in-out property <string> selected-token: "QUG";
+    property <bool> token-selector-open: false;
+
+    // Fee display
+    in property <string> current-fee: "0.001";
+    in property <string> fee-tier: "FAST";
+
+    // v11.4.0: Quantum mixer toggle
+    in-out property <bool> use-mixer: false;
+    in property <bool> mixer-available: true;
+
+    callback send-transaction();
+    callback go-back();
+    callback save-contact();
+    callback select-token(string);
+    callback toggle-mixer(bool);
+
+    background: Theme.bg-primary;
+
+    // Subtle corner accent for ambient depth (matches login hero feel)
+    Rectangle {
+        x: parent.width - 240px;
+        y: -160px;
+        width: 360px;
+        height: 360px;
+        border-radius: 180px;
+        background: Theme.accent-green.with-alpha(0.05);
+    }
+
+    Flickable {
+        VerticalLayout {
+            padding-left: Theme.spacing-md;
+            padding-right: Theme.spacing-md;
+            padding-top: Theme.spacing-md;
+            padding-bottom: Theme.spacing-lg;
+            spacing: Theme.spacing-md;
+
+            // ─────────────────────────────────────────────
+            // HEADER — back + "Send <token>"
+            // ─────────────────────────────────────────────
+            HorizontalLayout {
+                height: 44px;
+                spacing: Theme.spacing-sm;
+
+                // Back button (hover-lit)
+                Rectangle {
+                    width: 44px;
+                    border-radius: Theme.radius-md;
+                    background: back-touch.has-hover ? Theme.bg-hover : Theme.bg-card;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    animate background { duration: 150ms; }
+
+                    back-touch := TouchArea {
+                        clicked => { root.go-back(); }
+                    }
+
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                        width: 18px;
+                        height: 18px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 0px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "Send " + root.selected-token;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.use-mixer ? "Routed via quantum mixer" : "Direct transfer";
+                        color: root.use-mixer ? Theme.accent-purple : Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Token chip (always visible — shows current token even with 1 option)
+                Rectangle {
+                    width: 84px;
+                    height: 44px;
+                    border-radius: Theme.radius-md;
+                    background: Theme.bg-card;
+                    border-width: 1px;
+                    border-color: Theme.accent-cyan.with-alpha(0.3);
+
+                    tok-chip := TouchArea {
+                        enabled: root.available-tokens.length > 1;
+                        clicked => { root.token-selector-open = !root.token-selector-open; }
+                    }
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-sm;
+                        padding-right: Theme.spacing-sm;
+                        spacing: 4px;
+                        alignment: center;
+
+                        Icon {
+                            source: root.selected-token == "QUGUSD"
+                                ? @image-url("icons/token-qugusd.svg")
+                                : @image-url("icons/token-qug.svg");
+                            width: 16px;
+                            height: 16px;
+                            icon-color: Theme.accent-cyan;
+                        }
+                        Text {
+                            text: root.selected-token;
+                            color: Theme.accent-cyan;
+                            font-size: Theme.font-sm;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        if root.available-tokens.length > 1 : Icon {
+                            source: @image-url("icons/chevron-down.svg");
+                            width: 14px;
+                            height: 14px;
+                            icon-color: Theme.text-muted;
+                        }
+                    }
+                }
+            }
+
+            // Token selector list (opens under the chip)
+            if root.token-selector-open && root.available-tokens.length > 1 : Card {
+                VerticalLayout {
+                    padding: Theme.spacing-xs;
+                    spacing: 1px;
+
+                    for tok in root.available-tokens : Rectangle {
+                        height: 40px;
+                        border-radius: Theme.radius-sm;
+                        background: tok == root.selected-token
+                            ? Theme.accent-cyan.with-alpha(0.15)
+                            : (tok-touch.has-hover ? Theme.bg-hover : transparent);
+
+                        tok-touch := TouchArea {
+                            clicked => {
+                                root.selected-token = tok;
+                                root.token-selector-open = false;
+                                root.select-token(tok);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Theme.spacing-md;
+                            spacing: Theme.spacing-sm;
+
+                            Icon {
+                                source: tok == "QUGUSD"
+                                    ? @image-url("icons/token-qugusd.svg")
+                                    : @image-url("icons/token-qug.svg");
+                                width: 18px;
+                                height: 18px;
+                                icon-color: tok == root.selected-token ? Theme.accent-cyan : Theme.text-secondary;
+                            }
+                            Text {
+                                text: tok;
+                                color: tok == root.selected-token ? Theme.accent-cyan : Theme.text-primary;
+                                font-size: Theme.font-md;
+                                font-weight: tok == root.selected-token ? 700 : 500;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // BALANCE HERO — gradient card with token icon
+            // ─────────────────────────────────────────────
+            GradientCard {
+                height: 96px;
+                card-gradient: @linear-gradient(135deg,
+                    Theme.bg-card,
+                    Theme.bg-card.darker(15%));
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-lg;
+                    padding-right: Theme.spacing-lg;
+                    spacing: Theme.spacing-md;
+                    alignment: space-between;
+
+                    // Token icon halo
+                    Rectangle {
+                        width: 64px;
+                        height: 64px;
+                        border-radius: 32px;
+                        background: @radial-gradient(circle,
+                            Theme.accent-green.with-alpha(0.20) 0%,
+                            transparent 70%);
+                        y: (parent.height - 64px) / 2;
+
+                        Icon {
+                            source: root.selected-token == "QUGUSD"
+                                ? @image-url("icons/token-qugusd.svg")
+                                : @image-url("icons/token-qug.svg");
+                            icon-color: Theme.accent-green;
+                            width: 36px;
+                            height: 36px;
+                            x: (parent.width - 36px) / 2;
+                            y: (parent.height - 36px) / 2;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        horizontal-stretch: 1;
+
+                        Text {
+                            text: "Available balance";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                            horizontal-alignment: right;
+                        }
+                        Text {
+                            text: root.balance-display;
+                            color: Theme.accent-green;
+                            font-size: Theme.font-2xl;
+                            font-weight: 700;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // RECIPIENT — cyan accent, with contacts picker
+            // ─────────────────────────────────────────────
+            Rectangle {
+                border-radius: Theme.radius-lg;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: Theme.shadow-sm-blur;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-color: #000000.with-alpha(0.30);
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 4px;
+                    height: parent.height;
+                    background: Theme.accent-cyan;
+                    border-top-left-radius: Theme.radius-lg;
+                    border-bottom-left-radius: Theme.radius-lg;
+                }
+
+                VerticalLayout {
+                    padding-left: Theme.spacing-md + 4px;
+                    padding-right: Theme.spacing-md;
+                    padding-top: Theme.spacing-md;
+                    padding-bottom: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-cyan.with-alpha(0.12);
+
+                            Icon {
+                                source: @image-url("icons/wallet.svg");
+                                icon-color: Theme.accent-cyan;
+                                width: 18px;
+                                height: 18px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: "Recipient";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Contacts toggle
+                        Rectangle {
+                            width: 90px;
+                            height: 30px;
+                            border-radius: Theme.radius-sm;
+                            background: contacts-touch.has-hover
+                                ? Theme.accent-cyan.with-alpha(0.18)
+                                : Theme.accent-cyan.with-alpha(0.10);
+
+                            contacts-touch := TouchArea {
+                                clicked => { root.contacts-expanded = !root.contacts-expanded; }
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 4px;
+
+                                Text {
+                                    text: "Contacts" + (root.contacts.length > 0
+                                        ? " (" + root.contacts.length + ")"
+                                        : "");
+                                    color: Theme.accent-cyan;
+                                    font-size: Theme.font-xs;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                Icon {
+                                    source: @image-url("icons/chevron-down.svg");
+                                    icon-color: Theme.accent-cyan;
+                                    width: 12px;
+                                    height: 12px;
+                                }
+                            }
+                        }
+                    }
+
+                    QInput {
+                        text <=> root.recipient;
+                        placeholder: "qnk… address";
+                    }
+
+                    // Contact picker (expanded)
+                    if root.contacts-expanded : Rectangle {
+                        height: 8px;
+                    }
+                    if root.contacts-expanded : VerticalLayout {
+                        spacing: 1px;
+
+                        if root.contacts.length == 0 : Text {
+                            text: "No saved contacts yet — send a transaction to save the recipient.";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                            horizontal-alignment: center;
+                        }
+
+                        for contact in root.contacts : Rectangle {
+                            height: 40px;
+                            border-radius: Theme.radius-sm;
+                            background: ct.has-hover ? Theme.bg-hover : transparent;
+
+                            ct := TouchArea {
+                                clicked => {
+                                    root.recipient = contact.address;
+                                    root.contacts-expanded = false;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: Theme.spacing-sm;
+                                padding-right: Theme.spacing-sm;
+                                spacing: Theme.spacing-sm;
+
+                                Text {
+                                    text: contact.label;
+                                    color: Theme.accent-cyan;
+                                    font-size: Theme.font-sm;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    width: 90px;
+                                }
+                                Text {
+                                    text: contact.address;
+                                    color: Theme.text-muted;
+                                    font-size: 10px;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // AMOUNT — green accent
+            // ─────────────────────────────────────────────
+            Rectangle {
+                border-radius: Theme.radius-lg;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: Theme.shadow-sm-blur;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-color: #000000.with-alpha(0.30);
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 4px;
+                    height: parent.height;
+                    background: Theme.accent-green;
+                    border-top-left-radius: Theme.radius-lg;
+                    border-bottom-left-radius: Theme.radius-lg;
+                }
+
+                VerticalLayout {
+                    padding-left: Theme.spacing-md + 4px;
+                    padding-right: Theme.spacing-md;
+                    padding-top: Theme.spacing-md;
+                    padding-bottom: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-green.with-alpha(0.12);
+
+                            Icon {
+                                source: @image-url("icons/arrow-up-right.svg");
+                                icon-color: Theme.accent-green;
+                                width: 18px;
+                                height: 18px;
+                            }
+                        }
+                        Text {
+                            text: "Amount (" + root.selected-token + ")";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                    QInput {
+                        text <=> root.amount;
+                        placeholder: "0.00";
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // MEMO — purple accent (optional)
+            // ─────────────────────────────────────────────
+            Rectangle {
+                border-radius: Theme.radius-lg;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: Theme.shadow-sm-blur;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-color: #000000.with-alpha(0.30);
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 4px;
+                    height: parent.height;
+                    background: Theme.accent-purple;
+                    border-top-left-radius: Theme.radius-lg;
+                    border-bottom-left-radius: Theme.radius-lg;
+                }
+
+                VerticalLayout {
+                    padding-left: Theme.spacing-md + 4px;
+                    padding-right: Theme.spacing-md;
+                    padding-top: Theme.spacing-md;
+                    padding-bottom: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-purple.with-alpha(0.12);
+
+                            Icon {
+                                source: @image-url("icons/mail.svg");
+                                icon-color: Theme.accent-purple;
+                                width: 18px;
+                                height: 18px;
+                            }
+                        }
+                        Text {
+                            text: "Memo (optional)";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                    QInput {
+                        text <=> root.memo;
+                        placeholder: "Payment for…";
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // PRIVACY — Quantum Mixer toggle (v11.4.0)
+            // ─────────────────────────────────────────────
+            Rectangle {
+                border-radius: Theme.radius-lg;
+                background: root.use-mixer
+                    ? Theme.accent-purple.with-alpha(0.08)
+                    : Theme.bg-card;
+                border-width: 1px;
+                border-color: root.use-mixer
+                    ? Theme.accent-purple.with-alpha(0.45)
+                    : Theme.border;
+                drop-shadow-blur: Theme.shadow-sm-blur;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-color: #000000.with-alpha(0.30);
+                animate background, border-color { duration: 200ms; }
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 4px;
+                    height: parent.height;
+                    background: Theme.accent-purple;
+                    border-top-left-radius: Theme.radius-lg;
+                    border-bottom-left-radius: Theme.radius-lg;
+                }
+
+                HorizontalLayout {
+                    padding-left: Theme.spacing-md + 4px;
+                    padding-right: Theme.spacing-md;
+                    padding-top: Theme.spacing-md;
+                    padding-bottom: Theme.spacing-md;
+                    spacing: Theme.spacing-md;
+
+                    Rectangle {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.accent-purple.with-alpha(0.15);
+                        y: (parent.height - 40px) / 2;
+
+                        Icon {
+                            source: @image-url("icons/shield-check.svg");
+                            icon-color: Theme.accent-purple;
+                            width: 22px;
+                            height: 22px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
+
+                        Text {
+                            text: "Quantum mixer";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-md;
+                            font-weight: 700;
+                        }
+                        Text {
+                            text: root.mixer-available
+                                ? (root.use-mixer
+                                    ? "Routed through mixing pool — recipient sees a fresh address"
+                                    : "Off — recipient sees this wallet as the sender")
+                                : "Mixer not available on this node";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        if root.mixer-available : PillToggle {
+                            active <=> root.use-mixer;
+                            accent: Theme.accent-purple;
+                            toggled(on) => { root.toggle-mixer(on); }
+                        }
+                        if !root.mixer-available : Text {
+                            text: "—";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-md;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // SEED PHRASE (only if OAuth2 first-time)
+            // ─────────────────────────────────────────────
+            if root.needs-seed-phrase : Rectangle {
+                border-radius: Theme.radius-lg;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.accent-yellow.with-alpha(0.4);
+                drop-shadow-blur: Theme.shadow-sm-blur;
+                drop-shadow-offset-y: 1px;
+                drop-shadow-color: #000000.with-alpha(0.30);
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: 4px;
+                    height: parent.height;
+                    background: Theme.accent-yellow;
+                    border-top-left-radius: Theme.radius-lg;
+                    border-bottom-left-radius: Theme.radius-lg;
+                }
+
+                VerticalLayout {
+                    padding-left: Theme.spacing-md + 4px;
+                    padding-right: Theme.spacing-md;
+                    padding-top: Theme.spacing-md;
+                    padding-bottom: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-yellow.with-alpha(0.12);
+
+                            Icon {
+                                source: @image-url("icons/shield-check.svg");
+                                icon-color: Theme.accent-yellow;
+                                width: 18px;
+                                height: 18px;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Seed phrase";
+                                color: Theme.accent-yellow;
+                                font-size: Theme.font-sm;
+                                font-weight: 700;
+                            }
+                            Text {
+                                text: "One-time — remembered for this session only";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                        }
+                    }
+                    QInput {
+                        text <=> root.seed-phrase;
+                        placeholder: "Enter your 12 or 24 word seed phrase…";
+                        is-password: true;
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // FEE + SPEED — compact row
+            // ─────────────────────────────────────────────
+            Card {
+                height: 56px;
+                HorizontalLayout {
+                    padding-left: Theme.spacing-md;
+                    padding-right: Theme.spacing-md;
+                    spacing: Theme.spacing-md;
+                    alignment: space-between;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+
+                        Icon {
+                            source: @image-url("icons/percent.svg");
+                            icon-color: Theme.text-muted;
+                            width: 18px;
+                            height: 18px;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+                            Text {
+                                text: "Network fee";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                            Text {
+                                text: root.current-fee + " QUG";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: 72px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: root.fee-tier == "INSTANT" ? Theme.accent-green.with-alpha(0.18)
+                            : (root.fee-tier == "FAST" ? Theme.accent-blue.with-alpha(0.18)
+                            : Theme.accent-yellow.with-alpha(0.18));
+                        border-width: 1px;
+                        border-color: root.fee-tier == "INSTANT" ? Theme.accent-green.with-alpha(0.4)
+                            : (root.fee-tier == "FAST" ? Theme.accent-blue.with-alpha(0.4)
+                            : Theme.accent-yellow.with-alpha(0.4));
+
+                        Text {
+                            text: root.fee-tier;
+                            color: root.fee-tier == "INSTANT" ? Theme.accent-green
+                                : (root.fee-tier == "FAST" ? Theme.accent-blue
+                                : Theme.accent-yellow);
+                            font-size: 10px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // ERROR
+            // ─────────────────────────────────────────────
+            if root.status-message != "" : Rectangle {
+                height: self.preferred-height;
+                border-radius: Theme.radius-md;
+                background: Theme.accent-red.with-alpha(0.12);
+                border-width: 1px;
+                border-color: Theme.accent-red.with-alpha(0.4);
+
+                HorizontalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-sm;
+
+                    Icon {
+                        source: @image-url("icons/x.svg");
+                        icon-color: Theme.accent-red;
+                        width: Theme.icon-md;
+                        height: Theme.icon-md;
+                    }
+                    Text {
+                        text: root.status-message;
+                        color: Theme.accent-red;
+                        font-size: Theme.font-sm;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // SEND BUTTON
+            // ─────────────────────────────────────────────
+            QButton {
+                label: root.sending
+                    ? "Sending…"
+                    : (root.use-mixer
+                        ? "Mix & send " + root.selected-token
+                        : "Send " + root.selected-token);
+                button-color: root.use-mixer ? Theme.accent-purple : Theme.accent-green;
+                enabled: !root.sending;
+                has-icon: true;
+                btn-icon: @image-url("icons/send.svg");
+                clicked => { root.send-transaction(); }
+            }
+        }
+    }
+
+    // ═══ Confirm overlay ═══
+    if root.show-confirm : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.65);
+
+        TouchArea {}
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 340px;
+                    background: Theme.bg-card;
+                    border-radius: Theme.radius-lg;
+                    border-width: 2px;
+                    border-color: Theme.accent-green;
+                    drop-shadow-blur: 32px;
+                    drop-shadow-color: Theme.accent-green.with-alpha(0.3);
+
+                    VerticalLayout {
+                        padding: Theme.spacing-lg;
+                        spacing: Theme.spacing-md;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 64px;
+                                height: 64px;
+                                border-radius: 32px;
+                                background: @radial-gradient(circle,
+                                    Theme.accent-green.with-alpha(0.30) 0%,
+                                    transparent 70%);
+
+                                Icon {
+                                    source: @image-url("icons/circle-check-big.svg");
+                                    icon-color: Theme.accent-green;
+                                    width: 36px;
+                                    height: 36px;
+                                    x: (parent.width - 36px) / 2;
+                                    y: (parent.height - 36px) / 2;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.use-mixer ? "Mixing initiated" : "Transaction sent";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: root.confirm-amount + " " + root.selected-token;
+                            color: Theme.accent-green;
+                            font-size: Theme.font-xl;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 1px;
+                            background: Theme.border;
+                        }
+
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "To";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                            Text {
+                                text: root.confirm-recipient;
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                overflow: elide;
+                            }
+                        }
+
+                        if !root.contact-saved : Rectangle {
+                            border-radius: Theme.radius-md;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-sm;
+                                spacing: Theme.spacing-xs;
+
+                                Text {
+                                    text: "Save to contacts";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                }
+
+                                HorizontalLayout {
+                                    spacing: Theme.spacing-xs;
+
+                                    QInput {
+                                        text <=> root.contact-label;
+                                        placeholder: "Contact name";
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Rectangle {
+                                        width: 64px;
+                                        height: 44px;
+                                        border-radius: Theme.radius-sm;
+                                        background: save-ta.has-hover ? Theme.accent-blue.darker(15%) : Theme.accent-blue;
+
+                                        save-ta := TouchArea {
+                                            clicked => { root.save-contact(); }
+                                        }
+
+                                        Text {
+                                            text: "Save";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-sm;
+                                            font-weight: 700;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if root.contact-saved : Text {
+                            text: "Contact saved";
+                            color: Theme.accent-green;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                        }
+
+                        QButton {
+                            label: "Done";
+                            button-color: Theme.accent-green;
+                            clicked => {
+                                root.amount = "";
+                                root.memo = "";
+                                root.contact-label = "";
+                                root.contact-saved = false;
+                                root.show-confirm = false;
+                                root.status-message = "";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

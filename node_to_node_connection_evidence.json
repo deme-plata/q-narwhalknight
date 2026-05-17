@@ -1,0 +1,110 @@
+{
+  "test_timestamp": "2025-09-05T21:39:08.369961",
+  "test_type": "Q-NarwhalKnight Tor DHT P2P Connection Test",
+  "nodes": {
+    "alpha": {
+      "onion_address": "ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion",
+      "port": 8091,
+      "connections_made": 1,
+      "messages_received": 1,
+      "messages_sent": 1
+    },
+    "beta": {
+      "onion_address": "47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion",
+      "port": 8092,
+      "connections_made": 1,
+      "messages_received": 1,
+      "messages_sent": 1
+    },
+    "gamma": {
+      "onion_address": "jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion",
+      "port": 8093,
+      "connections_made": 1,
+      "messages_received": 1,
+      "messages_sent": 1
+    }
+  },
+  "connection_logs": {
+    "alpha": [
+      {
+        "timestamp": "2025-09-05T21:38:37.072154",
+        "event": "ONION_SERVICE_CREATED",
+        "node": "validator-alpha",
+        "onion_address": "ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion",
+        "port": 8091,
+        "tor_response": "250-ServiceID=ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd\r\n250-PrivateKey=ED25519-V3:aFJMq3hO8Y+GMLF5aFhjsK9lXRuoCsnENbtAm/mpF3FAgWayE3QgDi7nxQvTEt7LRNMPri2zzruo7hKjFGek7g==\r\n250 OK"
+      },
+      {
+        "timestamp": "2025-09-05T21:39:00.534445",
+        "event": "PEER_CONNECTION_ATTEMPT",
+        "from_node": "validator-alpha",
+        "to_node": "validator-beta",
+        "to_onion": "47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion",
+        "success": true,
+        "response": "{\"node\": \"validator-beta\", \"onion\": \"47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion\", \"status\": \"active\", \"timestamp\": \"2025-09-05T21:39:00.280543\", \"peers_known\": 2}",
+        "connection_details": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 127.0.0.1:9050...\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n* SOCKS5 connect to 47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion:80 (remotely resolved)\n\n  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0\n  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0\n  0     0    0     0    0     0      0      0 --:--:--  0:00:02 --:--:--     0* SOCKS5 request granted.\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n> GET / HTTP/1.1\n> Host: 47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion\n> User-Agent: curl/7.88.1\n> Accept: */*\n> X-From-Node: validator-alpha\n> X-From-Onion: ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion\n> \n< HTTP/1.1 200 OK\n< "
+      },
+      {
+        "timestamp": "2025-09-05T21:39:05.965672",
+        "event": "INCOMING_CONNECTION",
+        "node": "validator-alpha",
+        "from_address": "('127.0.0.1', 33210)",
+        "local_port": 8091
+      }
+    ],
+    "beta": [
+      {
+        "timestamp": "2025-09-05T21:38:37.077532",
+        "event": "ONION_SERVICE_CREATED",
+        "node": "validator-beta",
+        "onion_address": "47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion",
+        "port": 8092,
+        "tor_response": "250-ServiceID=47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd\r\n250-PrivateKey=ED25519-V3:cBsPdrVrKSaPxZwrIm6iZETM9D4gUc7BetvLpwx3KEqR8ur0cr6WdcqoTqKy7Cqbj5BWkaXn2isihFRjqHvcHg==\r\n250 OK"
+      },
+      {
+        "timestamp": "2025-09-05T21:38:59.836466",
+        "event": "INCOMING_CONNECTION",
+        "node": "validator-beta",
+        "from_address": "('127.0.0.1', 54716)",
+        "local_port": 8092
+      },
+      {
+        "timestamp": "2025-09-05T21:39:03.871042",
+        "event": "PEER_CONNECTION_ATTEMPT",
+        "from_node": "validator-beta",
+        "to_node": "validator-gamma",
+        "to_onion": "jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion",
+        "success": true,
+        "response": "{\"node\": \"validator-gamma\", \"onion\": \"jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion\", \"status\": \"active\", \"timestamp\": \"2025-09-05T21:39:03.794405\", \"peers_known\": 2}",
+        "connection_details": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 127.0.0.1:9050...\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n* SOCKS5 connect to jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion:80 (remotely resolved)\n\n  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0\n  0     0    0     0    0     0      0      0 --:--:--  0:00:02 --:--:--     0* SOCKS5 request granted.\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n\n  0     0    0     0    0     0      0      0 --:--:--  0:00:02 --:--:--     0> GET / HTTP/1.1\n> Host: jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion\n> User-Agent: curl/7.88.1\n> Accept: */*\n> X-From-Node: validator-beta\n> X-From-Onion: 47ni4g6hjixf4kdm5x2jdem2ob7tdhzxjipp7msicugoegwplns3mrqd.onion\n> \n< HTTP/1.1 200 OK\n< C"
+      }
+    ],
+    "gamma": [
+      {
+        "timestamp": "2025-09-05T21:38:37.083207",
+        "event": "ONION_SERVICE_CREATED",
+        "node": "validator-gamma",
+        "onion_address": "jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion",
+        "port": 8093,
+        "tor_response": "250-ServiceID=jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid\r\n250-PrivateKey=ED25519-V3:4GtVS3kgjtzsoBOr0AhHzAj9G68g2XqOcRvDaQUI4nlJumiu1TYbTbVQTKnr2ZufUKafMcCCbb7cTYpmISuMgw==\r\n250 OK"
+      },
+      {
+        "timestamp": "2025-09-05T21:39:03.543972",
+        "event": "INCOMING_CONNECTION",
+        "node": "validator-gamma",
+        "from_address": "('127.0.0.1', 54838)",
+        "local_port": 8093
+      },
+      {
+        "timestamp": "2025-09-05T21:39:06.361422",
+        "event": "PEER_CONNECTION_ATTEMPT",
+        "from_node": "validator-gamma",
+        "to_node": "validator-alpha",
+        "to_onion": "ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion",
+        "success": true,
+        "response": "{\"node\": \"validator-alpha\", \"onion\": \"ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion\", \"status\": \"active\", \"timestamp\": \"2025-09-05T21:39:06.203976\", \"peers_known\": 3}",
+        "connection_details": "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                 Dload  Upload   Total   Spent    Left  Speed\n\n  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0*   Trying 127.0.0.1:9050...\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n* SOCKS5 connect to ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion:80 (remotely resolved)\n\n  0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0* SOCKS5 request granted.\n* Connected to 127.0.0.1 (127.0.0.1) port 9050 (#0)\n\n  0     0    0     0    0     0      0      0 --:--:--  0:00:02 --:--:--     0> GET / HTTP/1.1\n> Host: ji53ur4ljeb6bcp5jukep27wokfjeq4nhgffj4cmwi3grmlv2pz7shyd.onion\n> User-Agent: curl/7.88.1\n> Accept: */*\n> X-From-Node: validator-gamma\n> X-From-Onion: jaaghufspchfnz5ac4susiiwpvja4q5uy3quxqnpmom4d4uo7klglyid.onion\n> \n< HTTP/1.1 200 OK\n< Content-Type: application/json\n* no chunk, no close, no size. Assume close to s"
+      }
+    ]
+  }
+}

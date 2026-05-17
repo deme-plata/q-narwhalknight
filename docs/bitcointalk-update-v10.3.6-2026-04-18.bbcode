@@ -1,0 +1,150 @@
+[center]
+[size=18pt][b]Q-NarwhalKnight v10.3.6 — Dual-Lane Mining[/b][/size]
+[size=12pt][i]CPU Miners Can Now Earn 50% of Block Rewards — No GPU Required[/i][/size]
+
+[b]April 2026 | 11.4M+ Blocks | 400+ Miners | Mainnet[/b]
+[/center]
+
+[hr]
+
+[size=14pt][b]THE BIG CHANGE: DUAL-LANE MINING (v10.3.5)[/b][/size]
+
+We've fundamentally changed how mining works on Q-NarwhalKnight. Instead of one mining algorithm where GPUs dominate, we now have [b]two parallel lanes[/b] with a 50/50 reward split:
+
+[table]
+[tr][td][b]Lane[/b][/td][td][b]Algorithm[/b][/td][td][b]Hardware[/b][/td][td][b]Reward Share[/b][/td][/tr]
+[tr][td]GPU Lane[/td][td]Massively parallel BLAKE3 hashing[/td][td]OpenCL (AMD + NVIDIA)[/td][td]50%[/td][/tr]
+[tr][td]CPU VDF Lane[/td][td]BLAKE3 × 4,300 sequential iterations[/td][td]Any CPU[/td][td]50%[/td][/tr]
+[/table]
+
+[b]Why this matters:[/b] The VDF (Verifiable Delay Function) lane is [i]inherently sequential[/i] — you cannot parallelize it. A $50,000 GPU farm has zero advantage over a $200 laptop on this lane. This means:
+
+[list]
+[li][b]CPU-only miners earn 50% of block rewards[/b] without owning a GPU[/li]
+[li]GPU miners still earn their 50% through the BLAKE3 parallel lane[/li]
+[li]Both lanes run simultaneously — you don't choose, you mine both[/li]
+[li]VDF performance: ~200μs per doubling with Montgomery-integrated optimization[/li]
+[/list]
+
+[b]Difficulty adjustment[/b] now uses LWMA (Linear Weighted Moving Average) — adjusts per-block for stable 1-second block times. No more difficulty spikes or troughs.
+
+[size=14pt][b]WHAT ELSE SHIPPED IN v10.3.5 / v10.3.6[/b][/size]
+
+[b]v10.3.5 (April 8):[/b]
+[list]
+[li]Dual-lane mining engine (GPU BLAKE3 + CPU VDF)[/li]
+[li]LWMA difficulty adjustment (per-block, weighted 60-block window)[/li]
+[li]Montgomery-integrated VDF doubling (200μs/iteration)[/li]
+[li]Genus-2 Jacobian VDF whitepaper v3 published[/li]
+[/list]
+
+[b]v10.3.6 (April 10-18):[/b]
+[list]
+[li][b]545,710 hidden DAG blocks recovered[/b] — blocks stored in legacy format were invisible to sync. New fallback read path finds them automatically[/li]
+[li][b]Gossipsub dedup fix[/b] — persistent RocksDB dedup prevents balance inflation on node restart (was: volatile LRU cache lost on restart, causing triple-credit)[/li]
+[li][b]Checkpoint Sync probe fix[/b] — new nodes now correctly detect peer chain height[/li]
+[li][b]Watchdog sync-awareness[/b] — production watchdog no longer kills nodes that are catching up to the network[/li]
+[li][b]Chain rebuild guard[/b] — dangerous balance-rebuilding migrations disabled by default (were crashing nodes with partial DBs)[/li]
+[li]MCP wallet security hardening (5 vulnerability fixes)[/li]
+[li]DEX token balance display fixes[/li]
+[li]Price impact warnings for unrealistic swap values[/li]
+[/list]
+
+[size=14pt][b]NETWORK STATUS (April 18, 2026)[/b][/size]
+
+[code]
+╔══════════════════════════════════════════════════════════╗
+║           Q-NARWHALKNIGHT NETWORK STATUS                 ║
+╠══════════════════════════════════════════════════════════╣
+║  Block Height:        11,400,000+                        ║
+║  Mining Algorithm:    GPU BLAKE3 + CPU VDF (50/50)       ║
+║  Difficulty:          LWMA (per-block adjustment)        ║
+║  Active Miners:       400+                               ║
+║  Bootstrap Nodes:     5 (Alpha, Beta, Gamma, Delta, Eps) ║
+║  Version:             v10.3.6                            ║
+║  Max Supply:          21,000,000 QUG                     ║
+║  Block Time:          ~1 second                          ║
+║  Consensus:           DAG-Knight BFT                     ║
+║  Post-Quantum:        Dilithium5 + Kyber1024 (LIVE)      ║
+╚══════════════════════════════════════════════════════════╝
+[/code]
+
+[size=14pt][b]THE DAG BLOCK RECOVERY STORY[/b][/size]
+
+A bug in how RocksDB stores blocks caused 545,710 blocks to become invisible. They weren't deleted — they were stored under a different key format ([tt]qblock:dag:{height}:{proposer}[/tt] instead of [tt]qblock:height:{N}[/tt]). When syncing nodes asked for block ranges, the scan missed these entries due to string-sort ordering.
+
+The fix adds a fallback read path: if a block isn't found at its height key, the system scans for DAG-format keys at that height. All 545K blocks are now visible and sync correctly. 10 unit tests verify the fix.
+
+No data was ever lost. The blocks were always there — just hiding in plain sight.
+
+[size=14pt][b]BALANCE INTEGRITY FIX[/b][/size]
+
+We discovered three independent code paths that write balance updates:
+[list=1]
+[li][b]Block processing[/b] (normal operation) — already had dedup[/li]
+[li][b]P2P gossipsub[/b] (peer propagation) — was using volatile LRU cache[/li]
+[li][b]Catch-up processing[/b] (restart/sync) — had NO dedup[/li]
+[/list]
+
+On node restart, paths 2 and 3 would re-credit balances that were already applied. The fix: persistent RocksDB flags ([tt]processed_balance_block:{hash}[/tt]) in all three paths. Balance updates are now idempotent regardless of restarts, resyncs, or P2P retransmissions.
+
+[size=14pt][b]FPGA & ASIC DEVELOPMENT[/b][/size]
+
+We're actively developing hardware acceleration for the mining algorithm:
+
+[list]
+[li][b]QUG-V1 FPGA RTL[/b] (SystemVerilog) updated for dual-lane mining[/li]
+[li]SHA-3 Keccak-f[1600] hardware core added (26-cycle per hash)[/li]
+[li]VDF depth increased from 127 to 16,383 iterations (14-bit counter)[/li]
+[li]LWMA difficulty awareness with hardware leading-zero counter[/li]
+[li]Autonomous nonce-scanning mining controller[/li]
+[li]Genus-2 VDF field operations (mod_sub_256, configurable modulus)[/li]
+[li]All fits within 10% of Kintex-7 XC7K325T resources[/li]
+[/list]
+
+We're in discussions with FPGA manufacturers for a 12nm box miner design at $149 target price point, offering 6-10x advantage over CPU mining on the VDF lane.
+
+[size=14pt][b]DOWNLOAD & MINE[/b][/size]
+
+[b]Run a node:[/b]
+[code]
+wget https://quillon.xyz/downloads/q-api-server-linux-x86_64
+chmod +x q-api-server-linux-x86_64
+./q-api-server-linux-x86_64 --port 8080
+[/code]
+
+[b]Mine (CPU + GPU dual-lane):[/b]
+[code]
+wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --server https://quillon.xyz --wallet YOUR_WALLET
+[/code]
+
+[b]Desktop wallet (auto-updates):[/b]
+[code]
+wget https://quillon.xyz/downloads/slint-wallet-linux-x64
+chmod +x slint-wallet-linux-x64
+./slint-wallet-linux-x64
+[/code]
+
+[b]Windows:[/b] [url=https://quillon.xyz/downloads/q-api-server-windows-x86_64.exe]Node[/url] | [url=https://quillon.xyz/downloads/q-miner-windows-x64.exe]Miner[/url] | [url=https://quillon.xyz/downloads/slint-wallet-windows-x64.exe]Wallet[/url]
+
+[size=14pt][b]LINKS[/b][/size]
+
+[list]
+[li][b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url][/li]
+[li][b]Source Code:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url][/li]
+[li][b]Discord:[/b] [url=https://discord.gg/jEhaYtAhfx]discord.gg/jEhaYtAhfx[/url][/li]
+[li][b]VDF Mining Whitepaper:[/b] [url=https://quillon.xyz/downloads/genus2-jacobian-vdf-mining-whitepaper.pdf]Genus-2 Jacobian VDF (PDF)[/url][/li]
+[li][b]All Whitepapers:[/b] quillon.xyz (Research tab)[/li]
+[/list]
+
+[hr]
+
+[center]
+[i]11.4 million blocks. Dual-lane mining. CPU miners welcome.
+The chain keeps growing.[/i]
+
+— Q-NarwhalKnight Development Team
+[url=https://quillon.xyz]quillon.xyz[/url] | [url=https://discord.gg/jEhaYtAhfx]Discord[/url]
+[/center]

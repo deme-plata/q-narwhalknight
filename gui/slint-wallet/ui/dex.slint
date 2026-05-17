@@ -1,0 +1,1570 @@
+import { Theme, Card, GradientCard, QButton, QInput, Icon } from "theme.slint";
+
+// Token entry for the token selector list
+export struct DexToken {
+    symbol: string,
+    name: string,
+    balance: string,
+    price-usd: string,
+}
+
+// Price chart data point (normalized 0.0–1.0 height)
+export struct ChartBar {
+    height-pct: float,  // 0.0 to 1.0
+    is-green: bool,     // green if close > open
+}
+
+// Token detail transaction history entry
+export struct TokenTx {
+    tx-type: string,   // "Buy", "Sell", "Transfer"
+    amount: string,     // "1.5000 QUG"
+    price: string,      // "$3,000.00"
+    time-ago: string,   // "2m ago", "1h ago"
+    is-buy: bool,
+}
+
+export component DexScreen inherits Rectangle {
+    // Swap state
+    in-out property <string> from-symbol: "QUG";
+    in-out property <string> from-name: "Quillon";
+    in-out property <string> from-balance: "0.00";
+    in-out property <string> from-amount: "";
+
+    in-out property <string> to-symbol: "QUGUSD";
+    in-out property <string> to-name: "QUG Stablecoin";
+    in-out property <string> to-balance: "0.00";
+    in-out property <string> to-amount: "";
+
+    // Price / quote info
+    in property <string> exchange-rate: "";
+    in property <string> price-impact: "";
+    in property <string> min-received: "";
+    in property <string> swap-fee: "0.3%";
+    in property <string> slippage: "0.5%";
+
+    // Swap execution state
+    in property <bool> swap-loading: false;
+    in property <string> swap-status: "";
+    in property <bool> swap-success: false;
+
+    // Swap result info (for success modal)
+    in property <string> swap-result-from: "";   // e.g. "1.5000 QUG"
+    in property <string> swap-result-to: "";     // e.g. "4491.0000 QUGUSD"
+    in property <string> swap-result-tx: "";     // tx hash
+
+    // Token list for selector modal
+    in property <[DexToken]> token-list: [];
+
+    // Internal modal state: 0=hidden, 1=selecting "from", 2=selecting "to"
+    property <int> show-token-modal: 0;
+    property <string> token-search: "";
+
+    callback go-back();
+    callback execute-swap();
+    callback flip-tokens();
+    callback request-quote(string);     // called when from-amount changes
+    callback open-token-list(int);      // 1=from, 2=to
+    callback select-token(int, string); // (which-side, symbol)
+    callback set-slippage(string);
+    callback add-liquidity();
+    callback dismiss-swap-success();
+    callback open-token-detail(string);   // symbol → fetch detail
+    callback close-token-detail();
+
+    // Token detail modal state
+    in property <bool> show-token-detail: false;
+    in property <string> detail-symbol: "";
+    in property <string> detail-name: "";
+    in property <string> detail-contract-type: "";
+    in property <string> detail-address: "";
+    in property <string> detail-decimals: "";
+    in property <string> detail-total-supply: "";
+    in property <bool> detail-verified: false;
+    in property <string> detail-price: "";
+    in property <string> detail-change-24h: "";
+    in property <bool> detail-change-positive: true;
+    in property <string> detail-balance: "";
+    in property <string> detail-value-usd: "";
+    in property <[ChartBar]> detail-chart-bars: [];
+    in property <string> detail-chart-high: "";
+    in property <string> detail-chart-low: "";
+    in property <[TokenTx]> detail-txns: [];
+
+    background: Theme.bg-primary;
+
+    // ═══ Main Swap UI ═══
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                    }
+                }
+            }
+
+            Text {
+                text: "Swap";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            // Slippage badge
+            Rectangle {
+                width: 80px;
+                height: 32px;
+                border-radius: Theme.radius-sm;
+                background: Theme.bg-card;
+                border-width: 1px;
+                border-color: Theme.border;
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Icon {
+                        source: @image-url("icons/percent.svg");
+                        icon-color: Theme.text-muted;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: root.slippage;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ─── From Token Card ───
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-lg;
+            border-width: 2px;
+            border-color: Theme.accent-cyan.with-alpha(0.3);
+            drop-shadow-blur: 8px;
+            drop-shadow-color: Theme.accent-cyan.with-alpha(0.06);
+            height: 130px;
+
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    height: 20px;
+
+                    Text {
+                        text: "From";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Balance: " + root.from-balance;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                            vertical-alignment: center;
+                        }
+                        // MAX button
+                        Rectangle {
+                            width: 40px;
+                            height: 20px;
+                            border-radius: 4px;
+                            background: max-from-touch.has-hover ? Theme.accent-cyan.with-alpha(0.2) : transparent;
+                            border-width: 1px;
+                            border-color: Theme.accent-cyan.with-alpha(0.4);
+
+                            max-from-touch := TouchArea {
+                                clicked => { root.from-amount = root.from-balance; root.request-quote(root.from-amount); }
+                            }
+
+                            Text {
+                                text: "MAX";
+                                color: Theme.accent-cyan;
+                                font-size: 10px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // Token selector button
+                    Rectangle {
+                        width: 130px;
+                        height: 48px;
+                        border-radius: Theme.radius-md;
+                        background: from-sel-touch.has-hover ? Theme.bg-hover : Theme.bg-secondary;
+                        border-width: 1px;
+                        border-color: from-sel-touch.has-hover ? Theme.accent-cyan.with-alpha(0.3) : Theme.border;
+                        animate background, border-color { duration: 100ms; }
+
+                        from-sel-touch := TouchArea {
+                            clicked => { root.token-search = ""; root.open-token-list(1); root.show-token-modal = 1; }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            // Token logo (known tokens get SVG, others get colored circle)
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 16px;
+
+                                if root.from-symbol == "QUG" : Image {
+                                    source: @image-url("icons/token-qug.svg");
+                                    width: 32px;
+                                    height: 32px;
+                                }
+                                if root.from-symbol == "QUGUSD" : Image {
+                                    source: @image-url("icons/token-qugusd.svg");
+                                    width: 32px;
+                                    height: 32px;
+                                }
+                                if root.from-symbol != "QUG" && root.from-symbol != "QUGUSD" : Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 16px;
+                                    background: @linear-gradient(135deg, #8b5cf6, #6366f1);
+                                    Text {
+                                        text: root.from-symbol;
+                                        color: white;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.from-symbol;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                            }
+
+                            Icon {
+                                source: @image-url("icons/chevron-down.svg");
+                                icon-color: Theme.text-muted;
+                                width: 14px;
+                                height: 14px;
+                            }
+                        }
+                    }
+
+                    // Amount input
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 48px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-input;
+                        border-width: 1px;
+                        border-color: from-input.has-focus ? Theme.accent-cyan : Theme.border;
+                        animate border-color { duration: 150ms; }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+
+                            from-input := TextInput {
+                                font-size: Theme.font-xl;
+                                font-weight: 600;
+                                color: Theme.text-primary;
+                                input-type: InputType.decimal;
+                                text <=> root.from-amount;
+                                edited => { root.request-quote(root.from-amount); }
+                            }
+                        }
+
+                        if root.from-amount == "" : Text {
+                            x: 12px;
+                            text: "0.00";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xl;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Swap Direction Button ───
+        HorizontalLayout {
+            alignment: center;
+            height: 40px;
+
+            Rectangle {
+                width: 44px;
+                height: 44px;
+                border-radius: 22px;
+                background: flip-touch.pressed ? Theme.accent-cyan.with-alpha(0.3)
+                    : flip-touch.has-hover ? Theme.accent-cyan.with-alpha(0.15)
+                    : Theme.bg-card;
+                border-width: 2px;
+                border-color: Theme.accent-cyan.with-alpha(0.4);
+                drop-shadow-blur: flip-touch.has-hover ? 8px : 4px;
+                drop-shadow-color: Theme.accent-cyan.with-alpha(0.15);
+                animate background, drop-shadow-blur { duration: 100ms; }
+
+                flip-touch := TouchArea {
+                    clicked => { root.flip-tokens(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-up-down.svg");
+                        icon-color: Theme.accent-cyan;
+                        width: 22px;
+                        height: 22px;
+                    }
+                }
+            }
+        }
+
+        // ─── To Token Card ───
+        Rectangle {
+            background: Theme.bg-card;
+            border-radius: Theme.radius-lg;
+            border-width: 2px;
+            border-color: Theme.accent-purple.with-alpha(0.3);
+            drop-shadow-blur: 8px;
+            drop-shadow-color: Theme.accent-purple.with-alpha(0.06);
+            height: 130px;
+
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    height: 20px;
+
+                    Text {
+                        text: "To";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "Balance: " + root.to-balance;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // Token selector button
+                    Rectangle {
+                        width: 130px;
+                        height: 48px;
+                        border-radius: Theme.radius-md;
+                        background: to-sel-touch.has-hover ? Theme.bg-hover : Theme.bg-secondary;
+                        border-width: 1px;
+                        border-color: to-sel-touch.has-hover ? Theme.accent-purple.with-alpha(0.3) : Theme.border;
+                        animate background, border-color { duration: 100ms; }
+
+                        to-sel-touch := TouchArea {
+                            clicked => { root.token-search = ""; root.open-token-list(2); root.show-token-modal = 2; }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 6px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            // Token logo (known tokens get SVG, others get colored circle)
+                            Rectangle {
+                                width: 32px;
+                                height: 32px;
+                                border-radius: 16px;
+
+                                if root.to-symbol == "QUG" : Image {
+                                    source: @image-url("icons/token-qug.svg");
+                                    width: 32px;
+                                    height: 32px;
+                                }
+                                if root.to-symbol == "QUGUSD" : Image {
+                                    source: @image-url("icons/token-qugusd.svg");
+                                    width: 32px;
+                                    height: 32px;
+                                }
+                                if root.to-symbol != "QUG" && root.to-symbol != "QUGUSD" : Rectangle {
+                                    width: 32px;
+                                    height: 32px;
+                                    border-radius: 16px;
+                                    background: @linear-gradient(135deg, #f59e0b, #d97706);
+                                    Text {
+                                        text: root.to-symbol;
+                                        color: white;
+                                        font-size: 9px;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.to-symbol;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                            }
+
+                            Icon {
+                                source: @image-url("icons/chevron-down.svg");
+                                icon-color: Theme.text-muted;
+                                width: 14px;
+                                height: 14px;
+                            }
+                        }
+                    }
+
+                    // Estimated output (read-only display)
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 48px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-input;
+                        border-width: 1px;
+                        border-color: Theme.border;
+
+                        Text {
+                            x: 12px;
+                            text: root.to-amount == "" ? "0.00" : root.to-amount;
+                            color: root.to-amount == "" ? Theme.text-muted : Theme.text-primary;
+                            font-size: Theme.font-xl;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Price Info Card ───
+        if root.exchange-rate != "" : Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-xs;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Icon {
+                        source: @image-url("icons/trending-up.svg");
+                        icon-color: Theme.text-muted;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: root.exchange-rate;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        horizontal-stretch: 1;
+                        horizontal-alignment: right;
+                    }
+                }
+
+                if root.price-impact != "" : HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Price Impact";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.price-impact;
+                        color: Theme.accent-yellow;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+
+                if root.min-received != "" : HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Min Received";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.min-received;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Swap Fee";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.swap-fee;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ─── Error Status (only shown on failure, success uses modal) ───
+        if root.swap-status != "" && !root.swap-success : Text {
+            text: root.swap-status;
+            color: Theme.accent-red;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        // Spacer
+        Rectangle { vertical-stretch: 1; }
+
+        // ─── Liquidity link ───
+        HorizontalLayout {
+            alignment: center;
+            height: 28px;
+
+            Rectangle {
+                width: 160px;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: liq-touch.has-hover ? Theme.bg-hover : transparent;
+
+                liq-touch := TouchArea {
+                    clicked => { root.add-liquidity(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Icon {
+                        source: @image-url("icons/droplets.svg");
+                        icon-color: Theme.accent-blue;
+                        width: 14px;
+                        height: 14px;
+                    }
+                    Text {
+                        text: "Add Liquidity";
+                        color: Theme.accent-blue;
+                        font-size: Theme.font-sm;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // ─── Swap Button ───
+        Rectangle {
+            height: 52px;
+            border-radius: Theme.radius-md;
+            background: root.from-amount != "" && !root.swap-loading
+                ? (swap-touch.pressed ? @linear-gradient(90deg, #7c3aed, #6d28d9)
+                    : (swap-touch.has-hover ? @linear-gradient(90deg, #8b5cf6, #7c3aed)
+                    : @linear-gradient(90deg, #8b5cf6, #6366f1)))
+                : Theme.bg-hover;
+            drop-shadow-blur: root.from-amount != "" && !root.swap-loading ? (swap-touch.pressed ? 2px : 12px) : 0px;
+            drop-shadow-offset-y: swap-touch.pressed ? 0px : 3px;
+            drop-shadow-color: root.from-amount != "" ? Theme.accent-purple.with-alpha(0.35) : transparent;
+            animate background, drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+            swap-touch := TouchArea {
+                enabled: root.from-amount != "" && !root.swap-loading;
+                clicked => { root.execute-swap(); }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                if root.swap-loading : Text {
+                    text: "Swapping...";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-md;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                if !root.swap-loading : Icon {
+                    source: @image-url("icons/arrow-up-down.svg");
+                    icon-color: root.from-amount != "" ? white : Theme.text-muted;
+                    width: Theme.icon-lg;
+                    height: Theme.icon-lg;
+                }
+                if !root.swap-loading : Text {
+                    text: "Swap";
+                    color: root.from-amount != "" ? white : Theme.text-muted;
+                    font-size: Theme.font-md;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // ═══ Token Select Modal ═══
+    if root.show-token-modal > 0 : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.75);
+
+        // Dismiss backdrop
+        TouchArea {
+            clicked => { root.show-token-modal = 0; }
+        }
+
+        VerticalLayout {
+            alignment: end;
+
+            // Modal card — slides up from bottom
+            Rectangle {
+                height: root.height * 0.7;
+                background: Theme.bg-primary;
+                border-radius: Theme.radius-lg;
+                border-width: 1px;
+                border-color: root.show-token-modal == 1
+                    ? Theme.accent-cyan.with-alpha(0.3)
+                    : Theme.accent-purple.with-alpha(0.3);
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #000000.with-alpha(0.5);
+
+                // Block backdrop click from passing through
+                TouchArea {}
+
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    spacing: Theme.spacing-md;
+
+                    // Modal header
+                    HorizontalLayout {
+                        height: 32px;
+                        alignment: space-between;
+
+                        Text {
+                            text: root.show-token-modal == 1 ? "Select From Token" : "Select To Token";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 16px;
+                            background: close-modal-touch.has-hover ? Theme.bg-hover : transparent;
+
+                            close-modal-touch := TouchArea {
+                                clicked => { root.show-token-modal = 0; }
+                            }
+
+                            HorizontalLayout {
+                                alignment: center;
+                                Icon {
+                                    source: @image-url("icons/x.svg");
+                                    icon-color: Theme.text-muted;
+                                    width: 18px;
+                                    height: 18px;
+                                }
+                            }
+                        }
+                    }
+
+                    // Search bar
+                    Rectangle {
+                        height: 44px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-input;
+                        border-width: 1px;
+                        border-color: search-input.has-focus ? Theme.border-focus : Theme.border;
+                        animate border-color { duration: 150ms; }
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            spacing: 8px;
+
+                            Icon {
+                                source: @image-url("icons/search.svg");
+                                icon-color: Theme.text-muted;
+                                width: 16px;
+                                height: 16px;
+                            }
+
+                            search-input := TextInput {
+                                font-size: Theme.font-md;
+                                color: Theme.text-primary;
+                                text <=> root.token-search;
+                            }
+                        }
+
+                        if root.token-search == "" : Text {
+                            x: 40px;
+                            text: "Search by name or symbol...";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-md;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Token list
+                    Flickable {
+                        viewport-height: root.token-list.length * 64px;
+
+                        VerticalLayout {
+                            spacing: 4px;
+
+                            for token[i] in root.token-list : Rectangle {
+                                height: 60px;
+                                border-radius: Theme.radius-md;
+                                background: token-touch.has-hover ? Theme.bg-hover : transparent;
+                                animate background { duration: 100ms; }
+
+                                token-touch := TouchArea {
+                                    clicked => {
+                                        root.select-token(root.show-token-modal, token.symbol);
+                                        root.show-token-modal = 0;
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: Theme.spacing-md;
+                                    padding-right: Theme.spacing-md;
+                                    spacing: Theme.spacing-sm;
+
+                                    // Token logo icon
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 40px;
+                                            height: 40px;
+                                            border-radius: 20px;
+
+                                            if token.symbol == "QUG" : Image {
+                                                source: @image-url("icons/token-qug.svg");
+                                                width: 40px;
+                                                height: 40px;
+                                            }
+                                            if token.symbol == "QUGUSD" : Image {
+                                                source: @image-url("icons/token-qugusd.svg");
+                                                width: 40px;
+                                                height: 40px;
+                                            }
+                                            if token.symbol != "QUG" && token.symbol != "QUGUSD" : Rectangle {
+                                                width: 40px;
+                                                height: 40px;
+                                                border-radius: 20px;
+                                                background: @linear-gradient(135deg, #8b5cf6, #6366f1);
+                                                border-width: 1px;
+                                                border-color: #8b5cf6.with-alpha(0.3);
+                                                Text {
+                                                    text: token.symbol;
+                                                    color: white;
+                                                    font-size: 10px;
+                                                    font-weight: 700;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Name and symbol
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+
+                                        Text {
+                                            text: token.name;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-md;
+                                            font-weight: 500;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: token.symbol;
+                                            color: Theme.text-muted;
+                                            font-size: Theme.font-xs;
+                                        }
+                                    }
+
+                                    // Balance and price
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 0;
+
+                                        Text {
+                                            text: token.balance;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-sm;
+                                            horizontal-alignment: right;
+                                        }
+                                        if token.price-usd != "" : Text {
+                                            text: token.price-usd;
+                                            color: Theme.text-muted;
+                                            font-size: Theme.font-xs;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+
+                                    // Info button → opens token detail
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 32px;
+                                            height: 32px;
+                                            border-radius: 16px;
+                                            background: info-touch.has-hover ? Theme.bg-hover : transparent;
+
+                                            info-touch := TouchArea {
+                                                clicked => {
+                                                    root.open-token-detail(token.symbol);
+                                                }
+                                            }
+
+                                            HorizontalLayout {
+                                                alignment: center;
+                                                Icon {
+                                                    source: @image-url("icons/chart-no-axes-combined.svg");
+                                                    icon-color: Theme.text-muted;
+                                                    width: 16px;
+                                                    height: 16px;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ Token Detail Modal ═══
+    if root.show-token-detail : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.85);
+
+        TouchArea {
+            clicked => { root.close-token-detail(); }
+        }
+
+        VerticalLayout {
+            alignment: stretch;
+
+            // Full-height detail card
+            Rectangle {
+                background: Theme.bg-primary;
+                border-radius: 0;
+
+                // Block backdrop click
+                TouchArea {}
+
+                Flickable {
+                    viewport-height: 900px;
+
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-md;
+
+                        // ─── Header: Back + Token Name ───
+                        HorizontalLayout {
+                            height: 44px;
+                            spacing: Theme.spacing-sm;
+
+                            Rectangle {
+                                width: 40px;
+                                height: 40px;
+                                border-radius: Theme.radius-sm;
+                                background: detail-back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                                detail-back-touch := TouchArea {
+                                    clicked => { root.close-token-detail(); }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    Icon {
+                                        source: @image-url("icons/arrow-left.svg");
+                                        icon-color: Theme.text-primary;
+                                    }
+                                }
+                            }
+
+                            // Token logo
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 18px;
+
+                                    if root.detail-symbol == "QUG" : Image {
+                                        source: @image-url("icons/token-qug.svg");
+                                        width: 36px;
+                                        height: 36px;
+                                    }
+                                    if root.detail-symbol == "QUGUSD" : Image {
+                                        source: @image-url("icons/token-qugusd.svg");
+                                        width: 36px;
+                                        height: 36px;
+                                    }
+                                    if root.detail-symbol != "QUG" && root.detail-symbol != "QUGUSD" : Rectangle {
+                                        width: 36px;
+                                        height: 36px;
+                                        border-radius: 18px;
+                                        background: @linear-gradient(135deg, #8b5cf6, #6366f1);
+                                        Text {
+                                            text: root.detail-symbol;
+                                            color: white;
+                                            font-size: 9px;
+                                            font-weight: 700;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: root.detail-name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-lg;
+                                    font-weight: 700;
+                                    overflow: elide;
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: root.detail-symbol;
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-sm;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.detail-verified : Rectangle {
+                                        width: 60px;
+                                        height: 18px;
+                                        border-radius: 9px;
+                                        background: #10b981.with-alpha(0.15);
+                                        Text {
+                                            text: "Verified";
+                                            color: #10b981;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if root.detail-contract-type != "" : Rectangle {
+                                        width: 60px;
+                                        height: 18px;
+                                        border-radius: 9px;
+                                        background: Theme.accent-purple.with-alpha(0.15);
+                                        Text {
+                                            text: root.detail-contract-type;
+                                            color: Theme.accent-purple;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ─── Price + Balance Card ───
+                        Rectangle {
+                            height: 100px;
+                            border-radius: Theme.radius-lg;
+                            background: Theme.bg-card;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            HorizontalLayout {
+                                padding: Theme.spacing-md;
+
+                                // Price side
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    Text {
+                                        text: "Price";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                    }
+                                    Text {
+                                        text: root.detail-price;
+                                        color: Theme.text-primary;
+                                        font-size: 22px;
+                                        font-weight: 800;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        Text {
+                                            text: root.detail-change-24h;
+                                            color: root.detail-change-positive ? #10b981 : Theme.accent-red;
+                                            font-size: Theme.font-sm;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "24h";
+                                            color: Theme.text-muted;
+                                            font-size: Theme.font-xs;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Divider
+                                Rectangle {
+                                    width: 1px;
+                                    background: Theme.border;
+                                }
+
+                                // Balance side
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+                                    padding-left: Theme.spacing-md;
+                                    Text {
+                                        text: "Your Balance";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                    }
+                                    Text {
+                                        text: root.detail-balance;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-lg;
+                                        font-weight: 700;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: root.detail-value-usd;
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-sm;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ─── Price Chart ───
+                        Rectangle {
+                            height: 200px;
+                            border-radius: Theme.radius-lg;
+                            background: Theme.bg-card;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-sm;
+                                spacing: 4px;
+
+                                HorizontalLayout {
+                                    height: 20px;
+                                    padding-left: Theme.spacing-sm;
+                                    padding-right: Theme.spacing-sm;
+                                    alignment: space-between;
+                                    Text {
+                                        text: "Price (24h)";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Rectangle {
+                                            width: 8px;
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: #10b981;
+                                            y: 6px;
+                                        }
+                                        Text {
+                                            text: root.detail-chart-high;
+                                            color: #10b981;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle {
+                                            width: 8px;
+                                            height: 8px;
+                                            border-radius: 4px;
+                                            background: #ef4444;
+                                            y: 6px;
+                                        }
+                                        Text {
+                                            text: root.detail-chart-low;
+                                            color: #ef4444;
+                                            font-size: 10px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // Chart area — area-style columns
+                                Rectangle {
+                                    height: 150px;
+                                    clip: true;
+                                    border-radius: 6px;
+                                    background: #0d1117;
+
+                                    // Subtle grid lines
+                                    Rectangle { y: 37px; height: 1px; background: #ffffff08; width: 100%; }
+                                    Rectangle { y: 75px; height: 1px; background: #ffffff08; width: 100%; }
+                                    Rectangle { y: 112px; height: 1px; background: #ffffff08; width: 100%; }
+
+                                    HorizontalLayout {
+                                        alignment: stretch;
+                                        spacing: 0px;
+                                        padding-left: 2px;
+                                        padding-right: 2px;
+
+                                        for bar[idx] in root.detail-chart-bars : Rectangle {
+                                            horizontal-stretch: 1;
+                                            background: transparent;
+
+                                            // Filled column from bottom to data point (area chart style)
+                                            Rectangle {
+                                                y: parent.height - self.height;
+                                                width: parent.width;
+                                                height: Math.max(2px, bar.height-pct * 140px);
+                                                background: bar.is-green
+                                                    ? @linear-gradient(180deg, #10b98180, #10b98108)
+                                                    : @linear-gradient(180deg, #ef444480, #ef444408);
+                                            }
+
+                                            // Bright top edge (line chart effect)
+                                            Rectangle {
+                                                y: parent.height - Math.max(2px, bar.height-pct * 140px);
+                                                width: parent.width;
+                                                height: 2px;
+                                                background: bar.is-green ? #10b981 : #ef4444;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ─── Token Info Grid ───
+                        Rectangle {
+                            border-radius: Theme.radius-lg;
+                            background: Theme.bg-card;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            height: 160px;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-md;
+                                spacing: Theme.spacing-sm;
+
+                                Text {
+                                    text: "Token Info";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: 600;
+                                }
+
+                                // Info rows
+                                HorizontalLayout {
+                                    height: 24px;
+                                    Text { text: "Type"; color: Theme.text-muted; font-size: Theme.font-sm; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: root.detail-contract-type; color: Theme.text-primary; font-size: Theme.font-sm; font-weight: 500; vertical-alignment: center; }
+                                }
+                                HorizontalLayout {
+                                    height: 24px;
+                                    Text { text: "Decimals"; color: Theme.text-muted; font-size: Theme.font-sm; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: root.detail-decimals; color: Theme.text-primary; font-size: Theme.font-sm; font-weight: 500; vertical-alignment: center; }
+                                }
+                                HorizontalLayout {
+                                    height: 24px;
+                                    Text { text: "Total Supply"; color: Theme.text-muted; font-size: Theme.font-sm; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: root.detail-total-supply; color: Theme.text-primary; font-size: Theme.font-sm; font-weight: 500; vertical-alignment: center; overflow: elide; }
+                                }
+                                if root.detail-address != "" : HorizontalLayout {
+                                    height: 24px;
+                                    Text { text: "Address"; color: Theme.text-muted; font-size: Theme.font-sm; horizontal-stretch: 1; vertical-alignment: center; }
+                                    Text { text: root.detail-address; color: Theme.accent-cyan; font-size: 11px; font-weight: 500; vertical-alignment: center; overflow: elide; }
+                                }
+                            }
+                        }
+
+                        // ─── Recent Transactions ───
+                        Rectangle {
+                            border-radius: Theme.radius-lg;
+                            background: Theme.bg-card;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            height: root.detail-txns.length > 0 ? (40px + root.detail-txns.length * 52px) : 80px;
+
+                            VerticalLayout {
+                                padding: Theme.spacing-md;
+                                spacing: Theme.spacing-xs;
+
+                                Text {
+                                    text: "Recent Trades";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    font-weight: 600;
+                                }
+
+                                if root.detail-txns.length == 0 : Text {
+                                    text: "No recent trades";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-sm;
+                                    horizontal-alignment: center;
+                                }
+
+                                for tx[ti] in root.detail-txns : HorizontalLayout {
+                                    height: 48px;
+                                    spacing: Theme.spacing-sm;
+
+                                    // Type indicator
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 36px;
+                                            height: 36px;
+                                            border-radius: 18px;
+                                            background: tx.is-buy ? #10b981.with-alpha(0.12) : #ef4444.with-alpha(0.12);
+
+                                            Icon {
+                                                source: tx.is-buy ? @image-url("icons/arrow-down-to-line.svg") : @image-url("icons/arrow-up-from-line.svg");
+                                                icon-color: tx.is-buy ? #10b981 : #ef4444;
+                                                width: 18px;
+                                                height: 18px;
+                                                x: 9px;
+                                                y: 9px;
+                                            }
+                                        }
+                                    }
+
+                                    // Details
+                                    VerticalLayout {
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        spacing: 2px;
+                                        Text {
+                                            text: tx.tx-type;
+                                            color: tx.is-buy ? #10b981 : #ef4444;
+                                            font-size: Theme.font-sm;
+                                            font-weight: 600;
+                                        }
+                                        Text {
+                                            text: tx.time-ago;
+                                            color: Theme.text-muted;
+                                            font-size: Theme.font-xs;
+                                        }
+                                    }
+
+                                    // Amount + price
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: 2px;
+                                        Text {
+                                            text: tx.amount;
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-sm;
+                                            font-weight: 500;
+                                            horizontal-alignment: right;
+                                        }
+                                        Text {
+                                            text: tx.price;
+                                            color: Theme.text-muted;
+                                            font-size: Theme.font-xs;
+                                            horizontal-alignment: right;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ Swap Success Modal ═══
+    if root.swap-success && root.swap-result-from != "" : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #000000.with-alpha(0.82);
+
+        // Dismiss backdrop
+        TouchArea {
+            clicked => { root.dismiss-swap-success(); }
+        }
+
+        VerticalLayout {
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+
+                // Success card
+                Rectangle {
+                    width: root.width - 48px;
+                    height: 380px;
+                    border-radius: Theme.radius-lg;
+                    background: Theme.bg-primary;
+                    border-width: 2px;
+                    border-color: #10b981.with-alpha(0.5);
+                    drop-shadow-blur: 32px;
+                    drop-shadow-color: #10b981.with-alpha(0.2);
+
+                    // Block backdrop click
+                    TouchArea {}
+
+                    VerticalLayout {
+                        padding: Theme.spacing-xl;
+                        spacing: Theme.spacing-md;
+                        alignment: center;
+
+                        // Green check circle with glow
+                        HorizontalLayout {
+                            alignment: center;
+                            Rectangle {
+                                width: 88px;
+                                height: 88px;
+                                border-radius: 44px;
+                                background: @radial-gradient(circle, #10b981.with-alpha(0.25), #10b981.with-alpha(0.05));
+                                drop-shadow-blur: 24px;
+                                drop-shadow-color: #10b981.with-alpha(0.3);
+
+                                // Inner circle
+                                Rectangle {
+                                    x: 12px;
+                                    y: 12px;
+                                    width: 64px;
+                                    height: 64px;
+                                    border-radius: 32px;
+                                    background: @linear-gradient(135deg, #10b981, #059669);
+                                    drop-shadow-blur: 8px;
+                                    drop-shadow-color: #10b981.with-alpha(0.4);
+
+                                    Image {
+                                        source: @image-url("icons/circle-check-big.svg");
+                                        width: 36px;
+                                        height: 36px;
+                                        colorize: white;
+                                        x: 14px;
+                                        y: 14px;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Title
+                        Text {
+                            text: "Swap Successful!";
+                            color: #10b981;
+                            font-size: 22px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                        }
+
+                        // Sparkle accent
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            Image {
+                                source: @image-url("icons/sparkles.svg");
+                                width: 16px;
+                                height: 16px;
+                                colorize: #10b981.with-alpha(0.6);
+                            }
+                            Text {
+                                text: "Transaction confirmed";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-sm;
+                                vertical-alignment: center;
+                            }
+                            Image {
+                                source: @image-url("icons/sparkles.svg");
+                                width: 16px;
+                                height: 16px;
+                                colorize: #10b981.with-alpha(0.6);
+                            }
+                        }
+
+                        // Swap amounts card
+                        Rectangle {
+                            height: 64px;
+                            border-radius: Theme.radius-md;
+                            background: Theme.bg-card;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            HorizontalLayout {
+                                padding-left: Theme.spacing-md;
+                                padding-right: Theme.spacing-md;
+                                alignment: center;
+                                spacing: Theme.spacing-sm;
+
+                                // From amount
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: "Sent";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.swap-result-from;
+                                        color: Theme.accent-red;
+                                        font-size: Theme.font-md;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+
+                                // Arrow
+                                Icon {
+                                    source: @image-url("icons/arrow-right.svg");
+                                    icon-color: #10b981;
+                                    width: 22px;
+                                    height: 22px;
+                                }
+
+                                // To amount
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: "Received";
+                                        color: Theme.text-muted;
+                                        font-size: Theme.font-xs;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        text: root.swap-result-to;
+                                        color: #10b981;
+                                        font-size: Theme.font-md;
+                                        font-weight: 700;
+                                        horizontal-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+
+                        // TX hash
+                        if root.swap-result-tx != "" : Text {
+                            text: "TX: " + root.swap-result-tx;
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                        }
+
+                        // Done button
+                        Rectangle {
+                            height: 48px;
+                            border-radius: Theme.radius-md;
+                            background: done-touch.pressed ? @linear-gradient(90deg, #059669, #047857)
+                                : done-touch.has-hover ? @linear-gradient(90deg, #10b981, #059669)
+                                : @linear-gradient(90deg, #10b981, #059669);
+                            drop-shadow-blur: done-touch.pressed ? 2px : 12px;
+                            drop-shadow-offset-y: done-touch.pressed ? 0px : 3px;
+                            drop-shadow-color: #10b981.with-alpha(0.35);
+                            animate background, drop-shadow-blur, drop-shadow-offset-y { duration: 100ms; }
+
+                            done-touch := TouchArea {
+                                clicked => { root.dismiss-swap-success(); }
+                            }
+
+                            Text {
+                                text: "Done";
+                                color: white;
+                                font-size: Theme.font-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

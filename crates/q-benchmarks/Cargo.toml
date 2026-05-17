@@ -1,0 +1,54 @@
+[package]
+name = "q-benchmarks"
+version = "0.1.0"
+edition = "2021"
+description = "Comprehensive performance benchmarking suite for Q-NarwhalKnight"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+
+[dependencies]
+criterion = { version = "0.5", default-features = false }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-network = { path = "../q-network" }
+# q-sharding = { path = "../q-sharding" }    # Temporarily disabled due to compilation errors
+
+# Cryptography and serialization for real benchmarks
+ed25519-dalek = { workspace = true }
+bincode = { workspace = true }
+
+# Performance monitoring
+sysinfo = "0.29"
+
+# Platform-specific dependencies
+# procfs is Linux-only (reads /proc filesystem)
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs = "0.16"
+
+[[bench]]
+name = "consensus_performance"
+harness = false
+
+[[bench]]
+name = "tps_benchmark"
+harness = false
+
+[[bench]]
+name = "memory_benchmark"
+harness = false
+
+[[bench]]
+name = "network_benchmark"
+harness = false
+
+[[bench]]
+name = "sharding_benchmark" 
+harness = false

@@ -1,0 +1,66 @@
+[package]
+name = "q-arbitrum-cache"
+version = "0.1.0"
+edition = "2021"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+description = "⚡🔄 Arbitrum ZK-Rollup Cache - STARK proof verification and L2 state caching"
+license = "MIT"
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Tor integration
+tokio-socks = { workspace = true }
+
+# HTTP client with Tor support
+reqwest = { version = "0.11", features = ["json", "socks"] }
+
+# Cryptography for STARK proofs
+ring = { workspace = true }
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+base64 = "0.22"
+
+# Ethereum/Arbitrum integration
+ethers = { version = "2.0", features = ["ws", "rustls"] }
+
+# STARK proof system
+# Note: In production would use actual STARK libraries like winterfell
+winterfell = { git = "https://github.com/facebook/winterfell.git", optional = true }
+
+# Zero-knowledge proof verification
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-std = "0.4"
+
+# Database for caching
+sled = "0.34"
+
+# Compression
+flate2 = "1.0"
+lz4 = "1.24"
+
+# Q-NarwhalKnight internal
+q-types = { path = "../q-types" }
+q-tor-client = { path = "../q-tor-client" }
+q-network = { path = "../q-network" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+
+[features]
+default = ["stark-verification", "l2-caching", "proof-compression"]
+stark-verification = []
+l2-caching = []
+proof-compression = []
+winterfell-backend = ["winterfell"]

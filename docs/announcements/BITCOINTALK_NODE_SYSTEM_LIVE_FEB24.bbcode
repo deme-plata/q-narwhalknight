@@ -1,0 +1,340 @@
+[center]
+[size=28pt][color=#6B46C1][b]Q-NarwhalKnight[/b][/color][/size]
+[size=14pt][color=#805AD5]The Quantum-Ready Blockchain[/color][/size]
+
+[img]https://quillon.xyz/logo-256.png[/img]
+
+[size=12pt][b]Post-Quantum Native | Zero-Knowledge Privacy | Decentralized AI | DAG-Knight Consensus[/b][/size]
+
+[url=https://quillon.xyz][b]Website[/b][/url] | [url=https://quillon.xyz/whitepaper][b]Whitepaper[/b][/url] | [url=https://code.quillon.xyz][b]Source Code[/b][/url] | [url=https://discord.gg/quillon][b]Discord[/b][/url]
+[/center]
+
+[hr]
+
+[center]
+[size=22pt][color=#10B981][b]NODE SYSTEM IS LIVE - MAINNET GENESIS[/b][/color][/size]
+[size=14pt][i]February 24, 2026 - 2,000,000+ blocks. 48 connections. Real mining. Real rewards.[/i][/size]
+[/center]
+
+[hr]
+
+[size=18pt][color=#6B46C1][b]The Node Network Is Running[/b][/color][/size]
+[hr]
+
+The Q-NarwhalKnight node system is live and producing blocks on mainnet. This is not a testnet. This is not a simulation. Real blocks, real transactions, real mining rewards, real P2P connections between real nodes across multiple continents.
+
+[b]Network Stats (live, February 24, 2026):[/b]
+
+[table]
+[tr]
+[td][b]Metric[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Block Height[/td]
+[td][color=#10B981][b]2,000,000+[/b][/color][/td]
+[/tr]
+[tr]
+[td]Active P2P Connections[/td]
+[td][color=#10B981][b]48[/b][/color][/td]
+[/tr]
+[tr]
+[td]Bootstrap Nodes[/td]
+[td][color=#10B981][b]4 (Beta, Gamma, Delta, Alpha)[/b][/color][/td]
+[/tr]
+[tr]
+[td]Network ID[/td]
+[td]mainnet-genesis[/td]
+[/tr]
+[tr]
+[td]Consensus[/td]
+[td]DAG-Knight + Narwhal Mempool[/td]
+[/tr]
+[tr]
+[td]Node Version[/td]
+[td]v8.2.5[/td]
+[/tr]
+[tr]
+[td]Gossipsub Topics[/td]
+[td]6 (blocks, peer-heights, turbo-sync, telemetry)[/td]
+[/tr]
+[tr]
+[td]P2P Encryption[/td]
+[td]Noise Protocol (PQ-Hybrid ready)[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]What "Node System Live" Actually Means[/b][/color][/size]
+[hr]
+
+Every blockchain project claims things work. Here is what we mean when we say the node system is live:
+
+[b]1. Download a binary. Run it. It syncs.[/b]
+No Docker required. No build-from-source. No dependency hell. One binary, one command:
+
+[code]wget https://quillon.xyz/downloads/q-api-server-v8.2.5
+chmod +x q-api-server-v8.2.5
+./q-api-server-v8.2.5 --port 8080[/code]
+
+Your node connects to the bootstrap peers, discovers the network via Kademlia DHT, syncs the chain via Turbo Sync (batched block-pack protocol), and begins participating in gossipsub consensus messaging. No configuration files. No manual peer lists. It just works.
+
+[b]2. Mining produces real rewards.[/b]
+VDF-based mining with SHA-3 proof of work. Download the miner, point it at your node or the pool at quillon.xyz, and earn QUG:
+
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --pool https://quillon.xyz --wallet YOUR_WALLET --threads 4[/code]
+
+Mining rewards propagate via P2P gossipsub to all nodes. No centralized reward distribution. The adaptive emission controller targets 2,625,000 QUG/year with 21M hard cap.
+
+[b]3. P2P actually works.[/b]
+Gossipsub pub/sub for block propagation. Kademlia DHT for peer discovery. Turbo Sync for catching up. Block-pack protocol for batch serving. Connection warmup for first-boot reliability. All encrypted with Noise protocol.
+
+[b]4. HA deployment with zero downtime.[/b]
+The 4-server infrastructure (Alpha, Beta, Gamma, Delta) runs rolling upgrades. Nginx load-balances across synced servers. Users never see downtime during deployments.
+
+
+[size=18pt][color=#6B46C1][b]Infrastructure Architecture[/b][/color][/size]
+[hr]
+
+[code]
+          +------------------+
+          |  Server Alpha    |  (Canary / Docker)
+          |  161.35.219.10   |  First to receive new binary
+          +--------+---------+
+                   |
+     +-------------+-------------+
+     |                           |
+     v                           v
++----+------------+   +----------+--------+
+|  Server Beta    |   |  Server Gamma     |
+| 185.182.185.227 |   | 109.205.176.60    |
+|  Primary w=10   |   |  Backup w=1       |
+|  Port 8080      |   |  Port 8080        |
++----+------------+   +----------+--------+
+     |                           |
+     |    Gossipsub P2P Mesh     |
+     +------+--------------------+
+            |
+     +------+--------+
+     | Server Delta   |
+     | 5.79.79.158    |
+     | Bootstrap #3   |
+     +----------------+
+[/code]
+
+[b]All 4 servers run the same binary.[/b] No special bootstrap logic. Any node can bootstrap any other node. The network has no single point of failure.
+
+
+[size=18pt][color=#6B46C1][b]Turbo Sync: How New Nodes Catch Up[/b][/color][/size]
+[hr]
+
+When a new node joins, it doesn't download blocks one by one. Turbo Sync uses a batched block-pack protocol:
+
+[list]
+[li]Peer height announcements via gossipsub (every node broadcasts its height)[/li]
+[li]Block-pack requests: "give me blocks 100,000 to 100,500" in a single request[/li]
+[li]Adaptive chunk sizing with Kalman filter timeout estimation[/li]
+[li]Parallel block validation during sync[/li]
+[li]Safe-floor persistence: restarts resume from where they left off, not genesis[/li]
+[/list]
+
+A fresh node syncs 2,000,000 blocks in hours, not days.
+
+
+[size=18pt][color=#6B46C1][b]What's Under the Hood[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Component[/b][/td]
+[td][b]Technology[/b][/td]
+[/tr]
+[tr]
+[td]Language[/td]
+[td]Rust (500,000+ LOC across 83 crates)[/td]
+[/tr]
+[tr]
+[td]Consensus[/td]
+[td]DAG-Knight with Narwhal mempool + Bullshark finality[/td]
+[/tr]
+[tr]
+[td]Networking[/td]
+[td]libp2p (rust-libp2p 0.56) with gossipsub, Kademlia, Noise[/td]
+[/tr]
+[tr]
+[td]Storage[/td]
+[td]RocksDB with AES-256-GCM encryption at rest[/td]
+[/tr]
+[tr]
+[td]Mining[/td]
+[td]SHA-3 + VDF (ASIC-resistant, consumer hardware friendly)[/td]
+[/tr]
+[tr]
+[td]Signatures[/td]
+[td]Ed25519 (current) + Dilithium5 (PQ upgrade path)[/td]
+[/tr]
+[tr]
+[td]Key Exchange[/td]
+[td]X25519 (current) + Kyber1024 (PQ upgrade path)[/td]
+[/tr]
+[tr]
+[td]Privacy[/td]
+[td]CLSAG rings, stealth addresses, Bulletproofs++, Dandelion++[/td]
+[/tr]
+[tr]
+[td]Smart Contracts[/td]
+[td]WASM VM with gas metering[/td]
+[/tr]
+[tr]
+[td]AI[/td]
+[td]Mistral-7B / BitNet b1.58 running natively on validators[/td]
+[/tr]
+[tr]
+[td]Test Suite[/td]
+[td]4,000+ automated tests (mandatory before every deploy)[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]DeFi Stack (All Live at Genesis)[/b][/color][/size]
+[hr]
+
+[list]
+[li][b]Quantum DEX[/b] - Constant-product AMM, custom token pairs, real-time price oracle[/li]
+[li][b]QUGUSD Stablecoin[/b] - Collateral-backed, CDP minting, automated liquidation[/li]
+[li][b]Quillon Bank[/b] - Decentralized lending with AI credit scoring[/li]
+[li][b]Custom Token Deployment[/b] - Deploy ERC-20 style tokens with a click[/li]
+[li][b]Governance DAO[/b] - Mining-weighted voting, proposal system[/li]
+[li][b]Index Funds[/b] - QNK10, DEFI5 basket tokens[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Economics[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Parameter[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Max Supply[/td]
+[td]21,000,000 QUG (hard cap, Bitcoin-style)[/td]
+[/tr]
+[tr]
+[td]Era 0 Emission[/td]
+[td]2,625,000 QUG/year (adaptive controller)[/td]
+[/tr]
+[tr]
+[td]Halving[/td]
+[td]Every 4 years[/td]
+[/tr]
+[tr]
+[td]Premine[/td]
+[td]None[/td]
+[/tr]
+[tr]
+[td]ICO/VC[/td]
+[td]None[/td]
+[/tr]
+[tr]
+[td]Dev Fee[/td]
+[td]0.5% of mining rewards only[/td]
+[/tr]
+[tr]
+[td]Block Reward[/td]
+[td]~0.083 QUG/block (adaptive to maintain annual target)[/td]
+[/tr]
+[/table]
+
+[b]Fair launch.[/b] The founder mines alongside everyone else. No allocation tricks.
+
+
+[size=18pt][color=#6B46C1][b]Get Started[/b][/color][/size]
+[hr]
+
+[b]Run a Node (Linux x86_64):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-v8.2.5
+chmod +x q-api-server-v8.2.5
+./q-api-server-v8.2.5 --port 8080[/code]
+
+[b]Mine QUG:[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --pool https://quillon.xyz --wallet YOUR_WALLET --threads 4[/code]
+
+[b]Web Wallet:[/b] [url=https://quillon.xyz]quillon.xyz[/url] - Full wallet with DEX, token deployment, AI chat, mining dashboard, and network explorer.
+
+[b]Minimum Requirements:[/b]
+[list]
+[li]Linux x86_64 (Ubuntu 22.04+ recommended)[/li]
+[li]4 GB RAM (8 GB recommended)[/li]
+[li]20 GB disk space[/li]
+[li]Stable internet connection[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]What's Next[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Milestone[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]Mainnet genesis launch[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]4-server HA infrastructure[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]Mining pool (stratum)[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]DEX + Token deployment[/td]
+[td][color=#10B981][b]LIVE[/b][/color][/td]
+[/tr]
+[tr]
+[td]Browser P2P (js-libp2p)[/td]
+[td][color=#F59E0B][b]IN PROGRESS[/b][/color][/td]
+[/tr]
+[tr]
+[td]Windows binary[/td]
+[td][color=#F59E0B][b]IN PROGRESS[/b][/color][/td]
+[/tr]
+[tr]
+[td]Mobile wallet[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]Cross-chain bridges (BTC, ETH)[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]Enterprise SDK[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]First halving (Feb 2030)[/td]
+[td]Scheduled[/td]
+[/tr]
+[/table]
+
+
+[hr]
+
+[center]
+[size=14pt][color=#6B46C1][i]"The only way to discover the limits of the possible is to go beyond them into the impossible." - Arthur C. Clarke[/i][/color][/size]
+
+[size=16pt][b][color=#10B981]Two million blocks. Forty-eight connections. The node system is live.[/color][/b][/size]
+[/center]
+
+[hr]
+
+[size=10pt][color=#94A3B8][i]Disclaimer: This post is for informational purposes only and does not constitute financial advice. Cryptocurrency investments carry significant risk. Past performance is not indicative of future results. Conduct your own research before participating.[/i][/color][/size]

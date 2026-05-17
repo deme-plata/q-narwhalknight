@@ -1,0 +1,9 @@
+{
+    "test": "tor_connectivity",
+    "timestamp": "2025-09-05T16:57:09+02:00",
+    "success_rate": 100.0,
+    "average_latency_ms": 1285,
+    "attempts": 3,
+    "successes": 3,
+    "claim_validated": true
+}

@@ -1,0 +1,25 @@
+[node]
+node_id = "validator-node-2"
+data_dir = "/mnt/orobit-shared/q-narwhalknight/test-network/data/node2"
+log_level = "info"
+
+[network]
+listen_address = "127.0.0.1:8002"
+rpc_address = "127.0.0.1:9002"
+bootstrap_nodes = []
+max_peers = 32
+
+[consensus]
+validator_enabled = true
+validator_key = "test_validator_key_2"
+mining_enabled = true
+mining_intensity = 5
+
+[wallet]
+address = "qnk1_node2_validator_address_lhcnpbvuqw5qjwz7pj96"
+
+[mining]
+pool_enabled = false
+cpu_mining = true
+gpu_mining = false
+threads = 2

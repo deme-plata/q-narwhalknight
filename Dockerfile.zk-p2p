@@ -1,0 +1,79 @@
+# Q-NarwhalKnight ZK-Enhanced P2P Node
+# Built with latest ZK P2P connection framework
+
+FROM ubuntu:22.04
+
+# Install system dependencies including Tor for anonymous connections
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    tor \
+    supervisor \
+    dnsutils \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create application directory
+WORKDIR /app
+
+# Copy the latest compiled binary with ZK P2P features
+COPY target/release/q-api-server /app/q-api-server
+RUN chmod +x /app/q-api-server
+
+# Create required directories
+RUN mkdir -p /app/configs /app/data/tor /app/data/node /app/logs
+
+# Configure Tor for anonymous connections and onion services
+RUN echo "# Q-NarwhalKnight ZK P2P Tor Configuration" > /etc/tor/torrc && \
+    echo "SocksPort 9050" >> /etc/tor/torrc && \
+    echo "ControlPort 9051" >> /etc/tor/torrc && \
+    echo "HashedControlPassword 16:872860B76453A77D60CA2BB8C1A7042072093276A3D701AD684053EC4C" >> /etc/tor/torrc && \
+    echo "HiddenServiceDir /app/data/tor/hidden_service/" >> /etc/tor/torrc && \
+    echo "HiddenServicePort 8080 127.0.0.1:8080" >> /etc/tor/torrc && \
+    echo "HiddenServicePort 9001 127.0.0.1:9001" >> /etc/tor/torrc && \
+    echo "ClientUseIPv6 1" >> /etc/tor/torrc && \
+    echo "CircuitBuildTimeout 10" >> /etc/tor/torrc && \
+    echo "LearnCircuitBuildTimeout 0" >> /etc/tor/torrc && \
+    echo "MaxCircuitDirtiness 300" >> /etc/tor/torrc && \
+    echo "NumEntryGuards 8" >> /etc/tor/torrc
+
+# Configure supervisor to manage Tor and Q-NarwhalKnight
+RUN echo "[supervisord]" > /etc/supervisor/supervisord.conf && \
+    echo "nodaemon=true" >> /etc/supervisor/supervisord.conf && \
+    echo "user=root" >> /etc/supervisor/supervisord.conf && \
+    echo "logfile=/app/logs/supervisord.log" >> /etc/supervisor/supervisord.conf && \
+    echo "pidfile=/app/logs/supervisord.pid" >> /etc/supervisor/supervisord.conf && \
+    echo "" >> /etc/supervisor/supervisord.conf && \
+    echo "[program:tor]" >> /etc/supervisor/supervisord.conf && \
+    echo "command=/usr/bin/tor" >> /etc/supervisor/supervisord.conf && \
+    echo "autorestart=true" >> /etc/supervisor/supervisord.conf && \
+    echo "startretries=3" >> /etc/supervisor/supervisord.conf && \
+    echo "stdout_logfile=/app/logs/tor.log" >> /etc/supervisor/supervisord.conf && \
+    echo "stderr_logfile=/app/logs/tor_error.log" >> /etc/supervisor/supervisord.conf && \
+    echo "priority=100" >> /etc/supervisor/supervisord.conf && \
+    echo "" >> /etc/supervisor/supervisord.conf && \
+    echo "[program:qnk-node]" >> /etc/supervisor/supervisord.conf && \
+    echo "command=/app/q-api-server" >> /etc/supervisor/supervisord.conf && \
+    echo "autorestart=true" >> /etc/supervisor/supervisord.conf && \
+    echo "startretries=3" >> /etc/supervisor/supervisord.conf && \
+    echo "stdout_logfile=/app/logs/qnk.log" >> /etc/supervisor/supervisord.conf && \
+    echo "stderr_logfile=/app/logs/qnk_error.log" >> /etc/supervisor/supervisord.conf && \
+    echo "priority=200" >> /etc/supervisor/supervisord.conf && \
+    echo "depends_on=tor" >> /etc/supervisor/supervisord.conf
+
+# Expose ports for API, P2P, Metrics, and Tor
+EXPOSE 8080 9001 9050 9051 9091
+
+# Environment variables for ZK-enhanced P2P
+ENV RUST_LOG=info,q_api_server=debug,q_network=debug,q_zk_p2p=debug
+ENV Q_NODE_DATA_DIR=/app/data/node
+ENV TOR_DATA_DIR=/app/data/tor
+ENV ENABLE_ZK_P2P=true
+
+# Health check for both services
+HEALTHCHECK --interval=30s --timeout=15s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/health && \
+        (curl -s --socks5 localhost:9050 http://httpbin.org/ip >/dev/null || exit 1)
+
+# Start supervisor to manage all services
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]

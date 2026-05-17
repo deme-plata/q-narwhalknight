@@ -1,0 +1,3175 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+\PassOptionsToPackage{dvipsnames,svgnames,x11names}{xcolor}
+%
+\documentclass[
+  11pt,
+]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{lmodern}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math}
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{xcolor}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\IfFileExists{bookmark.sty}{\usepackage{bookmark}}{\usepackage{hyperref}}
+\hypersetup{
+  colorlinks=true,
+  linkcolor={blue},
+  filecolor={Maroon},
+  citecolor={blue},
+  urlcolor={blue},
+  pdfcreator={LaTeX via pandoc}}
+\urlstyle{same} % disable monospaced font for URLs
+\usepackage[margin=1in]{geometry}
+\usepackage{color}
+\usepackage{fancyvrb}
+\newcommand{\VerbBar}{|}
+\newcommand{\VERB}{\Verb[commandchars=\\\{\}]}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\}}
+% Add ',fontsize=\small' for more characters per line
+\usepackage{framed}
+\definecolor{shadecolor}{RGB}{248,248,248}
+\newenvironment{Shaded}{\begin{snugshade}}{\end{snugshade}}
+\newcommand{\AlertTok}[1]{\textcolor[rgb]{0.94,0.16,0.16}{#1}}
+\newcommand{\AnnotationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\AttributeTok}[1]{\textcolor[rgb]{0.77,0.63,0.00}{#1}}
+\newcommand{\BaseNTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\BuiltInTok}[1]{#1}
+\newcommand{\CharTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\CommentTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\CommentVarTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ConstantTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\ControlFlowTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\DataTypeTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{#1}}
+\newcommand{\DecValTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\DocumentationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ErrorTok}[1]{\textcolor[rgb]{0.64,0.00,0.00}{\textbf{#1}}}
+\newcommand{\ExtensionTok}[1]{#1}
+\newcommand{\FloatTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\FunctionTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\ImportTok}[1]{#1}
+\newcommand{\InformationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\KeywordTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\NormalTok}[1]{#1}
+\newcommand{\OperatorTok}[1]{\textcolor[rgb]{0.81,0.36,0.00}{\textbf{#1}}}
+\newcommand{\OtherTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{#1}}
+\newcommand{\PreprocessorTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\RegionMarkerTok}[1]{#1}
+\newcommand{\SpecialCharTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\SpecialStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\StringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\VariableTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\WarningTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\usepackage{longtable,booktabs,array}
+\usepackage{calc} % for calculating minipage widths
+% Correct order of tables after \paragraph or \subparagraph
+\usepackage{etoolbox}
+\makeatletter
+\patchcmd\longtable{\par}{\if@noskipsec\mbox{}\fi\par}{}{}
+\makeatother
+% Allow footnotes in longtable head/foot
+\IfFileExists{footnotehyper.sty}{\usepackage{footnotehyper}}{\usepackage{footnote}}
+\makesavenoteenv{longtable}
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{5}
+\ifLuaTeX
+  \usepackage{selnolig}  % disable illegal ligatures
+\fi
+
+\author{}
+\date{}
+
+\begin{document}
+
+{
+\hypersetup{linkcolor=}
+\setcounter{tocdepth}{3}
+\tableofcontents
+}
+\hypertarget{q-narwhalknight-privacy-as-a-service-paas}{%
+\section{Q-NarwhalKnight Privacy-as-a-Service
+(PaaS)}\label{q-narwhalknight-privacy-as-a-service-paas}}
+
+\hypertarget{enterprise-grade-quantum-resistant-privacy-infrastructure-for-blockchain-networks}{%
+\subsection{Enterprise-Grade Quantum-Resistant Privacy Infrastructure
+for Blockchain
+Networks}\label{enterprise-grade-quantum-resistant-privacy-infrastructure-for-blockchain-networks}}
+
+\textbf{Version:} 1.1 \textbf{Date:} October 2025 \textbf{Authors:}
+Q-NarwhalKnight Core Team \textbf{Classification:} Public Technical
+Whitepaper
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{executive-summary}{%
+\subsection{Executive Summary}\label{executive-summary}}
+
+Q-NarwhalKnight Privacy-as-a-Service (PaaS) is an
+\textbf{enterprise-grade privacy infrastructure} that provides
+blockchain-agnostic anonymity, confidentiality, and quantum-resistant
+security services to external cryptocurrency networks, decentralized
+applications, and Web3 platforms.
+
+\textbf{Core Value Proposition:} Unlike privacy solutions limited to
+single blockchains (e.g., Tornado Cash for Ethereum, Zcash shielded
+pools), Q-NarwhalKnight PaaS offers a \textbf{universal privacy layer}
+that works with Bitcoin, Ethereum, Solana, and any blockchain system
+through standardized API endpoints.
+
+\textbf{Key Differentiators:} - ✅ \textbf{Quantum-Resistant} -
+Post-quantum cryptography (Dilithium5, Kyber1024) - ✅
+\textbf{Cross-Chain} - Works with any blockchain via RESTful API - ✅
+\textbf{Triple-Layer Security} - Network (Tor) + Transport (Noise
+Protocol) + Application (Mixing) - ✅ \textbf{Compliance-Ready} -
+Selective disclosure capabilities - ✅ \textbf{Enterprise SLA} - 99.9\%
+uptime guarantee, dedicated infrastructure
+
+\textbf{Target Market:} - Cryptocurrency wallets requiring privacy
+features - DeFi protocols needing MEV protection - Enterprise blockchain
+deployments with confidentiality requirements - Cross-chain bridges
+requiring transaction privacy - Compliance-focused institutions needing
+auditable privacy
+
+\textbf{Revenue Model:} Pay-per-use (priced in QNK tokens) + Enterprise
+subscription tiers (\$499-\$9,999/month)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{table-of-contents}{%
+\subsection{Table of Contents}\label{table-of-contents}}
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \protect\hyperlink{1-introduction}{Introduction}
+\item
+  \protect\hyperlink{2-technical-architecture}{Technical Architecture}
+\item
+  \protect\hyperlink{3-privacy-infrastructure-components}{Privacy
+  Infrastructure Components}
+\item
+  \protect\hyperlink{4-enterprise-service-tiers}{Enterprise Service
+  Tiers}
+\item
+  \protect\hyperlink{5-api-specification}{API Specification}
+\item
+  \protect\hyperlink{6-security--compliance}{Security \& Compliance}
+\item
+  \protect\hyperlink{7-performance-benchmarks}{Performance Benchmarks}
+\item
+  \protect\hyperlink{8-use-cases}{Use Cases}
+\item
+  \protect\hyperlink{9-competitive-analysis}{Competitive Analysis}
+\item
+  \protect\hyperlink{10-roadmap}{Roadmap}
+\end{enumerate}
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{introduction}{%
+\subsection{1. Introduction}\label{introduction}}
+
+\hypertarget{the-privacy-crisis-in-public-blockchains}{%
+\subsubsection{1.1 The Privacy Crisis in Public
+Blockchains}\label{the-privacy-crisis-in-public-blockchains}}
+
+Public blockchains like Bitcoin and Ethereum provide transparency
+through immutable ledgers, but this transparency creates severe privacy
+vulnerabilities:
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{Transaction Graph Analysis}: Companies like Chainalysis can
+  trace fund flows across wallets
+\item
+  \textbf{IP Address Leakage}: Broadcasting transactions reveals user
+  location
+\item
+  \textbf{MEV Exploitation}: Frontrunning bots extract \$500M+ annually
+  from Ethereum users
+\item
+  \textbf{Regulatory Overreach}: Financial surveillance threatens user
+  rights
+\end{itemize}
+
+\textbf{Existing solutions are inadequate:} - \textbf{Tornado Cash}:
+Sanctioned by OFAC, Ethereum-only, ECDSA signatures vulnerable to
+quantum attacks - \textbf{Zcash}: Single-chain, requires running
+dedicated wallets, slow adoption - \textbf{Monero}: Not interoperable
+with other chains, regulatory scrutiny - \textbf{CoinJoin}: Weak
+anonymity sets, centralized coordinators
+
+\hypertarget{q-narwhalknight-paas-solution}{%
+\subsubsection{1.2 Q-NarwhalKnight PaaS
+Solution}\label{q-narwhalknight-paas-solution}}
+
+Q-NarwhalKnight solves these limitations by providing:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Universal Privacy API} - RESTful endpoints accepting
+  transactions from ANY blockchain
+\item
+  \textbf{Quantum-Resistant Cryptography} - Future-proof against quantum
+  computer attacks
+\item
+  \textbf{Compliance Mode} - Selective disclosure for regulatory
+  requirements
+\item
+  \textbf{Enterprise Infrastructure} - SLA guarantees, dedicated
+  support, white-label options
+\end{enumerate}
+
+\textbf{Core Innovation}: Treat privacy as a \textbf{service layer} that
+sits above blockchains, not as a feature built into individual chains.
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{technical-architecture}{%
+\subsection{2. Technical Architecture}\label{technical-architecture}}
+
+\hypertarget{system-overview}{%
+\subsubsection{2.1 System Overview}\label{system-overview}}
+
+\begin{verbatim}
+┌─────────────────────────────────────────────────────────────────┐
+│                  Q-NarwhalKnight PaaS Platform                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 4: API Gateway (RESTful, authenticated, rate-limited)    │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 3: Privacy Services                                      │
+│    • Transaction Mixing         • Tor Relay                     │
+│    • Ring Signatures            • Stealth Addresses             │
+│    • ZK-STARK Proofs           • Cross-Chain Atomic Swaps       │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 2: Encrypted P2P Network (Kademlia DHT + mDNS)           │
+│    • Noise Protocol Encryption  • Gossipsub Message Propagation │
+│    • DHT Peer Discovery        • Signed Message Authentication  │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 1: Tor Network Integration                               │
+│    • 4 Dedicated Circuits/Node  • Dandelion++ Anonymity         │
+│    • Quantum Entropy Seeding    • Circuit Rotation              │
+└─────────────────────────────────────────────────────────────────┘
+           ▲                       ▲                       ▲
+           │                       │                       │
+      Bitcoin Network      Ethereum Network       Solana Network
+\end{verbatim}
+
+\hypertarget{network-layer---encrypted-p2p-infrastructure}{%
+\subsubsection{2.2 Network Layer - Encrypted P2P
+Infrastructure}\label{network-layer---encrypted-p2p-infrastructure}}
+
+\hypertarget{kademlia-dht-for-global-peer-discovery}{%
+\paragraph{2.2.1 Kademlia DHT for Global Peer
+Discovery}\label{kademlia-dht-for-global-peer-discovery}}
+
+\textbf{Purpose}: Decentralized peer discovery without central servers
+
+\textbf{Encryption \& Security}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Transport stack: TCP + Noise Protocol + Yamux multiplexing}
+\KeywordTok{let}\NormalTok{ transport }\OperatorTok{=} \PreprocessorTok{tcp::tokio::Transport::}\NormalTok{new(}\PreprocessorTok{tcp::Config::}\KeywordTok{default}\NormalTok{())}
+    \OperatorTok{.}\NormalTok{upgrade(}\PreprocessorTok{upgrade::Version::}\NormalTok{V1)}
+    \OperatorTok{.}\NormalTok{authenticate(}\PreprocessorTok{noise::Config::}\NormalTok{new(}\OperatorTok{\&}\NormalTok{keypair)}\OperatorTok{?}\NormalTok{)  }\CommentTok{// Noise Protocol encryption}
+    \OperatorTok{.}\NormalTok{multiplex(}\PreprocessorTok{yamux::Config::}\KeywordTok{default}\NormalTok{())}
+    \OperatorTok{.}\NormalTok{boxed()}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Noise Protocol Framework}: - \textbf{Authentication}: XX
+handshake pattern (mutual authentication) - \textbf{Encryption}:
+ChaCha20-Poly1305 (256-bit keys) - \textbf{Forward Secrecy}: New
+ephemeral keys per session - \textbf{Post-Quantum Ready}: Can upgrade to
+Noise-KK with Kyber1024
+
+\textbf{DHT Security Properties}: - Peer IDs derived from Ed25519 public
+keys (cryptographically verifiable) - DHT queries encrypted end-to-end
+via Noise Protocol - Sybil attack resistance through proof-of-work peer
+IDs (optional) - Eclipse attack mitigation via diverse bootstrap peers
+
+\textbf{Performance}: - Average peer discovery time: \textbf{\textless{}
+500ms} - DHT routing table convergence: \textbf{\textless{} 5 seconds} -
+Global network scale: \textbf{100,000+ nodes} supported
+
+\hypertarget{mdns-for-local-network-discovery}{%
+\paragraph{2.2.2 mDNS for Local Network
+Discovery}\label{mdns-for-local-network-discovery}}
+
+\textbf{Purpose}: Zero-configuration peer discovery on LANs
+
+\textbf{Security Considerations}: - mDNS is unencrypted (by design for
+local discovery) - \textbf{Mitigation}: All application data transmitted
+over Noise-encrypted connections - mDNS only broadcasts peer
+availability, not transaction data - Local network assumption: LAN is
+semi-trusted (home/office networks)
+
+\textbf{Privacy Enhancement}: - Tor integration available for users
+requiring local network privacy - Option to disable mDNS and use
+DHT-only mode
+
+\hypertarget{gossipsub-for-message-propagation}{%
+\paragraph{2.2.3 Gossipsub for Message
+Propagation}\label{gossipsub-for-message-propagation}}
+
+\textbf{Purpose}: Efficient consensus message broadcast
+
+\textbf{Authentication \& Integrity}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Gossipsub with cryptographic message signing}
+\KeywordTok{let}\NormalTok{ gossipsub }\OperatorTok{=} \PreprocessorTok{gossipsub::Behaviour::}\NormalTok{new(}
+    \PreprocessorTok{MessageAuthenticity::}\NormalTok{Signed(keypair}\OperatorTok{.}\NormalTok{clone())}\OperatorTok{,}  \CommentTok{// Ed25519 signatures}
+\NormalTok{    gossipsub\_config}
+\NormalTok{)}\OperatorTok{?;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Security Properties}: - \textbf{Message Authentication}: Every
+message signed with sender's Ed25519 key - \textbf{Replay Attack
+Prevention}: Message IDs based on content hash - \textbf{Byzantine Fault
+Tolerance}: Validates messages before propagation - \textbf{Spam
+Protection}: Rate limiting + peer scoring
+
+\textbf{Encryption}: - Messages transmitted over Noise-encrypted
+connections (transport layer) - Optional application-layer encryption
+for sensitive data
+
+\hypertarget{cryptographic-agility---future-proof-security}{%
+\subsubsection{2.3 Cryptographic Agility - Future-Proof
+Security}\label{cryptographic-agility---future-proof-security}}
+
+\textbf{Phase-Based Cryptographic Migration}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1346}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.2115}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.0962}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.4038}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1538}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Phase
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Signatures
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+KEM
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Transport Encryption
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Status
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Phase 0} & Ed25519 & X25519 & Noise (ChaCha20) & ✅
+Production \\
+\textbf{Phase 1} & Dilithium5 & Kyber1024 & Noise-KK (Hybrid) & ✅
+Available \\
+\textbf{Phase 2} & Falcon1024 & NTRUPrime & PQ-TLS 1.3 & 🔄 In
+Development \\
+\textbf{Phase 3} & SQIsign & FrodoKEM & Quantum Key Distribution & 📋
+Planned \\
+\bottomrule
+\end{longtable}
+
+\textbf{Crypto-Agile Handshake}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"supported\_schemes"}\FunctionTok{:} \OtherTok{[}
+    \FunctionTok{\{}
+      \DataTypeTok{"signature"}\FunctionTok{:} \StringTok{"Dilithium5"}\FunctionTok{,}
+      \DataTypeTok{"kem"}\FunctionTok{:} \StringTok{"Kyber1024"}\FunctionTok{,}
+      \DataTypeTok{"hash"}\FunctionTok{:} \StringTok{"SHA3{-}256"}\FunctionTok{,}
+      \DataTypeTok{"version"}\FunctionTok{:} \DecValTok{2}
+    \FunctionTok{\}}\OtherTok{,}
+    \FunctionTok{\{}
+      \DataTypeTok{"signature"}\FunctionTok{:} \StringTok{"Ed25519"}\FunctionTok{,}
+      \DataTypeTok{"kem"}\FunctionTok{:} \StringTok{"X25519"}\FunctionTok{,}
+      \DataTypeTok{"hash"}\FunctionTok{:} \StringTok{"SHA3{-}256"}\FunctionTok{,}
+      \DataTypeTok{"version"}\FunctionTok{:} \DecValTok{1}
+    \FunctionTok{\}}
+  \OtherTok{]}\FunctionTok{,}
+  \DataTypeTok{"preferred\_scheme"}\FunctionTok{:} \FunctionTok{\{} \DataTypeTok{"signature"}\FunctionTok{:} \StringTok{"Dilithium5"}\FunctionTok{,} \ErrorTok{...} \FunctionTok{\},}
+  \DataTypeTok{"phase"}\FunctionTok{:} \StringTok{"Phase1"}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Seamless Migration}: Nodes negotiate best common cryptographic
+scheme without hard forks
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{privacy-infrastructure-components}{%
+\subsection{3. Privacy Infrastructure
+Components}\label{privacy-infrastructure-components}}
+
+\hypertarget{tor-integration---network-level-anonymity}{%
+\subsubsection{3.1 Tor Integration - Network-Level
+Anonymity}\label{tor-integration---network-level-anonymity}}
+
+\hypertarget{architecture}{%
+\paragraph{Architecture}\label{architecture}}
+
+\begin{verbatim}
+┌──────────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  User (Bitcoin)  │────►│ Tor Guard    │────►│  Tor Middle  │────►│  Tor Exit    │
+│  Transaction     │     │  Relay       │     │  Relay       │     │  Relay       │
+└──────────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+                                                                             │
+                                                                             ▼
+                                                                    ┌──────────────────┐
+                                                                    │ Q-NarwhalKnight  │
+                                                                    │  Mixing Service  │
+                                                                    └──────────────────┘
+\end{verbatim}
+
+\hypertarget{features}{%
+\paragraph{Features}\label{features}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{4 Dedicated Circuits per Validator}: Guard, consensus, gossip,
+  relay
+\item
+  \textbf{Circuit Rotation}: Every epoch (\textasciitilde10 minutes) for
+  timing attack resistance
+\item
+  \textbf{Quantum Entropy Seeding}: QRNG for circuit path selection
+\item
+  \textbf{Controlled Egress Relays}: Enterprise tier customers can
+  deploy egress infrastructure outside Tor network for last-hop
+  connectivity
+\end{itemize}
+
+\hypertarget{security-properties}{%
+\paragraph{Security Properties}\label{security-properties}}
+
+\begin{itemize}
+\tightlist
+\item
+  \textbf{IP Address Concealment}: Origin IP never revealed to mixing
+  service
+\item
+  \textbf{Traffic Analysis Resistance}: Constant-rate cover traffic
+\item
+  \textbf{End-to-End Encryption}: TLS 1.3 + Noise Protocol to PaaS API
+  (Tor-independent encryption)
+\end{itemize}
+
+\hypertarget{egress-architecture}{%
+\paragraph{Egress Architecture}\label{egress-architecture}}
+
+\textbf{Standard Mode} (All tiers):
+
+\begin{verbatim}
+User → Tor (3 hops) → Tor Exit → Internet → Q-NarwhalKnight API
+\end{verbatim}
+
+\textbf{Enterprise Controlled Egress Mode}:
+
+\begin{verbatim}
+User → Tor (3 hops inside Tor network) → Controlled Egress Relay (customer-hosted) → Q-NarwhalKnight API
+\end{verbatim}
+
+\textbf{Controlled Egress Benefits}: - Avoid Tor exit node blacklisting
+by destination services - Customer-controlled infrastructure (own IP
+addresses, certificates) - BYO-region: Deploy egress relays in
+customer's VPC or datacenter - Tor provides anonymity for inbound
+traffic, controlled egress provides reliable connectivity
+
+\textbf{Fallback Mechanisms}: - Snowflake bridge support (censorship
+resistance) - Domain-fronted relays (CDN-based obfuscation) - Direct
+connection mode (for low-risk use cases)
+
+\hypertarget{api-integration}{%
+\paragraph{API Integration}\label{api-integration}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/tor/relay}
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "destination": "eth{-}rpc.example.com:8545",}
+\NormalTok{  "data": "base64\_encoded\_transaction",}
+\NormalTok{  "circuit\_requirements": \{}
+\NormalTok{    "min\_hops": 3,}
+\NormalTok{    "quantum\_seeded": true}
+\NormalTok{  \}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{quantum-mixing---transaction-level-privacy}{%
+\subsubsection{3.2 Quantum Mixing - Transaction-Level
+Privacy}\label{quantum-mixing---transaction-level-privacy}}
+
+\hypertarget{chaumian-coinjoin-protocol}{%
+\paragraph{Chaumian CoinJoin
+Protocol}\label{chaumian-coinjoin-protocol}}
+
+\textbf{Steps:} 1. \textbf{Commitment Phase}: Users submit blinded
+output addresses 2. \textbf{Signing Phase}: Mix coordinator signs
+blinded outputs 3. \textbf{Unblinding Phase}: Users unblind signatures
+4. \textbf{Assembly Phase}: Final CoinJoin transaction constructed 5.
+\textbf{Broadcast Phase}: Transaction sent via Tor + randomized timing
+delays
+
+\textbf{Anonymity Set Calculation} (Simplified Overview):
+
+\begin{verbatim}
+Naive Calculation: Anonymity Set = Participants × Decoy Ratio
+                                  = 16 participants × 15 decoys = 240 potential senders
+\end{verbatim}
+
+\textbf{⚠️ Important}: This naive calculation assumes perfect uniformity
+and ignores real-world linkability risks. Actual effective anonymity is
+lower due to:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Amount Correlation}: Transactions with unique amounts can be
+  linked
+\item
+  \textbf{Timing Analysis}: Broadcast time correlation reduces anonymity
+\item
+  \textbf{Linkability Attacks}: Multiple transactions from same user can
+  be correlated
+\item
+  \textbf{Decoy Selection Bias}: Non-uniform decoy selection reveals
+  information
+\end{enumerate}
+
+\textbf{Rigorous Anonymity Analysis (Epsilon-Differential Privacy)}:
+
+We model transaction mixing as an ε-differentially private mechanism
+where ε (epsilon) quantifies privacy loss.
+
+\textbf{Differential Privacy Definition}:
+
+\begin{verbatim}
+A mechanism M provides ε-differential privacy if for all datasets D1 and D2
+differing in one record, and all outputs S:
+
+  Pr[M(D1) ∈ S] ≤ e^ε × Pr[M(D2) ∈ S]
+\end{verbatim}
+
+\textbf{Q-NarwhalKnight Mixing Privacy Parameters}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.1474}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.1158}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.0842}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.1684}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.1474}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.1368}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 12\tabcolsep) * \real{0.2000}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Privacy Level
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Ring Size
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Decoys
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Amount Buckets
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Timing Delay
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+ε (epsilon)
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Anonymity Guarantee
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Standard} & 16 & 15 & 10 buckets & 0-30s random & ε ≈ 2.3 &
+\textasciitilde90\% indistinguishable \\
+\textbf{High} & 32 & 31 & 20 buckets & 0-90s random & ε ≈ 1.5 &
+\textasciitilde95\% indistinguishable \\
+\textbf{Maximum} & 64 & 63 & 40 buckets & 0-180s random & ε ≈ 0.7 &
+\textasciitilde99\% indistinguishable \\
+\bottomrule
+\end{longtable}
+
+\textbf{Epsilon Interpretation}: - \textbf{ε = 0}: Perfect privacy
+(impossible in practice) - \textbf{ε \textless{} 1}: Strong privacy
+guarantees - \textbf{ε \textless{} 2}: Moderate privacy (acceptable for
+most use cases) - \textbf{ε \textgreater{} 3}: Weak privacy (not
+recommended)
+
+\textbf{Effective Anonymity Set (Min-Entropy Calculation)}:
+
+Instead of naive counting, we calculate min-entropy H∞:
+
+\begin{verbatim}
+H∞(X) = -log₂(max P(x))
+         where P(x) is probability that transaction x belongs to user
+
+Effective Anonymity Set = 2^H∞
+\end{verbatim}
+
+\textbf{Example (Standard Mixing)}: - Ring size: 16 participants -
+Amount buckets: 10 (transactions grouped by amount ranges) - Timing
+buckets: 6 (5-second windows) - Unique combinations: 16 × 10 × 6 = 960
+
+Assuming adversary can narrow down to specific amount bucket and timing
+window:
+
+\begin{verbatim}
+P(correct sender) ≈ 1/16 = 0.0625
+H∞ = -log₂(0.0625) = 4 bits
+Effective Anonymity Set = 2^4 = 16 users  ✓ (matches ring size under ideal conditions)
+\end{verbatim}
+
+\textbf{Worst-Case Analysis} (Unique amount + timing correlation):
+
+\begin{verbatim}
+If transaction amount is unique: P(correct sender) ≈ 1/4 (timing still provides some privacy)
+H∞ = -log₂(0.25) = 2 bits
+Effective Anonymity Set = 2^2 = 4 users  ⚠️ (reduced privacy)
+\end{verbatim}
+
+\textbf{Amount Bucketing Strategy}:
+
+To prevent amount correlation attacks, Q-NarwhalKnight enforces amount
+bucketing:
+
+\begin{longtable}[]{@{}llll@{}}
+\toprule
+Bucket & Range (BTC) & Range (ETH) & Range (USD) \\
+\midrule
+\endhead
+Bucket 1 & 0.001 - 0.01 & 0.01 - 0.1 & \$50 - \$100 \\
+Bucket 2 & 0.01 - 0.1 & 0.1 - 1.0 & \$100 - \$500 \\
+Bucket 3 & 0.1 - 0.5 & 1.0 - 5.0 & \$500 - \$2,500 \\
+Bucket 4 & 0.5 - 1.0 & 5.0 - 10.0 & \$2,500 - \$10,000 \\
+Bucket 5 & 1.0 - 5.0 & 10.0 - 50.0 & \$10,000 - \$50,000 \\
+\ldots{} & (up to 40 buckets for ``maximum'' privacy) & & \\
+\bottomrule
+\end{longtable}
+
+\textbf{Transactions are only mixed with others in the same bucket},
+preventing unique amount linkability.
+
+\textbf{Randomized Delay Distribution}:
+
+Timing delays follow truncated exponential distribution:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{\# Standard privacy level}
+\NormalTok{delay\_seconds }\OperatorTok{=} \BuiltInTok{min}\NormalTok{(}\DecValTok{30}\NormalTok{, random.expovariate(λ}\OperatorTok{=}\FloatTok{0.1}\NormalTok{))}
+
+\CommentTok{\# Maximum privacy level}
+\NormalTok{delay\_seconds }\OperatorTok{=} \BuiltInTok{min}\NormalTok{(}\DecValTok{180}\NormalTok{, random.expovariate(λ}\OperatorTok{=}\FloatTok{0.02}\NormalTok{))}
+\end{Highlighting}
+\end{Shaded}
+
+This prevents adversaries from correlating input/output timing patterns.
+
+\textbf{Privacy Budget Composition}:
+
+When a user performs multiple mixing operations, privacy loss compounds:
+
+\begin{verbatim}
+ε_total = ε₁ + ε₂ + ... + εₙ  (sequential composition)
+
+Example: User mixes 5 transactions at ε=1.5 each
+ε_total = 5 × 1.5 = 7.5  ⚠️ (weak privacy after 5 mixes)
+\end{verbatim}
+
+\textbf{Recommendation}: Users should limit mixing frequency or use
+``maximum'' privacy level (ε ≈ 0.7) for repeated operations.
+
+\textbf{Privacy vs Performance Tradeoff}:
+
+\begin{longtable}[]{@{}llll@{}}
+\toprule
+Metric & Standard (ε ≈ 2.3) & Maximum (ε ≈ 0.7) & Increase \\
+\midrule
+\endhead
+Ring Size & 16 & 64 & 4× \\
+Anonymity Set & \textasciitilde16 users & \textasciitilde64 users &
+4× \\
+Mixing Latency & 15-30s (P95) & 45-90s (P95) & 3× \\
+Pool Fill Time & \textasciitilde5 min & \textasciitilde15 min & 3× \\
+Fee (basis points) & 10 bps (0.1\%) & 15 bps (0.15\%) & 1.5× \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{ring-signatures-experimental---quantum-resistant}{%
+\paragraph{Ring Signatures (Experimental -
+Quantum-Resistant)}\label{ring-signatures-experimental---quantum-resistant}}
+
+\textbf{⚠️ Status}: Experimental feature under cryptographic audit. Not
+recommended for production use until formal verification complete (ETA:
+Q2 2026).
+
+\textbf{Algorithm}: Lattice-based linkable ring signatures
+(MLSAG/CLSAG-style construction)
+
+\textbf{Technical Approach}: - Ring signature construction using lattice
+assumptions (not standard Dilithium5) - Based on published research:
+``Linkable Ring Signatures from Lattices'' (academic citations pending)
+- \textbf{Current Implementation}: Feature-flagged, disabled by default
+for enterprise customers
+
+\textbf{Properties}: - \textbf{Unlinkability}: Cannot determine which
+ring member signed - \textbf{Non-frameability}: Only real signer can
+produce valid signature - \textbf{Linkability}: Prevents double-spending
+via key images - \textbf{Quantum Resistance}: Lattice-based cryptography
+(post-quantum secure)
+
+\textbf{Ring Size}: 16 members (configurable: 8, 16, 32, 64)
+
+\textbf{Security Considerations}: - Awaiting third-party cryptographic
+audit (scheduled Q1 2026) - Not yet peer-reviewed in academic
+conferences - Alternative: Use standard Dilithium5 signatures + mixing
+for production deployments
+
+\textbf{Feature Flag}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"privacy\_level"}\FunctionTok{:} \StringTok{"maximum"}\FunctionTok{,}
+  \DataTypeTok{"mixing\_parameters"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"ring\_signatures\_experimental"}\FunctionTok{:} \KeywordTok{false}  \ErrorTok{//} \ErrorTok{Set} \ErrorTok{to} \KeywordTok{true} \ErrorTok{to} \ErrorTok{enable} \ErrorTok{(at} \ErrorTok{your} \ErrorTok{own} \ErrorTok{risk)}
+  \FunctionTok{\}}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{stealth-addresses}{%
+\paragraph{Stealth Addresses}\label{stealth-addresses}}
+
+\textbf{Dual-Key Scheme} (similar to Monero): - \textbf{View Key}: Scan
+blockchain for incoming payments - \textbf{Spend Key}: Authorize
+spending received funds
+
+\textbf{One-Time Address Generation}:
+
+\begin{verbatim}
+P = H(rA)G + B
+\end{verbatim}
+
+Where: - \texttt{P} = One-time public address - \texttt{r} = Sender's
+random scalar - \texttt{A} = Recipient's public view key - \texttt{B} =
+Recipient's public spend key - \texttt{G} = Ed25519 base point
+
+\textbf{Privacy Guarantee}: Each transaction uses unique address (no
+address reuse)
+
+\hypertarget{zk-stark-proofs-for-mixing-validity}{%
+\paragraph{ZK-STARK Proofs for Mixing
+Validity}\label{zk-stark-proofs-for-mixing-validity}}
+
+\textbf{Prover Statement}: ``I know inputs totaling X QNK and possess
+valid signatures, without revealing which inputs''
+
+\textbf{Proof Properties}: - \textbf{Zero-Knowledge}: Verifier learns
+nothing except validity - \textbf{Soundness}: Cannot prove false
+statement - \textbf{Completeness}: Valid proofs always verify -
+\textbf{Quantum Resistance}: No reliance on elliptic curve discrete log
+
+\textbf{Performance}: - Proof generation: \textbf{250ms} (average) -
+Proof size: \textbf{45 KB} - Verification time: \textbf{50ms}
+
+\hypertarget{transport-security-pki}{%
+\subsubsection{3.4 Transport Security \&
+PKI}\label{transport-security-pki}}
+
+Q-NarwhalKnight PaaS provides enterprise-grade transport security with
+automated certificate management and optional post-quantum PKI.
+
+\hypertarget{managed-tls-acme}{%
+\paragraph{3.4.1 Managed TLS (ACME)}\label{managed-tls-acme}}
+
+\textbf{Automatic Certificate Provisioning}: - Auto-issue/renew public
+certificates via ACME protocol - Supported CAs: Let's Encrypt, Buypass,
+ZeroSSL - Challenge methods: \texttt{http-01}, \texttt{dns-01},
+\texttt{tls-alpn-01} - \textbf{Keyless TLS}: HSM-backed private keys
+never leave secure hardware - \textbf{OCSP Stapling}: Privacy-preserving
+revocation checking (default enabled)
+
+\textbf{Example Configuration}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"tls\_config"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"acme\_enabled"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+    \DataTypeTok{"acme\_ca"}\FunctionTok{:} \StringTok{"letsencrypt"}\FunctionTok{,}
+    \DataTypeTok{"domains"}\FunctionTok{:} \OtherTok{[}\StringTok{"paas.qnarwhalknight.com"}\OtherTok{,} \StringTok{"api.qnarwhalknight.com"}\OtherTok{]}\FunctionTok{,}
+    \DataTypeTok{"challenge\_method"}\FunctionTok{:} \StringTok{"dns{-}01"}\FunctionTok{,}
+    \DataTypeTok{"auto\_renew\_days\_before\_expiry"}\FunctionTok{:} \DecValTok{30}\FunctionTok{,}
+    \DataTypeTok{"keyless\_tls"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+    \DataTypeTok{"hsm\_backend"}\FunctionTok{:} \StringTok{"aws{-}cloudhsm"}
+  \FunctionTok{\}}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{private-pki-mtls-for-internal-services}{%
+\paragraph{3.4.2 Private PKI (mTLS for Internal
+Services)}\label{private-pki-mtls-for-internal-services}}
+
+\textbf{Internal ACME Server}: - Issues short-lived service certificates
+(8--24 hour TTL) - SPIFFE/SPIRE compatible for workload identity -
+Automatic rotation eliminates long-lived secrets
+
+\textbf{Mutual TLS (mTLS)}: - Service-to-service authentication via
+client certificates - Enforced for inter-node consensus communication -
+Zero Trust architecture (no implicit trust within network perimeter)
+
+\textbf{Example Internal Service Certificate}:
+
+\begin{verbatim}
+Subject: spiffe://q-narwhalknight.com/validator/node-42
+Issuer: Q-NarwhalKnight Internal CA
+Validity: 24 hours
+Extensions:
+  - SPIFFE ID: spiffe://q-narwhalknight.com/validator/node-42
+  - DNS SANs: node-42.internal.qnk.local
+\end{verbatim}
+
+\hypertarget{pq-hybrid-certificates-optional}{%
+\paragraph{3.4.3 PQ-Hybrid Certificates
+(Optional)}\label{pq-hybrid-certificates-optional}}
+
+\textbf{Post-Quantum Ready}: - Optional hybrid leaf certificates:
+Ed25519 + Dilithium5 - Dual signatures verify via both classical and PQ
+algorithms - Compatible with standard X.509 infrastructure via extension
+fields
+
+\textbf{Hybrid Certificate Structure}:
+
+\begin{verbatim}
+X.509 Certificate v3
+├─ Subject Public Key Info (SPKI): Ed25519 public key
+├─ Signature Algorithm: Ed25519
+├─ X.509v3 extensions:
+│  ├─ Subject Alternative Name: DNS:api.qnarwhalknight.com
+│  ├─ Custom Extension (OID 1.3.6.1.4.1.99999.1):
+│  │  └─ Dilithium5 public key (2,592 bytes)
+│  └─ Custom Extension (OID 1.3.6.1.4.1.99999.2):
+│     └─ Dilithium5 signature (4,595 bytes)
+\end{verbatim}
+
+Clients verify both Ed25519 (standard) and Dilithium5 (PQ) signatures.
+
+\hypertarget{security-best-practices}{%
+\paragraph{3.4.4 Security Best
+Practices}\label{security-best-practices}}
+
+\textbf{Enabled by Default}: - \textbf{HSTS (HTTP Strict Transport
+Security)}: max-age=31536000; includeSubDomains; preload - \textbf{CAA
+DNS Records}: Restrict which CAs can issue certificates for domains -
+\textbf{Certificate Transparency (CT)}: Monitor CT logs for unauthorized
+issuance - \textbf{TLS 1.3 Only}: Deprecated TLS 1.2 and below (no CBC
+mode ciphers) - \textbf{Forward Secrecy}: Ephemeral ECDHE/Kyber1024 key
+exchanges - \textbf{OCSP Stapling}: Reduce privacy leakage from
+revocation checks
+
+\textbf{Cipher Suites} (prioritized order): 1.
+\texttt{TLS\_CHACHA20\_POLY1305\_SHA256} (preferred for mobile/ARM) 2.
+\texttt{TLS\_AES\_256\_GCM\_SHA384} (hardware-accelerated AES-NI) 3.
+\texttt{TLS\_AES\_128\_GCM\_SHA256} (fallback)
+
+\textbf{HSM Integration}: - Private keys stored in FIPS 140-2 Level 3
+HSMs (AWS CloudHSM, Thales Luna, etc.) - Signing operations performed
+within HSM (keys never extracted) - Disaster recovery via encrypted key
+backup (M-of-N threshold decryption)
+
+\textbf{QRNG Entropy Footnote}¹: QRNG source (device/HSM entropy) mixed
+with DRBG (NIST SP 800-90A). Quantum entropy never used alone for key
+generation; always combined with classical CSPRNG to prevent hardware
+backdoors.
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{cross-chain-privacy-bridge}{%
+\subsubsection{3.5 Cross-Chain Privacy
+Bridge}\label{cross-chain-privacy-bridge}}
+
+\hypertarget{supported-chains-phase-1}{%
+\paragraph{Supported Chains (Phase 1)}\label{supported-chains-phase-1}}
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1029}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.2794}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.2647}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.2353}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1176}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Chain
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Transaction Format
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Stealth Addresses
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Ring Signatures
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Mixing
+\end{minipage} \\
+\midrule
+\endhead
+Bitcoin & PSBT & ✅ & ⚠️ Experimental & ✅ \\
+Ethereum & RLP-encoded & ✅ & ⚠️ Experimental & ✅ \\
+Solana & Borsh-serialized & ✅ & ⚠️ Partial & ✅ \\
+Cardano & CBOR & 🔄 Q1 2026 & 🔄 Q1 2026 & 🔄 Q1 2026 \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{atomic-swaps-with-privacy}{%
+\paragraph{Atomic Swaps with Privacy}\label{atomic-swaps-with-privacy}}
+
+\textbf{Hashed Timelock Contracts (HTLCs) + Stealth Addresses}:
+
+\begin{verbatim}
+Bitcoin HTLC:
+  OP_IF
+    OP_SHA256 <hash> OP_EQUALVERIFY <stealth_pubkey_A> OP_CHECKSIG
+  OP_ELSE
+    <timelock> OP_CHECKLOCKTIMEVERIFY OP_DROP <refund_stealth_pubkey_B> OP_CHECKSIG
+  OP_ENDIF
+\end{verbatim}
+
+\textbf{Privacy Properties}: - Swap participants use stealth addresses
+(no address reuse) - Swap transactions broadcast via Tor - Optional ring
+signature authorization (chain-dependent)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{enterprise-service-tiers}{%
+\subsection{4. Enterprise Service
+Tiers}\label{enterprise-service-tiers}}
+
+\hypertarget{pay-per-use-tier-retail}{%
+\subsubsection{4.1 Pay-Per-Use Tier
+(Retail)}\label{pay-per-use-tier-retail}}
+
+\textbf{Target Audience}: Individual users, small wallets, developers
+
+\textbf{Pricing} (in QNK tokens):
+
+\begin{longtable}[]{@{}lll@{}}
+\toprule
+Service & Cost & Notes \\
+\midrule
+\endhead
+Tor Circuit Relay & 0.001 QNK/MB & Network bandwidth cost \\
+Transaction Mixing & 0.1\% of tx value & Minimum 0.01 QNK \\
+Ring Signature Generation & 0.001 QNK/signature & Quantum-resistant \\
+Stealth Address (1x) & 0.0001 QNK & Bulk discounts available \\
+ZK-STARK Proof & 0.01 QNK/proof & Compute-intensive \\
+Atomic Swap Coordination & 0.05 QNK/swap & Cross-chain complexity \\
+\bottomrule
+\end{longtable}
+
+\textbf{Features}: - ✅ Public API access - ✅ Standard rate limits (100
+req/min) - ✅ Community support (Discord/Telegram) - ✅ 95\% uptime SLA
+
+\textbf{Usage Example}: Mixing 1 BTC (\textasciitilde\$60,000 USD) costs
+0.1\% = \$60 USD equivalent in QNK
+
+\hypertarget{professional-tier-499month}{%
+\subsubsection{4.2 Professional Tier
+(\$499/month)}\label{professional-tier-499month}}
+
+\textbf{Target Audience}: Wallets, DApps, trading bots
+
+\textbf{Included}: - ✅ 100,000 API calls/month - ✅ Priority Tor
+circuits (lower latency) - ✅ Dedicated support (email, 24-hour
+response) - ✅ 99\% uptime SLA - ✅ Custom rate limits (1,000 req/min) -
+✅ Webhook notifications - ✅ Advanced analytics dashboard
+
+\textbf{Overages}: \$0.005/request beyond 100K
+
+\textbf{Best For}: Medium-volume applications processing \textless3,000
+transactions/day
+
+\hypertarget{enterprise-tier-1999month}{%
+\subsubsection{4.3 Enterprise Tier
+(\$1,999/month)}\label{enterprise-tier-1999month}}
+
+\textbf{Target Audience}: Exchanges, DeFi protocols, institutions
+
+\textbf{Included}: - ✅ \textbf{Unlimited} API calls - ✅ Controlled
+egress relays (customer-owned IPs) - ✅ Priority mixing pools (faster
+completion) - ✅ 24/7 dedicated support (Slack/phone) - ✅
+\textbf{99.9\% uptime SLA} with credits - ✅ Custom compliance
+configurations - ✅ Batch processing API - ✅ Multi-chain transaction
+bundling - ✅ Quarterly business reviews
+
+\textbf{Add-Ons}: - Private relay network: +\$500/month - Compliance
+reporting: +\$300/month - Custom cryptographic schemes: Custom pricing
+
+\textbf{Best For}: High-volume platforms processing 10,000+
+transactions/day
+
+\hypertarget{white-label-tier-9999month}{%
+\subsubsection{4.4 White-Label Tier
+(\$9,999/month)}\label{white-label-tier-9999month}}
+
+\textbf{Target Audience}: Blockchain networks, large enterprises
+
+\textbf{Included (Everything from Enterprise +)}: - ✅ White-label API
+(your branding) - ✅ On-premise deployment option - ✅ Source code
+access (limited modules) - ✅ Dedicated infrastructure (isolated
+network) - ✅ Custom SLA (up to 99.99\%) - ✅ Regulatory compliance
+consulting - ✅ Integration engineering support - ✅ Governance
+participation (PaaS roadmap)
+
+\textbf{Custom Pricing for}: - Multi-region deployments - Dedicated
+development team - Regulatory certifications (SOC2, ISO 27001)
+
+\textbf{Example Customer}: Major cryptocurrency exchange wanting to
+offer privacy features under their own brand
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{api-specification}{%
+\subsection{5. API Specification}\label{api-specification}}
+
+\textbf{API Conventions}: - All endpoints use HTTPS with TLS 1.3 -
+Request/response format: JSON (UTF-8 encoding) - \textbf{Idempotency}:
+All POST endpoints accept \texttt{Idempotency-Key} header. Identical
+keys within 24h return the original result; body mismatch →
+\texttt{409\ Conflict}. See Appendix D for details. - \textbf{Error
+Handling}: RFC 9457 Problem Details for HTTP APIs
+(\texttt{application/problem+json}) - \textbf{Rate Limiting}: Enforced
+per tier with \texttt{X-RateLimit-*} headers - \textbf{Versioning}: API
+version in URL path (\texttt{/api/v1/...})
+
+\hypertarget{authentication}{%
+\subsubsection{5.1 Authentication}\label{authentication}}
+
+\textbf{Methods Supported}: 1. \textbf{API Key Authentication}
+(Retail/Professional) 2. \textbf{Hybrid Request Signatures} (All tiers,
+recommended) 3. \textbf{Legacy Wallet Signature} (All tiers, deprecated
+for PQ-capable clients) 4. \textbf{OAuth 2.0} (Enterprise/White-Label)
+
+\hypertarget{hybrid-request-signatures-quantum-resistant}{%
+\paragraph{5.1.1 Hybrid Request Signatures
+(Quantum-Resistant)}\label{hybrid-request-signatures-quantum-resistant}}
+
+\textbf{Purpose}: Quantum-resistant authentication using dual-signature
+verification
+
+\textbf{Protocol}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/mix/submit}
+\NormalTok{Authorization: MultiSig v=1; schemes="ecdsa,dilithium5"; sigs="base64\_ecdsa\_sig,base64\_dilithium5\_sig"}
+\NormalTok{X{-}Req{-}Hash: SHA3{-}256(canonical\_request\_body)}
+\NormalTok{X{-}Req{-}Timestamp: 1698765432}
+\NormalTok{X{-}Wallet{-}Address: 0xABC...}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "transaction\_data": \{...\}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Signature Generation (Client-Side)}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// 1. Canonicalize request body (sorted JSON, no unknown fields)}
+\KeywordTok{const}\NormalTok{ canonical\_body }\OperatorTok{=} \BuiltInTok{JSON}\OperatorTok{.}\FunctionTok{stringify}\NormalTok{(request\_body}\OperatorTok{,} \BuiltInTok{Object}\OperatorTok{.}\FunctionTok{keys}\NormalTok{(request\_body)}\OperatorTok{.}\FunctionTok{sort}\NormalTok{())}\OperatorTok{;}
+
+\CommentTok{// 2. Compute request hash}
+\KeywordTok{const}\NormalTok{ req\_hash }\OperatorTok{=} \FunctionTok{SHA3\_256}\NormalTok{(canonical\_body)}\OperatorTok{;}
+
+\CommentTok{// 3. Build message to sign}
+\KeywordTok{const}\NormalTok{ message }\OperatorTok{=} \VerbatimStringTok{\textasciigrave{}}\SpecialCharTok{$\{}\NormalTok{wallet\_address}\SpecialCharTok{\}}\VerbatimStringTok{:}\SpecialCharTok{$\{}\NormalTok{timestamp}\SpecialCharTok{\}}\VerbatimStringTok{:}\SpecialCharTok{$\{}\NormalTok{req\_hash}\SpecialCharTok{\}}\VerbatimStringTok{\textasciigrave{}}\OperatorTok{;}
+
+\CommentTok{// 4. Sign with both ECDSA (legacy) and Dilithium5 (PQ)}
+\KeywordTok{const}\NormalTok{ ecdsa\_sig }\OperatorTok{=}\NormalTok{ secp256k1}\OperatorTok{.}\FunctionTok{sign}\NormalTok{(}\FunctionTok{keccak256}\NormalTok{(message)}\OperatorTok{,}\NormalTok{ ecdsa\_private\_key)}\OperatorTok{;}
+\KeywordTok{const}\NormalTok{ dilithium5\_sig }\OperatorTok{=}\NormalTok{ dilithium5}\OperatorTok{.}\FunctionTok{sign}\NormalTok{(message}\OperatorTok{,}\NormalTok{ dilithium5\_private\_key)}\OperatorTok{;}
+
+\CommentTok{// 5. Encode signatures}
+\KeywordTok{const}\NormalTok{ sigs }\OperatorTok{=} \VerbatimStringTok{\textasciigrave{}}\SpecialCharTok{$\{}\FunctionTok{base64}\NormalTok{(ecdsa\_sig)}\SpecialCharTok{\}}\VerbatimStringTok{,}\SpecialCharTok{$\{}\FunctionTok{base64}\NormalTok{(dilithium5\_sig)}\SpecialCharTok{\}}\VerbatimStringTok{\textasciigrave{}}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Server-Side Verification}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Both signatures MUST verify for hybrid mode}
+\KeywordTok{let}\NormalTok{ ecdsa\_valid }\OperatorTok{=}\NormalTok{ verify\_ecdsa(}\OperatorTok{\&}\NormalTok{message}\OperatorTok{,} \OperatorTok{\&}\NormalTok{ecdsa\_sig}\OperatorTok{,} \OperatorTok{\&}\NormalTok{wallet\_pubkey)}\OperatorTok{;}
+\KeywordTok{let}\NormalTok{ dilithium5\_valid }\OperatorTok{=}\NormalTok{ verify\_dilithium5(}\OperatorTok{\&}\NormalTok{message}\OperatorTok{,} \OperatorTok{\&}\NormalTok{dilithium5\_sig}\OperatorTok{,} \OperatorTok{\&}\NormalTok{dilithium5\_pubkey)}\OperatorTok{;}
+
+\PreprocessorTok{assert!}\NormalTok{(ecdsa\_valid }\OperatorTok{\&\&}\NormalTok{ dilithium5\_valid}\OperatorTok{,} \StringTok{"Hybrid signature verification failed"}\NormalTok{)}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Migration Path}: - \textbf{Phase 0 clients} (ECDSA-only):
+Supported via legacy mode (see below) - \textbf{Phase 1 clients}
+(Hybrid): Both ECDSA + Dilithium5 required - \textbf{Phase 2+ clients}
+(PQ-only): Dilithium5-only authentication
+
+\hypertarget{legacy-wallet-signature-non-pq-deprecated}{%
+\paragraph{5.1.2 Legacy Wallet Signature (Non-PQ,
+Deprecated)}\label{legacy-wallet-signature-non-pq-deprecated}}
+
+\textbf{⚠️ Security Notice}: This authentication method uses ECDSA
+signatures which are vulnerable to quantum computer attacks. Recommended
+for backwards compatibility only. Will be deprecated in Q3 2026.
+
+\textbf{Example}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/mix/submit}
+\NormalTok{Authorization: Signature wallet=0xABC...,sig=0xDEF...,timestamp=1698765432}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "transaction\_data": \{...\}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Signature Verification}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{const}\NormalTok{ message }\OperatorTok{=} \VerbatimStringTok{\textasciigrave{}}\SpecialCharTok{$\{}\NormalTok{wallet\_address}\SpecialCharTok{\}}\VerbatimStringTok{:}\SpecialCharTok{$\{}\NormalTok{timestamp}\SpecialCharTok{\}}\VerbatimStringTok{:}\SpecialCharTok{$\{}\NormalTok{request\_body\_hash}\SpecialCharTok{\}}\VerbatimStringTok{\textasciigrave{}}\OperatorTok{;}
+\KeywordTok{const}\NormalTok{ recovered\_address }\OperatorTok{=} \FunctionTok{ecrecover}\NormalTok{(}\FunctionTok{keccak256}\NormalTok{(message)}\OperatorTok{,}\NormalTok{ signature)}\OperatorTok{;}
+\FunctionTok{assert}\NormalTok{(recovered\_address }\OperatorTok{===}\NormalTok{ wallet\_address)}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Deprecation Timeline}: - Q4 2025: Legacy mode fully supported -
+Q2 2026: Warning headers added to legacy responses - Q3 2026: Legacy
+mode disabled for new clients - Q4 2026: Legacy mode EOL (End of Life)
+
+\hypertarget{core-endpoints}{%
+\subsubsection{5.2 Core Endpoints}\label{core-endpoints}}
+
+\hypertarget{tor-relay-service}{%
+\paragraph{5.2.1 Tor Relay Service}\label{tor-relay-service}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/tor/relay}
+\NormalTok{Content{-}Type: application/json}
+\NormalTok{Authorization: Bearer \textless{}api\_key\textgreater{}}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "bitcoin",}
+\NormalTok{  "destination": "btc{-}node.example.com:8333",}
+\NormalTok{  "data": "base64\_encoded\_tx",}
+\NormalTok{  "circuit\_requirements": \{}
+\NormalTok{    "min\_hops": 3,}
+\NormalTok{    "exit\_country": "any",}
+\NormalTok{    "avoid\_countries": ["CN", "RU"],}
+\NormalTok{    "quantum\_seeded": true,}
+\NormalTok{    "circuit\_lifetime\_minutes": 10}
+\NormalTok{  \}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"success"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"circuit\_id"}\FunctionTok{:} \StringTok{"qnk{-}tor{-}abc123def456"}\FunctionTok{,}
+  \DataTypeTok{"latency\_ms"}\FunctionTok{:} \DecValTok{145}\FunctionTok{,}
+  \DataTypeTok{"exit\_node\_country"}\FunctionTok{:} \StringTok{"DE"}\FunctionTok{,}
+  \DataTypeTok{"exit\_node\_fingerprint"}\FunctionTok{:} \StringTok{"E2EB7F3F9E4C..."}\FunctionTok{,}
+  \DataTypeTok{"relay\_cost\_qnk"}\FunctionTok{:} \StringTok{"0.001"}\FunctionTok{,}
+  \DataTypeTok{"estimated\_bandwidth\_mb"}\FunctionTok{:} \FloatTok{1.2}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Error Codes}: - \texttt{TOR\_CIRCUIT\_FAILED}: Could not
+establish circuit - \texttt{TOR\_EXIT\_BLOCKED}: Destination blocks Tor
+exits - \texttt{INSUFFICIENT\_BALANCE}: Not enough QNK tokens
+
+\hypertarget{transaction-mixing-service}{%
+\paragraph{5.2.2 Transaction Mixing
+Service}\label{transaction-mixing-service}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/mix/submit}
+\NormalTok{Content{-}Type: application/json}
+\NormalTok{Authorization: MultiSig v=1; schemes="ecdsa,dilithium5"; sigs="base64\_ecdsa\_sig,base64\_dilithium5\_sig"}
+\NormalTok{X{-}Req{-}Hash: SHA3{-}256(canonical\_request\_body)}
+\NormalTok{X{-}Req{-}Timestamp: 1698765432}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "transaction\_data": \{}
+\NormalTok{    "from": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",}
+\NormalTok{    "to": "0x8ba1f109551bD432803012645Ac136ddd64DBA72",}
+\NormalTok{    "value": "1500000000000000000",  // 1.5 ETH in wei}
+\NormalTok{    "gas\_limit": "21000",}
+\NormalTok{    "gas\_price": "20000000000"}
+\NormalTok{  \},}
+\NormalTok{  "privacy\_level": "maximum",}
+\NormalTok{  "mixing\_parameters": \{}
+\NormalTok{    "decoy\_count": 20,}
+\NormalTok{    "ring\_size": 16,}
+\NormalTok{    "stealth\_addresses": true,}
+\NormalTok{    "quantum\_resistant": true,}
+\NormalTok{    "compliance\_mode": false}
+\NormalTok{  \},}
+\NormalTok{  "output\_addresses": [}
+\NormalTok{    // Optional: specify multiple output addresses for better privacy}
+\NormalTok{    "qnk:stealth:0xABC...",}
+\NormalTok{    "qnk:stealth:0xDEF..."}
+\NormalTok{  ]}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"success"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"mixing\_id"}\FunctionTok{:} \StringTok{"qnk{-}mix{-}789xyz"}\FunctionTok{,}
+  \DataTypeTok{"anonymity\_set\_size"}\FunctionTok{:} \DecValTok{320}\FunctionTok{,}
+  \DataTypeTok{"estimated\_completion\_seconds"}\FunctionTok{:} \DecValTok{60}\FunctionTok{,}
+  \DataTypeTok{"mixing\_pool\_id"}\FunctionTok{:} \StringTok{"pool{-}eth{-}large{-}0042"}\FunctionTok{,}
+  \DataTypeTok{"participant\_count"}\FunctionTok{:} \DecValTok{16}\FunctionTok{,}
+  \DataTypeTok{"stealth\_addresses"}\FunctionTok{:} \OtherTok{[}
+    \FunctionTok{\{}
+      \DataTypeTok{"address"}\FunctionTok{:} \StringTok{"qnk:stealth:0x9F8..."}\FunctionTok{,}
+      \DataTypeTok{"view\_key"}\FunctionTok{:} \StringTok{"encrypted\_view\_key\_base64"}\FunctionTok{,}
+      \DataTypeTok{"spend\_key"}\FunctionTok{:} \StringTok{"encrypted\_spend\_key\_base64"}
+    \FunctionTok{\}}
+  \OtherTok{]}\FunctionTok{,}
+  \DataTypeTok{"mixing\_fee\_qnk"}\FunctionTok{:} \StringTok{"0.05"}\FunctionTok{,}
+  \DataTypeTok{"zk\_proof"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"proof\_type"}\FunctionTok{:} \StringTok{"stark"}\FunctionTok{,}
+    \DataTypeTok{"proof\_data"}\FunctionTok{:} \StringTok{"base64\_encoded\_proof"}\FunctionTok{,}
+    \DataTypeTok{"verification\_key"}\FunctionTok{:} \StringTok{"base64\_encoded\_vk"}
+  \FunctionTok{\},}
+  \DataTypeTok{"broadcast\_via\_tor"}\FunctionTok{:} \KeywordTok{true}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Mixing Completion Webhook} (Enterprise tier):
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST https://your{-}webhook.com/mixing{-}complete}
+\NormalTok{\{}
+\NormalTok{  "mixing\_id": "qnk{-}mix{-}789xyz",}
+\NormalTok{  "status": "completed",}
+\NormalTok{  "final\_transaction\_hash": "0xABCDEF...",}
+\NormalTok{  "completion\_time": "2025{-}10{-}22T12:34:56Z"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{ring-signature-generation-experimental}{%
+\paragraph{5.2.3 Ring Signature Generation
+(Experimental)}\label{ring-signature-generation-experimental}}
+
+\textbf{⚠️ Experimental Feature}: Lattice-based ring signatures are
+under audit. Production use not recommended until Q2 2026.
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/ring{-}signature/generate}
+\NormalTok{Content{-}Type: application/json}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "bitcoin",}
+\NormalTok{  "message\_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",}
+\NormalTok{  "ring\_members": [}
+\NormalTok{    \{}
+\NormalTok{      "public\_key": "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",}
+\NormalTok{      "key\_index": 0}
+\NormalTok{    \},}
+\NormalTok{    // ... 15 more ring members}
+\NormalTok{  ],}
+\NormalTok{  "signing\_key\_index": 7,}
+\NormalTok{  "signature\_scheme": "lattice\_lrs\_experimental"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"success"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"ring\_signature"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"signature\_data"}\FunctionTok{:} \StringTok{"base64\_lrs\_sig"}\FunctionTok{,}
+    \DataTypeTok{"key\_image"}\FunctionTok{:} \StringTok{"a1b2c3d4e5f6..."}\FunctionTok{,}
+    \DataTypeTok{"ring\_size"}\FunctionTok{:} \DecValTok{16}\FunctionTok{,}
+    \DataTypeTok{"scheme"}\FunctionTok{:} \StringTok{"lattice\_lrs\_experimental"}\FunctionTok{,}
+    \DataTypeTok{"experimental"}\FunctionTok{:} \KeywordTok{true}
+  \FunctionTok{\},}
+  \DataTypeTok{"verification\_data"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"ring\_public\_keys"}\FunctionTok{:} \OtherTok{[}\ErrorTok{...}\OtherTok{]}\FunctionTok{,}
+    \DataTypeTok{"message\_hash"}\FunctionTok{:} \StringTok{"e3b0c442..."}
+  \FunctionTok{\},}
+  \DataTypeTok{"signature\_fee\_qnk"}\FunctionTok{:} \StringTok{"0.001"}\FunctionTok{,}
+  \DataTypeTok{"quantum\_resistant"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"audit\_status"}\FunctionTok{:} \StringTok{"in\_progress"}\FunctionTok{,}
+  \DataTypeTok{"production\_ready"}\FunctionTok{:} \KeywordTok{false}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Verification Endpoint}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/ring{-}signature/verify}
+\NormalTok{\{}
+\NormalTok{  "signature\_data": "base64\_signature",}
+\NormalTok{  "key\_image": "a1b2c3d4...",}
+\NormalTok{  "ring\_public\_keys": [...],}
+\NormalTok{  "message\_hash": "e3b0c442..."}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"valid"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"key\_image\_unique"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"verification\_time\_ms"}\FunctionTok{:} \DecValTok{15}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{stealth-address-generation}{%
+\paragraph{5.2.4 Stealth Address
+Generation}\label{stealth-address-generation}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/stealth{-}address/generate}
+\NormalTok{Content{-}Type: application/json}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "recipient\_public\_key": "0x04a1b2c3d4e5f6...",}
+\NormalTok{  "count": 5}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"success"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"stealth\_addresses"}\FunctionTok{:} \OtherTok{[}
+    \FunctionTok{\{}
+      \DataTypeTok{"address"}\FunctionTok{:} \StringTok{"0x9F8A7B6C5D4E3F2A1B0C9D8E7F6A5B4C3D2E1F0"}\FunctionTok{,}
+      \DataTypeTok{"ephemeral\_pubkey"}\FunctionTok{:} \StringTok{"0x04e5f6a7b8c9d0..."}\FunctionTok{,}
+      \DataTypeTok{"tx\_pubkey"}\FunctionTok{:} \StringTok{"0x03c3d2e1f0a9b8..."}\FunctionTok{,}
+      \DataTypeTok{"shared\_secret"}\FunctionTok{:} \StringTok{"encrypted\_for\_recipient\_pubkey"}
+    \FunctionTok{\}}
+    \ErrorTok{//} \ErrorTok{...} \DecValTok{4} \ErrorTok{more} \ErrorTok{addresses}
+  \OtherTok{]}\FunctionTok{,}
+  \DataTypeTok{"view\_key"}\FunctionTok{:} \StringTok{"master\_view\_key\_encrypted"}\FunctionTok{,}
+  \DataTypeTok{"spend\_key"}\FunctionTok{:} \StringTok{"master\_spend\_key\_encrypted"}\FunctionTok{,}
+  \DataTypeTok{"generation\_fee\_qnk"}\FunctionTok{:} \StringTok{"0.0005"}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{zk-stark-proof-generation-universal}{%
+\paragraph{5.2.5 ZK-STARK Proof Generation
+(Universal)}\label{zk-stark-proof-generation-universal}}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/zk{-}stark/prove}
+\NormalTok{Content{-}Type: application/json}
+
+\NormalTok{\{}
+\NormalTok{  "statement": "balance\_in\_range",}
+\NormalTok{  "witness": \{}
+\NormalTok{    "balance": "1500000000000000000",}
+\NormalTok{    "randomness": "a1b2c3d4e5f6..."}
+\NormalTok{  \},}
+\NormalTok{  "public\_inputs": \{}
+\NormalTok{    "commitment": "c7d8e9f0a1b2...",}
+\NormalTok{    "min\_balance": "1000000000000000000",}
+\NormalTok{    "max\_balance": "2000000000000000000"}
+\NormalTok{  \},}
+\NormalTok{  "proof\_type": "stark"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"success"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"proof\_id"}\FunctionTok{:} \StringTok{"zk{-}proof{-}abc123"}\FunctionTok{,}
+  \DataTypeTok{"proof\_data"}\FunctionTok{:} \StringTok{"base64\_encoded\_stark\_proof"}\FunctionTok{,}
+  \DataTypeTok{"verification\_key"}\FunctionTok{:} \StringTok{"base64\_encoded\_vk"}\FunctionTok{,}
+  \DataTypeTok{"proof\_size\_bytes"}\FunctionTok{:} \DecValTok{45000}\FunctionTok{,}
+  \DataTypeTok{"generation\_time\_ms"}\FunctionTok{:} \DecValTok{250}\FunctionTok{,}
+  \DataTypeTok{"proof\_fee\_qnk"}\FunctionTok{:} \StringTok{"0.01"}\FunctionTok{,}
+  \DataTypeTok{"verifiable\_on\_chain"}\FunctionTok{:} \KeywordTok{true}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Verification}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/zk{-}stark/verify}
+\NormalTok{\{}
+\NormalTok{  "proof\_data": "base64\_proof",}
+\NormalTok{  "verification\_key": "base64\_vk",}
+\NormalTok{  "public\_inputs": \{...\}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{rate-limits}{%
+\subsubsection{5.3 Rate Limits}\label{rate-limits}}
+
+\begin{longtable}[]{@{}llll@{}}
+\toprule
+Tier & Requests/Minute & Requests/Day & Burst Allowance \\
+\midrule
+\endhead
+Pay-Per-Use & 100 & 10,000 & 150 \\
+Professional & 1,000 & 100,000 & 1,500 \\
+Enterprise & 10,000 & Unlimited & 15,000 \\
+White-Label & Custom & Unlimited & Custom \\
+\bottomrule
+\end{longtable}
+
+\textbf{Rate Limit Headers}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{X{-}RateLimit{-}Limit: 100}
+\NormalTok{X{-}RateLimit{-}Remaining: 87}
+\NormalTok{X{-}RateLimit{-}Reset: 1698765432}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Rate Limit Exceeded Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"error"}\FunctionTok{:} \StringTok{"RATE\_LIMIT\_EXCEEDED"}\FunctionTok{,}
+  \DataTypeTok{"message"}\FunctionTok{:} \StringTok{"You have exceeded your rate limit of 100 requests/minute"}\FunctionTok{,}
+  \DataTypeTok{"retry\_after\_seconds"}\FunctionTok{:} \DecValTok{42}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{security-compliance}{%
+\subsection{6. Security \& Compliance}\label{security-compliance}}
+
+\hypertarget{threat-model}{%
+\subsubsection{6.1 Threat Model}\label{threat-model}}
+
+\textbf{Adversary Capabilities}: 1. \textbf{Network Surveillance}:
+Passive monitoring of internet traffic 2. \textbf{Transaction Graph
+Analysis}: Chainalysis-level blockchain tracing 3. \textbf{Timing
+Attacks}: Correlation of transaction broadcast times 4. \textbf{Sybil
+Attacks}: Flooding network with malicious nodes 5. \textbf{Quantum
+Computer}: Future attacks on classical cryptography
+
+\textbf{Security Properties Guaranteed}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4118}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3529}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2353}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Attack Vector
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Mitigation
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Status
+\end{minipage} \\
+\midrule
+\endhead
+IP Address Tracking & Tor + mDNS local discovery & ✅ Protected \\
+Transaction Linking & Ring signatures + mixing & ✅ Protected \\
+Amount Correlation & Amount bucketing + STARK range proofs & ✅
+Protected \\
+Timing Analysis & Private builder relays + randomized delays & ✅
+Protected \\
+Quantum Attacks & Dilithium5 + Kyber1024 & ✅ Protected \\
+Traffic Analysis & Constant-rate cover traffic & ✅ Protected \\
+Exit Node Monitoring & End-to-end encryption & ✅ Protected \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{compliance-operations-enterprise-feature}{%
+\subsubsection{6.2 Compliance Operations (Enterprise
+Feature)}\label{compliance-operations-enterprise-feature}}
+
+Q-NarwhalKnight PaaS provides comprehensive compliance infrastructure
+for regulated institutions while preserving privacy for non-compliance
+users.
+
+\hypertarget{know-your-transaction-kyt-know-your-origin-kyo}{%
+\paragraph{6.2.1 Know-Your-Transaction (KYT) / Know-Your-Origin
+(KYO)}\label{know-your-transaction-kyt-know-your-origin-kyo}}
+
+\textbf{Inbound Address Screening}:
+
+\begin{verbatim}
+Transaction Submission → KYT Check → Risk Scoring → Accept/Reject
+\end{verbatim}
+
+\textbf{Sanctions Screening Integration}: - \textbf{OFAC SDN List}
+(Office of Foreign Assets Control - Specially Designated Nationals) -
+\textbf{UN Security Council Sanctions} - \textbf{EU Consolidated
+Financial Sanctions List} - \textbf{National sanctions programs} (UK
+HMT, AUSTRAC, etc.)
+
+\textbf{API Integration}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/compliance/kyt/check}
+\NormalTok{Authorization: Bearer \textless{}enterprise\_api\_key\textgreater{}}
+
+\NormalTok{\{}
+\NormalTok{  "addresses": [}
+\NormalTok{    "bc1q...",}
+\NormalTok{    "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb"}
+\NormalTok{  ],}
+\NormalTok{  "chains": ["bitcoin", "ethereum"],}
+\NormalTok{  "screening\_level": "enhanced"  // Options: basic, standard, enhanced}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"results"}\FunctionTok{:} \OtherTok{[}
+    \FunctionTok{\{}
+      \DataTypeTok{"address"}\FunctionTok{:} \StringTok{"bc1q..."}\FunctionTok{,}
+      \DataTypeTok{"risk\_score"}\FunctionTok{:} \DecValTok{15}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{0{-}100} \ErrorTok{(0=clean}\FunctionTok{,} \ErrorTok{100=sanctioned)}
+      \DataTypeTok{"risk\_level"}\FunctionTok{:} \StringTok{"low"}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{low}\FunctionTok{,} \ErrorTok{medium}\FunctionTok{,} \ErrorTok{high}\FunctionTok{,} \ErrorTok{sanctioned}
+      \DataTypeTok{"sanctions\_match"}\FunctionTok{:} \KeywordTok{false}\FunctionTok{,}
+      \DataTypeTok{"pep\_match"}\FunctionTok{:} \KeywordTok{false}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{Politically} \ErrorTok{Exposed} \ErrorTok{Person}
+      \DataTypeTok{"source\_of\_funds\_risk"}\FunctionTok{:} \StringTok{"low"}\FunctionTok{,}
+      \DataTypeTok{"recommended\_action"}\FunctionTok{:} \StringTok{"accept"}\FunctionTok{,}
+      \DataTypeTok{"screening\_timestamp"}\FunctionTok{:} \StringTok{"2025{-}10{-}22T12:34:56Z"}
+    \FunctionTok{\}}
+  \OtherTok{]}\FunctionTok{,}
+  \DataTypeTok{"compliance\_provider"}\FunctionTok{:} \StringTok{"chainalysis"}  \ErrorTok{//} \ErrorTok{Or} \ErrorTok{elliptic}\FunctionTok{,} \ErrorTok{coinfirm}\FunctionTok{,} \ErrorTok{etc.}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Risk Scoring Criteria}: - Direct sanctions list match → Risk
+score: 100 (auto-reject) - 1-hop from sanctioned address → Risk score:
+70-90 (manual review) - Known mixer/exchange → Risk score: 20-40 (accept
+with monitoring) - Clean history → Risk score: 0-10 (auto-accept)
+
+\hypertarget{fatf-travel-rule-compliance}{%
+\paragraph{6.2.2 FATF Travel Rule
+Compliance}\label{fatf-travel-rule-compliance}}
+
+\textbf{Purpose}: Transfer originator and beneficiary information
+between VASPs (Virtual Asset Service Providers)
+
+\textbf{Supported Standards}: - \textbf{TRP} (Travel Rule Protocol) -
+InterVASP messaging - \textbf{IVMS-101} (Inter-VASP Messaging Standard)
+- Structured data format - \textbf{OpenVASP} - Decentralized VASP
+directory
+
+\textbf{Travel Rule Payload Example}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"transaction\_id"}\FunctionTok{:} \StringTok{"qnk{-}mix{-}abc123"}\FunctionTok{,}
+  \DataTypeTok{"travel\_rule\_payload"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"originator"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"vasp\_id"}\FunctionTok{:} \StringTok{"US{-}VASP{-}12345"}\FunctionTok{,}
+      \DataTypeTok{"customer\_id"}\FunctionTok{:} \StringTok{"hash(customer\_pii)"}\FunctionTok{,}
+      \DataTypeTok{"wallet\_address"}\FunctionTok{:} \StringTok{"bc1q..."}\FunctionTok{,}
+      \DataTypeTok{"name"}\FunctionTok{:} \StringTok{"encrypted(John Doe)"}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{Encrypted} \ErrorTok{for} \ErrorTok{beneficiary} \ErrorTok{VASP} \ErrorTok{only}
+      \DataTypeTok{"national\_id"}\FunctionTok{:} \StringTok{"encrypted(passport: ABC123456)"}\FunctionTok{,}
+      \DataTypeTok{"address"}\FunctionTok{:} \StringTok{"encrypted(123 Main St, NY, USA)"}
+    \FunctionTok{\},}
+    \DataTypeTok{"beneficiary"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"vasp\_id"}\FunctionTok{:} \StringTok{"EU{-}VASP{-}67890"}\FunctionTok{,}
+      \DataTypeTok{"wallet\_address"}\FunctionTok{:} \StringTok{"bc1p..."}\FunctionTok{,}
+      \DataTypeTok{"name"}\FunctionTok{:} \StringTok{"encrypted(Jane Smith)"}\FunctionTok{,}
+      \DataTypeTok{"verified"}\FunctionTok{:} \KeywordTok{true}
+    \FunctionTok{\},}
+    \DataTypeTok{"amount"}\FunctionTok{:} \StringTok{"1.5 BTC"}\FunctionTok{,}
+    \DataTypeTok{"threshold\_applies"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{FATF}\FunctionTok{:} \ErrorTok{\textgreater{}$}\DecValTok{1}\FunctionTok{,}\ErrorTok{000} \ErrorTok{USD} \ErrorTok{equivalent}
+    \DataTypeTok{"encryption"}\FunctionTok{:} \StringTok{"beneficiary\_vasp\_pubkey"}\FunctionTok{,}
+    \DataTypeTok{"signature"}\FunctionTok{:} \StringTok{"originator\_vasp\_signature"}
+  \FunctionTok{\},}
+  \DataTypeTok{"compliance\_mode"}\FunctionTok{:} \KeywordTok{true}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Q-NarwhalKnight Travel Rule Integration}: - Stores encrypted
+travel rule payloads with transaction commitments - Threshold decryption
+(M-of-N) for lawful access requests - Automatic IVMS-101 formatting -
+VASP directory lookup via DNS or blockchain registry
+
+\hypertarget{jurisdictional-controls-geo-fencing}{%
+\paragraph{6.2.3 Jurisdictional Controls \&
+Geo-Fencing}\label{jurisdictional-controls-geo-fencing}}
+
+\textbf{Configurable Rule Packs per Customer}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"compliance\_policy"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"jurisdiction"}\FunctionTok{:} \StringTok{"US"}\FunctionTok{,}
+    \DataTypeTok{"blocked\_countries"}\FunctionTok{:} \OtherTok{[}\StringTok{"KP"}\OtherTok{,} \StringTok{"IR"}\OtherTok{,} \StringTok{"SY"}\OtherTok{,} \StringTok{"CU"}\OtherTok{]}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{North} \ErrorTok{Korea}\FunctionTok{,} \ErrorTok{Iran}\FunctionTok{,} \ErrorTok{Syria}\FunctionTok{,} \ErrorTok{Cuba}
+    \DataTypeTok{"high\_risk\_countries"}\FunctionTok{:} \OtherTok{[}\StringTok{"RU"}\OtherTok{,} \StringTok{"CN"}\OtherTok{,} \StringTok{"VE"}\OtherTok{]}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{Require} \ErrorTok{enhanced} \ErrorTok{due} \ErrorTok{diligence}
+    \DataTypeTok{"require\_travel\_rule"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+    \DataTypeTok{"require\_kyt\_screening"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+    \DataTypeTok{"max\_transaction\_amount\_usd"}\FunctionTok{:} \DecValTok{100000}\FunctionTok{,}
+    \DataTypeTok{"require\_source\_of\_funds\_above\_usd"}\FunctionTok{:} \DecValTok{10000}
+  \FunctionTok{\}}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{IP Geolocation Enforcement}: - Block API access from sanctioned
+countries (optional, can be bypassed via Tor) - Warning headers for
+high-risk jurisdictions - Compliance report generation per jurisdiction
+
+\hypertarget{audit-trails-with-zero-knowledge-commitments}{%
+\paragraph{6.2.4 Audit Trails with Zero-Knowledge
+Commitments}\label{audit-trails-with-zero-knowledge-commitments}}
+
+\textbf{Challenge}: Prove compliance checks were performed WITHOUT
+revealing transaction details
+
+\textbf{Solution}: ZK-Attested Compliance Proofs
+
+\textbf{Commitment Scheme}:
+
+\begin{verbatim}
+C = H(job_id || policy_version || timestamp || inputs_hash || compliance_checks_passed)
+\end{verbatim}
+
+\textbf{ZK Proof Statement}: ``I performed KYT screening, sanctions
+checks, and travel rule validation according to policy v1.2, and all
+checks passed, without revealing which addresses were screened or
+transaction amounts''
+
+\textbf{Audit Trail API}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/compliance/audit{-}trail/create}
+\NormalTok{\{}
+\NormalTok{  "transaction\_id": "qnk{-}mix{-}abc123",}
+\NormalTok{  "policy\_version": "v1.2",}
+\NormalTok{  "checks\_performed": [}
+\NormalTok{    "ofac\_sanctions\_screening",}
+\NormalTok{    "un\_sanctions\_screening",}
+\NormalTok{    "kyt\_risk\_scoring",}
+\NormalTok{    "travel\_rule\_ivms101"}
+\NormalTok{  ],}
+\NormalTok{  "all\_checks\_passed": true,}
+\NormalTok{  "zk\_proof": "base64\_encoded\_stark\_proof",}
+\NormalTok{  "commitment": "c7d8e9f0a1b2..."}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Auditor Verification}: Regulators can verify commitment was
+created at time T without learning transaction details:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/compliance/audit{-}trail/verify}
+\NormalTok{\{}
+\NormalTok{  "commitment": "c7d8e9f0a1b2...",}
+\NormalTok{  "zk\_proof": "base64\_proof",}
+\NormalTok{  "expected\_policy\_version": "v1.2"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Response}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"proof\_valid"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"policy\_version"}\FunctionTok{:} \StringTok{"v1.2"}\FunctionTok{,}
+  \DataTypeTok{"timestamp"}\FunctionTok{:} \StringTok{"2025{-}10{-}22T12:34:56Z"}\FunctionTok{,}
+  \DataTypeTok{"checks\_verified"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"transaction\_details\_revealed"}\FunctionTok{:} \KeywordTok{false}  \ErrorTok{//} \ErrorTok{Privacy} \ErrorTok{preserved!}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\hypertarget{lawful-disclosure-threshold-governance}{%
+\paragraph{6.2.5 Lawful Disclosure \& Threshold
+Governance}\label{lawful-disclosure-threshold-governance}}
+
+\textbf{Selective Disclosure Protocol}:
+
+Enterprises can optionally enable compliance mode to meet regulatory
+requirements (e.g., FATF Travel Rule).
+
+\textbf{How It Works}: 1. \textbf{User Consent}: User explicitly opts
+into compliance disclosure 2. \textbf{View Key Escrow}: Encrypted view
+key stored with trusted third party (e.g., regulated custodian) 3.
+\textbf{Regulatory Request}: Authorities request transaction details via
+legal process 4. \textbf{Threshold Decryption}: M-of-N key holders
+decrypt view key (prevents single point of control) 5. \textbf{Selective
+Revelation}: Only specific transactions revealed, not entire history 6.
+\textbf{Disclosure Receipt}: ZK proof that disclosure was authorized via
+threshold governance
+
+\textbf{Example: Travel Rule Compliance}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"transaction\_id"}\FunctionTok{:} \StringTok{"qnk{-}mix{-}abc123"}\FunctionTok{,}
+  \DataTypeTok{"compliance\_mode"}\FunctionTok{:} \KeywordTok{true}\FunctionTok{,}
+  \DataTypeTok{"disclosure\_policy"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"view\_key\_escrow"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"escrow\_service\_pubkey"}\FunctionTok{:} \StringTok{"0x..."}\FunctionTok{,}
+      \DataTypeTok{"threshold\_scheme"}\FunctionTok{:} \StringTok{"3{-}of{-}5"}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{Requires} \ErrorTok{3} \ErrorTok{of} \ErrorTok{5} \ErrorTok{keyholders} \ErrorTok{to} \ErrorTok{decrypt}
+      \DataTypeTok{"keyholders"}\FunctionTok{:} \OtherTok{[}
+        \StringTok{"internal\_compliance\_officer"}\OtherTok{,}
+        \StringTok{"external\_auditor\_pwc"}\OtherTok{,}
+        \StringTok{"legal\_counsel"}\OtherTok{,}
+        \StringTok{"independent\_trustee\_1"}\OtherTok{,}
+        \StringTok{"independent\_trustee\_2"}
+      \OtherTok{]}
+    \FunctionTok{\},}
+    \DataTypeTok{"jurisdiction"}\FunctionTok{:} \StringTok{"US"}\FunctionTok{,}
+    \DataTypeTok{"retention\_period\_days"}\FunctionTok{:} \DecValTok{2555}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{7} \ErrorTok{years} \ErrorTok{(US} \ErrorTok{AML} \ErrorTok{requirement)}
+    \DataTypeTok{"disclosure\_sla\_hours"}\FunctionTok{:} \DecValTok{24}  \ErrorTok{//} \ErrorTok{Respond} \ErrorTok{to} \ErrorTok{lawful} \ErrorTok{requests} \ErrorTok{within} \DecValTok{24} \ErrorTok{hours}
+  \FunctionTok{\},}
+  \DataTypeTok{"user\_consent\_signature"}\FunctionTok{:} \StringTok{"0xABCDEF..."}\FunctionTok{,}
+  \DataTypeTok{"user\_consent\_timestamp"}\FunctionTok{:} \StringTok{"2025{-}10{-}22T12:00:00Z"}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Lawful Disclosure SLOs} (Service Level Objectives): -
+\textbf{\textless24 hour response} to valid legal process (subpoena,
+court order, warrant) - Threshold governance prevents unilateral access
+- Disclosure audit trail (who, what, when, legal authority)
+
+\textbf{Privacy Guarantee}: Non-compliance users' transactions remain
+fully private (zero-knowledge). Compliance mode is opt-in only.
+
+\hypertarget{audit-transparency}{%
+\subsubsection{6.3 Audit \& Transparency}\label{audit-transparency}}
+
+\textbf{On-Chain Verification}: - All mixing pools publish cryptographic
+commitments - ZK-STARK proofs verifiable by anyone - No trusted setup
+required
+
+\textbf{Open-Source Components}: - Core cryptographic libraries (ring
+signatures, ZK proofs) - API client SDKs (JavaScript, Python, Rust) -
+Compliance disclosure protocol
+
+\textbf{Security Audits}: - Annual third-party security audits - Bug
+bounty program (\$10,000-\$100,000 rewards) - Public disclosure of
+findings (after remediation)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{performance-benchmarks}{%
+\subsection{7. Performance Benchmarks}\label{performance-benchmarks}}
+
+\hypertarget{latency-measurements}{%
+\subsubsection{7.1 Latency Measurements}\label{latency-measurements}}
+
+\textbf{Test Environment}: AWS c5.xlarge instances, global deployment
+
+\begin{longtable}[]{@{}llll@{}}
+\toprule
+Operation & P50 Latency & P95 Latency & P99 Latency \\
+\midrule
+\endhead
+Tor Circuit Establishment & 1.2s & 2.8s & 4.5s \\
+Ring Signature Generation & 45ms & 120ms & 250ms \\
+Stealth Address Creation & 5ms & 12ms & 25ms \\
+Transaction Mixing (standard) & 15s & 30s & 45s \\
+Transaction Mixing (maximum) & 45s & 90s & 120s \\
+ZK-STARK Proof Generation & 180ms & 350ms & 600ms \\
+ZK-STARK Verification & 25ms & 50ms & 80ms \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{throughput-benchmarks}{%
+\subsubsection{7.2 Throughput Benchmarks}\label{throughput-benchmarks}}
+
+\textbf{Mixing Service Capacity} (single datacenter): - \textbf{Standard
+privacy}: 500 transactions/minute - \textbf{Maximum privacy}: 150
+transactions/minute
+
+\textbf{API Gateway Throughput}: - \textbf{Professional tier}: 10,000
+requests/second - \textbf{Enterprise tier}: 50,000 requests/second
+
+\textbf{Network Scalability}: - Current node count: \textbf{1,200+
+nodes} - Transaction propagation time: \textbf{\textless2 seconds} (95th
+percentile) - Global message propagation latency (P2P overlay):
+\textbf{\textless5 seconds}
+
+\hypertarget{cost-efficiency}{%
+\subsubsection{7.3 Cost Efficiency}\label{cost-efficiency}}
+
+\textbf{Comparison with Competitors}:
+
+\begin{longtable}[]{@{}llll@{}}
+\toprule
+Service & Q-NarwhalKnight PaaS & Tornado Cash & Zcash Shielded \\
+\midrule
+\endhead
+Mixing 1 BTC & \$60 (0.1\%) & \$37 (0.05\%) & N/A (on-chain) \\
+Mixing 10 ETH & \$30 (0.1\%) & \$25 (0.05\%) & N/A \\
+Ring Signature & \$0.01 & N/A & N/A \\
+ZK-STARK Proof & \$0.10 & N/A & N/A \\
+Tor Relay (100 MB) & \$1.00 & N/A & N/A \\
+\bottomrule
+\end{longtable}
+
+\textbf{Note}: Q-NarwhalKnight higher cost justified by: - Cross-chain
+support - Quantum resistance - Enterprise SLAs - Compliance features
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{use-cases}{%
+\subsection{8. Use Cases}\label{use-cases}}
+
+\hypertarget{bitcoin-privacy-enhancement}{%
+\subsubsection{8.1 Bitcoin Privacy
+Enhancement}\label{bitcoin-privacy-enhancement}}
+
+\textbf{Problem}: Bitcoin's transparent ledger enables tracking of all
+transactions
+
+\textbf{Solution}: Bitcoin wallets integrate Q-NarwhalKnight PaaS
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Bitcoin wallet integration example}
+\KeywordTok{const}\NormalTok{ qnkClient }\OperatorTok{=} \KeywordTok{new} \FunctionTok{QNarwhalKnightSDK}\NormalTok{(\{ }\DataTypeTok{apiKey}\OperatorTok{:} \StringTok{\textquotesingle{}your\_api\_key\textquotesingle{}}\NormalTok{ \})}\OperatorTok{;}
+
+\CommentTok{// User wants to send 0.5 BTC privately}
+\KeywordTok{const}\NormalTok{ privateTx }\OperatorTok{=} \ControlFlowTok{await}\NormalTok{ qnkClient}\OperatorTok{.}\FunctionTok{mixBitcoinTransaction}\NormalTok{(\{}
+  \DataTypeTok{from}\OperatorTok{:} \StringTok{\textquotesingle{}bc1q...\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{to}\OperatorTok{:} \StringTok{\textquotesingle{}bc1q...\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}0.5 BTC\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{privacyLevel}\OperatorTok{:} \StringTok{\textquotesingle{}high\textquotesingle{}}
+\NormalTok{\})}\OperatorTok{;}
+
+\CommentTok{// Broadcast via Tor}
+\ControlFlowTok{await}\NormalTok{ qnkClient}\OperatorTok{.}\FunctionTok{broadcastViaTor}\NormalTok{(privateTx)}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Benefits}: - ✅ IP address hidden (Tor) - ✅ Transaction origin
+unlinkable (mixing) - ✅ No address reuse (stealth addresses)
+
+\hypertarget{ethereum-mev-protection}{%
+\subsubsection{8.2 Ethereum MEV
+Protection}\label{ethereum-mev-protection}}
+
+\textbf{Problem}: Frontrunning bots extract value from user transactions
+(\$500M+ annually)
+
+\textbf{Solution}: Submit transactions through Q-NarwhalKnight Tor relay
++ Private Relay Network
+
+\textbf{Technical Approach}: - \textbf{Tor Layer}: Hide originating IP
+address - \textbf{Private Relays}: Integration with MEV-Share, Flashbots
+Protect, bloXroute, Blocknative - \textbf{Randomized Timing}: Introduce
+jitter to prevent timing correlation attacks
+
+\textbf{Implementation}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Ethereum DEX trade with MEV protection}
+\KeywordTok{const}\NormalTok{ trade }\OperatorTok{=} \ControlFlowTok{await}\NormalTok{ uniswap}\OperatorTok{.}\FunctionTok{swapExactTokensForTokens}\NormalTok{(}\OperatorTok{...}\NormalTok{)}\OperatorTok{;}
+
+\CommentTok{// Route through Q{-}NarwhalKnight PaaS with private relay}
+\KeywordTok{const}\NormalTok{ protectedTrade }\OperatorTok{=} \ControlFlowTok{await}\NormalTok{ qnkClient}\OperatorTok{.}\FunctionTok{protectFromMEV}\NormalTok{(\{}
+  \DataTypeTok{chain}\OperatorTok{:} \StringTok{\textquotesingle{}ethereum\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{transaction}\OperatorTok{:}\NormalTok{ trade}\OperatorTok{,}
+  \DataTypeTok{private\_relay}\OperatorTok{:}\NormalTok{ \{}
+    \DataTypeTok{provider}\OperatorTok{:} \StringTok{\textquotesingle{}flashbots\textquotesingle{}}\OperatorTok{,}  \CommentTok{// Options: flashbots, mev{-}share, bloxroute, blocknative}
+    \DataTypeTok{submission\_mode}\OperatorTok{:} \StringTok{\textquotesingle{}randomized\_timing\textquotesingle{}}\OperatorTok{,}  \CommentTok{// Introduce 0{-}5 second random delay}
+    \DataTypeTok{rpc\_endpoint}\OperatorTok{:} \StringTok{\textquotesingle{}https://rpc.flashbots.net\textquotesingle{}}  \CommentTok{// Or bloXroute, etc.}
+\NormalTok{  \}}\OperatorTok{,}
+  \DataTypeTok{tor\_relay}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,}  \CommentTok{// Submit via Tor for IP anonymity}
+  \DataTypeTok{ring\_signature}\OperatorTok{:} \KeywordTok{false}  \CommentTok{// Optional: quantum{-}resistant authorization}
+\NormalTok{\})}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Private Relay Providers Supported}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.2083}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.3125}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1875}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1250}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1667}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Provider
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+MEV Protection
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Latency
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Cost
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Status
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Flashbots Protect} & ✅ Strong & \textasciitilde500ms & Free &
+✅ Integrated \\
+\textbf{MEV-Share} & ✅ Profit sharing & \textasciitilde400ms & \%
+rebate & ✅ Integrated \\
+\textbf{bloXroute} & ✅ Enterprise & \textasciitilde300ms & \$99/mo & 📋
+Planned Q1 2026 \\
+\textbf{Blocknative} & ✅ Gas optimization & \textasciitilde350ms &
+Custom & 📋 Planned Q1 2026 \\
+\bottomrule
+\end{longtable}
+
+\textbf{Benefits}: - ✅ Transaction origin hidden (Tor + private relay
+prevents IP-based targeting) - ✅ Mempool bypass (transactions sent
+directly to block builders via private channels) - ✅ Randomized timing
+(0-5 second jitter prevents timing correlation) - ✅ Optional profit
+sharing (MEV-Share rebates extraction value to users) - ✅ Ring
+signature authorization (experimental, full quantum-resistant privacy)
+
+\hypertarget{cross-chain-atomic-swaps}{%
+\subsubsection{8.3 Cross-Chain Atomic
+Swaps}\label{cross-chain-atomic-swaps}}
+
+\textbf{Problem}: Swapping BTC ↔ ETH reveals both wallet addresses
+
+\textbf{Solution}: Privacy-preserving atomic swaps
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Swap 1 BTC for 25 ETH privately}
+\KeywordTok{const}\NormalTok{ swap }\OperatorTok{=} \ControlFlowTok{await}\NormalTok{ qnkClient}\OperatorTok{.}\FunctionTok{createAtomicSwap}\NormalTok{(\{}
+  \DataTypeTok{chainA}\OperatorTok{:}\NormalTok{ \{}
+    \DataTypeTok{network}\OperatorTok{:} \StringTok{\textquotesingle{}bitcoin\textquotesingle{}}\OperatorTok{,}
+    \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}1 BTC\textquotesingle{}}\OperatorTok{,}
+    \DataTypeTok{stealthAddress}\OperatorTok{:} \KeywordTok{true}
+\NormalTok{  \}}\OperatorTok{,}
+  \DataTypeTok{chainB}\OperatorTok{:}\NormalTok{ \{}
+    \DataTypeTok{network}\OperatorTok{:} \StringTok{\textquotesingle{}ethereum\textquotesingle{}}\OperatorTok{,}
+    \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}25 ETH\textquotesingle{}}\OperatorTok{,}
+    \DataTypeTok{stealthAddress}\OperatorTok{:} \KeywordTok{true}
+\NormalTok{  \}}\OperatorTok{,}
+  \DataTypeTok{torRelay}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,}
+  \DataTypeTok{timelock}\OperatorTok{:} \DecValTok{24}  \CommentTok{// hours}
+\NormalTok{\})}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Benefits}: - ✅ Both parties use stealth addresses - ✅ Swap
+transaction broadcast via Tor - ✅ No centralized exchange required
+
+\hypertarget{enterprise-payment-privacy}{%
+\subsubsection{8.4 Enterprise Payment
+Privacy}\label{enterprise-payment-privacy}}
+
+\textbf{Scenario}: Corporation pays suppliers without revealing
+financial relationships
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// Enterprise batch payment with privacy}
+\KeywordTok{const}\NormalTok{ payments }\OperatorTok{=} \ControlFlowTok{await}\NormalTok{ qnkClient}\OperatorTok{.}\AttributeTok{enterprise}\OperatorTok{.}\FunctionTok{batchPayments}\NormalTok{(\{}
+  \DataTypeTok{payments}\OperatorTok{:}\NormalTok{ [}
+\NormalTok{    \{ }\DataTypeTok{to}\OperatorTok{:} \StringTok{\textquotesingle{}supplier1\textquotesingle{}}\OperatorTok{,} \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}100000 USDC\textquotesingle{}}\OperatorTok{,} \DataTypeTok{chain}\OperatorTok{:} \StringTok{\textquotesingle{}ethereum\textquotesingle{}}\NormalTok{ \}}\OperatorTok{,}
+\NormalTok{    \{ }\DataTypeTok{to}\OperatorTok{:} \StringTok{\textquotesingle{}supplier2\textquotesingle{}}\OperatorTok{,} \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}75000 USDC\textquotesingle{}}\OperatorTok{,} \DataTypeTok{chain}\OperatorTok{:} \StringTok{\textquotesingle{}ethereum\textquotesingle{}}\NormalTok{ \}}\OperatorTok{,}
+\NormalTok{    \{ }\DataTypeTok{to}\OperatorTok{:} \StringTok{\textquotesingle{}supplier3\textquotesingle{}}\OperatorTok{,} \DataTypeTok{amount}\OperatorTok{:} \StringTok{\textquotesingle{}50000 USDC\textquotesingle{}}\OperatorTok{,} \DataTypeTok{chain}\OperatorTok{:} \StringTok{\textquotesingle{}ethereum\textquotesingle{}}\NormalTok{ \}}
+\NormalTok{  ]}\OperatorTok{,}
+  \DataTypeTok{privacyLevel}\OperatorTok{:} \StringTok{\textquotesingle{}maximum\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{complianceMode}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,}  \CommentTok{// Enable selective disclosure}
+  \DataTypeTok{regulatoryJurisdiction}\OperatorTok{:} \StringTok{\textquotesingle{}US\textquotesingle{}}
+\NormalTok{\})}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Benefits}: - ✅ Suppliers cannot see other payment amounts - ✅
+Competitors cannot analyze spending patterns - ✅ Compliant with FATF
+Travel Rule (selective disclosure)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{competitive-analysis}{%
+\subsection{9. Competitive Analysis}\label{competitive-analysis}}
+
+\hypertarget{feature-comparison-matrix}{%
+\subsubsection{9.1 Feature Comparison
+Matrix}\label{feature-comparison-matrix}}
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.1364}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.3182}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.2121}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.1061}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.1061}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 10\tabcolsep) * \real{0.1212}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Feature
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Q-NarwhalKnight PaaS
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Tornado Cash
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Aztec
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Zcash
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Monero
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Cross-Chain Support} & ✅ BTC, ETH, SOL & ❌ ETH only & ❌ ETH
+only & ❌ Zcash only & ❌ XMR only \\
+\textbf{Quantum Resistance} & ✅ Dilithium5 & ❌ ECDSA & ⚠️ Partial & ❌
+ECDSA & ❌ EdDSA \\
+\textbf{Tor Integration} & ✅ Native & ❌ No & ❌ No & ⚠️ Optional & ⚠️
+Optional \\
+\textbf{Enterprise SLA} & ✅ 99.9\% & ❌ No & ❌ No & ❌ No & ❌ No \\
+\textbf{Compliance Mode} & ✅ Selective Disclosure & ❌ Banned & ⚠️
+Limited & ✅ View Keys & ❌ No \\
+\textbf{ZK-STARK Proofs} & ✅ Yes & ❌ No & ✅ Yes & ❌ SNARKs only & ❌
+No \\
+\textbf{Ring Signatures} & ⚠️ Experimental & ❌ No & ❌ No & ❌ No & ✅
+Yes \\
+\textbf{Stealth Addresses} & ✅ Yes & ❌ No & ❌ No & ⚠️ t-addr only &
+✅ Yes \\
+\textbf{API Access} & ✅ RESTful & ❌ Smart contract only & ❌ SDK only
+& ❌ RPC only & ❌ RPC only \\
+\textbf{Decoy Transactions} & ✅ 15x ratio & ❌ No & ❌ No & ❌ No & ⚠️
+Limited \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{regulatory-status-legal-considerations}{%
+\subsubsection{9.2 Regulatory Status \& Legal
+Considerations}\label{regulatory-status-legal-considerations}}
+
+\textbf{⚠️ Legal Disclaimer}: The regulatory status of privacy-enhancing
+technologies varies by jurisdiction and is subject to change.
+Q-NarwhalKnight PaaS is designed with compliance controls, but licensing
+requirements depend on deployment model, feature set, and jurisdiction.
+Consult qualified legal counsel before deployment.
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.1286}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.2714}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.2429}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.3571}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Service
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Regulatory Posture
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Risk Assessment
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Licensing Considerations
+\end{minipage} \\
+\midrule
+\endhead
+Q-NarwhalKnight PaaS & \textbf{Designed for compliance} (controls
+available) & ⚠️ \textbf{Jurisdiction-dependent} & May require
+MSB/MTL/VASP licensing \\
+Tornado Cash & 🚫 \textbf{Sanctioned} (OFAC August 2022) & 🔴
+\textbf{High} & Prohibited in most jurisdictions \\
+Aztec & ⚠️ Under regulatory scrutiny & 🟡 \textbf{Medium-High} & Unclear
+licensing path \\
+Zcash & ✅ Compliant (optional shielded txs) & 🟢 \textbf{Low-Medium} &
+Generally permissible \\
+Monero & ⚠️ Delisting risk & 🟡 \textbf{Medium} & Restricted by some
+exchanges/jurisdictions \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{regulatory-compliance-matrix}{%
+\paragraph{Regulatory Compliance
+Matrix}\label{regulatory-compliance-matrix}}
+
+\textbf{United States}: - \textbf{FinCEN MSB Registration}: Likely
+required if operating as a money services business - \textbf{State MTL
+Licenses}: May require Money Transmitter Licenses in 48+ states -
+\textbf{OFAC Compliance}: Sanctions screening mandatory (KYT/KYO
+integrated) - \textbf{Travel Rule}: FATF guidance implemented via
+IVMS-101 - \textbf{Status}: Controls available; consult counsel for
+specific deployment
+
+\textbf{European Union}: - \textbf{5AMLD/6AMLD}: Compliance required for
+CASP (Crypto Asset Service Provider) designation - \textbf{MiCA
+Regulation}: Monitoring for applicability (effective 2024) -
+\textbf{GDPR}: Privacy-by-design architecture compatible -
+\textbf{Travel Rule}: IVMS-101 support for inter-VASP transfers
+\textgreater€1,000 - \textbf{Status}: Designed for compliance; CASP
+licensing may be required
+
+\textbf{United Kingdom}: - \textbf{FCA Registration}: Required for
+cryptoasset firms under MLR 2017 - \textbf{Travel Rule}: HM Treasury
+guidance compliance via TRP/IVMS-101 - \textbf{AML/CTF}: Comprehensive
+KYT/sanctions screening integrated - \textbf{Status}: Controls align
+with FCA expectations; registration required
+
+\textbf{Asia-Pacific}: - \textbf{Singapore (MAS)}: DPT Act licensing may
+apply for payment services - \textbf{Japan (FSA)}: VASP registration
+required under Payment Services Act - \textbf{Hong Kong (SFC)}:
+Licensing regime for VATPs (Virtual Asset Trading Platforms) -
+\textbf{Australia (AUSTRAC)}: DCE registration + AML/CTF compliance -
+\textbf{Status}: Jurisdiction-specific licensing required
+
+\hypertarget{q-narwhalknight-compliance-design-principles}{%
+\paragraph{Q-NarwhalKnight Compliance Design
+Principles}\label{q-narwhalknight-compliance-design-principles}}
+
+\textbf{Built-in Controls (Not Guarantees)}: - ✅ Optional compliance
+mode (users choose privacy level) - ✅ View key escrow for regulatory
+requests (threshold M-of-N) - ✅ Threshold cryptography (no single point
+of control) - ✅ Jurisdictional filtering (block sanctioned countries) -
+✅ KYT/KYO sanctions screening (OFAC, UN, EU) - ✅ Travel Rule
+infrastructure (TRP, IVMS-101, OpenVASP) - ✅ Audit trails with
+ZK-attested compliance proofs - ✅ Configurable risk policies per
+jurisdiction
+
+\textbf{Operator Responsibilities}: - ⚠️ Obtain appropriate licenses
+(MSB, MTL, VASP, etc.) - ⚠️ Implement KYC/AML procedures for high-risk
+transactions - ⚠️ Maintain compliance officer and legal counsel - ⚠️
+File SARs (Suspicious Activity Reports) per local law - ⚠️ Conduct
+regular compliance audits - ⚠️ Monitor regulatory developments
+
+\textbf{Recommended Use Cases by Risk Tolerance}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.1818}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.2909}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.3091}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 6\tabcolsep) * \real{0.2182}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Use Case
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Compliance Mode
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Licensing Needs
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Risk Level
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Enterprise-hosted (white-label)} & Mandatory & Full MSB/VASP
+suite & 🟢 Lowest \\
+\textbf{Regulated institution integration} & Recommended & Covered under
+parent licenses & 🟢 Low \\
+\textbf{Public API (KYC'd users)} & Optional but recommended & MSB +
+State MTLs & 🟡 Medium \\
+\textbf{Public API (anonymous users)} & Not enforceable & Licensing
+uncertain/risky & 🔴 High \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{market-positioning}{%
+\subsubsection{9.3 Market Positioning}\label{market-positioning}}
+
+\textbf{Target Market Segments}:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Privacy-Conscious Individuals} (Pay-Per-Use tier)
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Estimated market: 10M cryptocurrency users
+  \item
+    Conversion rate: 5\% → 500K potential customers
+  \item
+    ARPU: \$20/month → \$10M monthly revenue
+  \end{itemize}
+\item
+  \textbf{Wallets \& DApps} (Professional tier)
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Estimated market: 5,000 applications
+  \item
+    Conversion rate: 10\% → 500 customers
+  \item
+    ARPU: \$499/month → \$250K monthly revenue
+  \end{itemize}
+\item
+  \textbf{Exchanges \& Institutions} (Enterprise tier)
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Estimated market: 500 platforms
+  \item
+    Conversion rate: 20\% → 100 customers
+  \item
+    ARPU: \$1,999/month → \$200K monthly revenue
+  \end{itemize}
+\item
+  \textbf{Blockchain Networks} (White-Label tier)
+
+  \begin{itemize}
+  \tightlist
+  \item
+    Estimated market: 50 major chains
+  \item
+    Conversion rate: 10\% → 5 customers
+  \item
+    ARPU: \$9,999/month → \$50K monthly revenue
+  \end{itemize}
+\end{enumerate}
+
+\textbf{Total Addressable Market (TAM)}: \$10.5M monthly revenue ≈
+\textbf{\$126M annual revenue}
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{roadmap}{%
+\subsection{10. Roadmap}\label{roadmap}}
+
+\hypertarget{phase-1-foundation-q4-2025}{%
+\subsubsection{Phase 1: Foundation (Q4 2025)
+✅}\label{phase-1-foundation-q4-2025}}
+
+\textbf{Status}: Complete
+
+\begin{itemize}
+\tightlist
+\item
+  ✅ Core privacy infrastructure (Tor, mixing, ring signatures)
+\item
+  ✅ RESTful API with authentication
+\item
+  ✅ Bitcoin \& Ethereum transaction support
+\item
+  ✅ Pay-Per-Use tier launch
+\end{itemize}
+
+\hypertarget{phase-2-enterprise-features-q1-2026}{%
+\subsubsection{Phase 2: Enterprise Features (Q1 2026)
+🔄}\label{phase-2-enterprise-features-q1-2026}}
+
+\textbf{Status}: In Progress
+
+\begin{itemize}
+\tightlist
+\item
+  🔄 Professional \& Enterprise tier launch
+\item
+  🔄 Compliance mode (selective disclosure)
+\item
+  🔄 Batch processing API
+\item
+  🔄 Solana transaction support
+\item
+  🔄 SDKs (JavaScript, Python, Rust)
+\end{itemize}
+
+\hypertarget{phase-3-advanced-cryptography-q2-2026}{%
+\subsubsection{Phase 3: Advanced Cryptography (Q2 2026)
+📋}\label{phase-3-advanced-cryptography-q2-2026}}
+
+\textbf{Planned Features}: - Recursive ZK-STARK proofs (aggregate
+multiple proofs) - Confidential transactions (hide amounts, not just
+senders) - Verifiable delay functions (VDF) for fairness - Lattice-based
+VRF (quantum-resistant randomness)
+
+\hypertarget{phase-4-global-scale-q3-2026}{%
+\subsubsection{Phase 4: Global Scale (Q3 2026)
+📋}\label{phase-4-global-scale-q3-2026}}
+
+\textbf{Planned Features}: - Multi-region deployment (US, EU, Asia) -
+10,000+ node network - 10,000 transactions/minute mixing capacity -
+White-Label tier launch
+
+\hypertarget{phase-5-quantum-era-q4-2026}{%
+\subsubsection{Phase 5: Quantum Era (Q4 2026+)
+📋}\label{phase-5-quantum-era-q4-2026}}
+
+\textbf{Future-Proofing}: - Phase 2 cryptography (Falcon1024, NTRUPrime)
+- Quantum Key Distribution (QKD) integration - Post-quantum Tor
+(Noise-KK with Kyber) - Quantum-resistant atomic swaps
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\hypertarget{conclusion}{%
+\subsection{Conclusion}\label{conclusion}}
+
+Q-NarwhalKnight Privacy-as-a-Service represents a \textbf{paradigm
+shift} in blockchain privacy:
+
+\textbf{Traditional Approach}: Privacy features built into individual
+chains (Zcash, Monero) \textbf{Q-NarwhalKnight Approach}:
+\textbf{Universal privacy layer} serving all blockchains via API
+
+\textbf{Key Advantages}: 1. \textbf{Cross-Chain}: Works with Bitcoin,
+Ethereum, Solana, and future chains 2. \textbf{Quantum-Resistant}:
+Future-proof cryptography (Dilithium5, Kyber1024) 3.
+\textbf{Enterprise-Ready}: SLA guarantees, compliance features,
+dedicated support 4. \textbf{Economically Sustainable}: Pay-per-use +
+subscription revenue model
+
+\textbf{Market Opportunity}: - \$126M annual revenue potential (TAM) -
+First-mover advantage in cross-chain privacy - Regulatory compliant
+(avoids Tornado Cash fate)
+
+\textbf{Call to Action}: - \textbf{Developers}: Integrate
+Q-NarwhalKnight PaaS SDK into your wallet/DApp - \textbf{Enterprises}:
+Schedule demo for Enterprise tier onboarding - \textbf{Blockchain
+Networks}: Explore white-label privacy infrastructure
+
+\textbf{Learn More}: - API Documentation:
+https://docs.qnarwhalknight.com/paas - Developer Portal:
+https://developers.qnarwhalknight.com - Enterprise Sales:
+enterprise@qnarwhalknight.com
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix A: Benchmark Methodology}
+
+All performance benchmarks in Section 7 were conducted using
+standardized methodology:
+
+\textbf{Hardware Configuration}: - \textbf{CPU}: AWS c5.xlarge (4 vCPUs,
+Intel Xeon Platinum 8124M @ 3.0 GHz) - \textbf{RAM}: 8 GB DDR4 -
+\textbf{Storage}: 100 GB gp3 SSD (3000 IOPS, 125 MB/s throughput) -
+\textbf{Network}: 10 Gbps network interface - \textbf{OS}: Ubuntu 22.04
+LTS (Linux kernel 5.15)
+
+\textbf{Test Environment}: - \textbf{Deployment}: Multi-region
+(us-east-1, eu-west-1, ap-southeast-1) - \textbf{Load Balancer}:
+Application Load Balancer (ALB) with TLS termination -
+\textbf{Database}: PostgreSQL 15 (db.m5.large, 1000 IOPS provisioned) -
+\textbf{Caching}: Redis 7.0 (cache.m5.large) - \textbf{Monitoring}:
+Prometheus + Grafana
+
+\textbf{Benchmark Parameters}:
+
+\textbf{Tor Circuit Establishment}: - Tor version: 0.4.7.13 (arti
+embedded client) - Circuit type: 3-hop circuits (guard → middle → exit)
+- Country exclusions: None (baseline test) - Quantum seeding: Enabled
+(QRNG circuit selection) - Measurement: Time from \texttt{CreateCircuit}
+call to \texttt{CircuitReady} event - Sample size: 10,000 circuit
+establishments - Test duration: 24 hours (continuous monitoring)
+
+\textbf{Ring Signature Generation}: - Algorithm: Lattice-based linkable
+ring signatures (experimental) - Ring sizes tested: 8, 16, 32, 64
+members - Reported metrics: Ring size 16 (default) - Message size: 32
+bytes (SHA-256 hash) - Concurrency: Single-threaded (no parallelization)
+- Sample size: 100,000 signatures
+
+\textbf{Transaction Mixing}: - Mixing pool sizes: 8, 16, 32 participants
+- Reported metrics: 16 participants (standard) - Decoy ratio: 15 decoys
+per participant - Privacy level: ``standard'' (not ``maximum'') -
+Includes: Network latency + Tor relay + mixing rounds + ZK proof
+generation + broadcast - Does NOT include: On-chain confirmation time
+(blockchain-dependent) - Sample size: 5,000 mixing rounds
+
+\textbf{ZK-STARK Proof Generation}: - Proof type: STARK (no trusted
+setup) - Circuit type: \texttt{balance\_in\_range} (most common use
+case) - Circuit complexity: \textasciitilde10,000 constraints - Security
+level: 128-bit - Prover implementation: Winterfell library v0.6 - Field:
+64-bit prime field (2\^{}64 - 2\^{}32 + 1) - Batch size: 1 proof per
+measurement (no batching) - Sample size: 50,000 proofs
+
+\textbf{API Gateway Throughput}: - Load testing tool: k6 (v0.45.0) -
+Test scenario: Mixed workload (50\% reads, 30\% mixing, 20\% signature
+gen) - Request distribution: Zipfian (realistic traffic pattern) -
+Authentication: Pre-generated API keys (minimal overhead) - TLS: TLS 1.3
+with ChaCha20-Poly1305 - Measurement: Requests/second at P95 latency
+\textless{} 500ms - Test duration: 1 hour sustained load
+
+\textbf{Network Scalability}: - Node distribution: 1,200 nodes across 50
+geographic locations - Node hardware: Mixture of c5.large (60\%),
+c5.xlarge (30\%), c5.2xlarge (10\%) - Transaction propagation: Gossipsub
+with D=6, D\_low=4, D\_high=12 - Measurement: Time from first broadcast
+to 95\% node reception - Sample size: 10,000 transactions
+
+\textbf{Performance Number Interpretation}: - \textbf{P50 (median)}:
+50\% of operations complete within this time - \textbf{P95}: 95\% of
+operations complete within this time (SLA basis) - \textbf{P99}: 99\% of
+operations complete within this time (outlier detection)
+
+\textbf{Inclusions \& Exclusions}: - ✅ \textbf{Includes}: Network
+latency, Tor relay overhead, cryptographic operations, database queries
+- ✅ \textbf{Includes}: TLS handshake overhead (amortized across
+requests) - ❌ \textbf{Excludes}: On-chain confirmation times
+(blockchain-dependent) - ❌ \textbf{Excludes}: Client-side processing
+(wallet signature generation, etc.) - ❌ \textbf{Excludes}: External API
+calls (Chainalysis KYT, etc.)
+
+\textbf{Reproducibility}: - Benchmark scripts:
+https://github.com/q-narwhalknight/paas-benchmarks - Dataset: Synthetic
+transaction data (no real user data) - Environment setup:
+Infrastructure-as-Code (Terraform scripts provided)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix B: Cryptographic Specifications}
+
+\textbf{Dilithium5 Parameters}: - Security level: NIST Level 5 (256-bit
+quantum security) - Public key size: 2,592 bytes - Signature size: 4,595
+bytes - Signing time: \textasciitilde1.5ms - Verification time:
+\textasciitilde0.5ms
+
+\textbf{Kyber1024 Parameters}: - Security level: NIST Level 5 - Public
+key size: 1,568 bytes - Ciphertext size: 1,568 bytes - Encapsulation
+time: \textasciitilde0.3ms - Decapsulation time: \textasciitilde0.4ms
+
+\textbf{ZK-STARK Proof Parameters}: - Security level: 128-bit - Proof
+size: \textasciitilde45 KB (typical) - Prover time: \textasciitilde250ms
+- Verifier time: \textasciitilde50ms - No trusted setup
+
+\textbf{Appendix C: Enhanced Kademlia DHT Security}
+
+\textbf{Issue}: Standard Kademlia DHT with proof-of-work peer IDs can be
+gamed via precomputed vanity IDs, and Ed25519-only peer IDs are not
+quantum-resistant.
+
+\textbf{Solution}: Hybrid Peer Identity System
+
+\textbf{Hybrid Peer ID Construction}:
+
+\begin{verbatim}
+peer_id = SHA3-256(ed25519_pubkey || dilithium5_pubkey || resource_proof)
+\end{verbatim}
+
+\textbf{Components}: 1. \textbf{Ed25519 Public Key} (32 bytes):
+Classical signature capability 2. \textbf{Dilithium5 Public Key} (2,592
+bytes): Post-quantum signature capability 3. \textbf{Resource Proof}
+(variable): Proof of bandwidth + uptime (not just PoW)
+
+\textbf{Resource Proof Requirements}:
+
+Instead of simple hashcash proof-of-work (which can be precomputed),
+Q-NarwhalKnight requires:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"resource\_proof"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"bandwidth\_test"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"upload\_mbps"}\FunctionTok{:} \FloatTok{10.5}\FunctionTok{,}
+      \DataTypeTok{"download\_mbps"}\FunctionTok{:} \FloatTok{25.3}\FunctionTok{,}
+      \DataTypeTok{"latency\_ms"}\FunctionTok{:} \DecValTok{45}\FunctionTok{,}
+      \DataTypeTok{"test\_server"}\FunctionTok{:} \StringTok{"qnk{-}bw{-}test{-}001.example.com"}\FunctionTok{,}
+      \DataTypeTok{"test\_timestamp"}\FunctionTok{:} \StringTok{"2025{-}10{-}22T12:34:56Z"}\FunctionTok{,}
+      \DataTypeTok{"server\_signature"}\FunctionTok{:} \StringTok{"base64\_signature"}
+    \FunctionTok{\},}
+    \DataTypeTok{"uptime\_proof"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"node\_start\_time"}\FunctionTok{:} \StringTok{"2025{-}10{-}15T00:00:00Z"}\FunctionTok{,}
+      \DataTypeTok{"consensus\_participated\_rounds"}\FunctionTok{:} \DecValTok{12500}\FunctionTok{,}
+      \DataTypeTok{"peer\_endorsements"}\FunctionTok{:} \OtherTok{[}
+        \FunctionTok{\{}\DataTypeTok{"peer\_id"}\FunctionTok{:} \StringTok{"abc123..."}\FunctionTok{,} \DataTypeTok{"endorsement\_sig"}\FunctionTok{:} \StringTok{"..."}\FunctionTok{\}}\OtherTok{,}
+        \FunctionTok{\{}\DataTypeTok{"peer\_id"}\FunctionTok{:} \StringTok{"def456..."}\FunctionTok{,} \DataTypeTok{"endorsement\_sig"}\FunctionTok{:} \StringTok{"..."}\FunctionTok{\}}
+      \OtherTok{]}
+    \FunctionTok{\},}
+    \DataTypeTok{"stake\_proof"}\FunctionTok{:} \FunctionTok{\{}
+      \DataTypeTok{"staked\_qnk"}\FunctionTok{:} \StringTok{"1000.0"}\FunctionTok{,}
+      \DataTypeTok{"stake\_address"}\FunctionTok{:} \StringTok{"qnk1..."}\FunctionTok{,}
+      \DataTypeTok{"stake\_duration\_days"}\FunctionTok{:} \DecValTok{90}
+    \FunctionTok{\}}
+  \FunctionTok{\}}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Resource Proof Validation}: - Bandwidth test must be recent
+(\textless24 hours) and signed by authorized test server - Uptime proof
+validated against consensus history (can't be faked) - Peer endorsements
+require established nodes to vouch for newcomers - Stake proof
+(optional): Economic cost of Sybil attacks
+
+\textbf{Peer ID Rotation Without Identity Loss}:
+
+Ed25519 keys can be rotated for operational security while maintaining
+PQ identity:
+
+\begin{verbatim}
+new_peer_id = SHA3-256(new_ed25519_pubkey || SAME_dilithium5_pubkey || resource_proof)
+
+Certificate signed by old key:
+cert = Sign_old_ed25519("Rotate to: " || new_ed25519_pubkey || timestamp)
+\end{verbatim}
+
+Network recognizes identity continuity via unchanged Dilithium5 key.
+
+\textbf{Sybil Resistance Analysis}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.1569}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4118}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4314}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Attack
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Standard PoW Kademlia
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Q-NarwhalKnight Hybrid
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{Precomputed vanity IDs} & ✅ Easy (GPU farms) & ❌ Blocked
+(bandwidth/uptime tests) \\
+\textbf{Instant Sybil nodes} & ✅ Easy (spin up VMs) & ❌ Blocked
+(uptime proof required) \\
+\textbf{Eclipse attack} & ⚠️ Moderate difficulty & ❌ Very difficult
+(diverse bootstrap + endorsements) \\
+\textbf{Resource exhaustion} & ⚠️ Moderate cost & ❌ High cost (stake
+requirement) \\
+\bottomrule
+\end{longtable}
+
+\textbf{Migration Path}: - \textbf{Phase 0}: Ed25519-only peer IDs
+(current) - \textbf{Phase 1}: Hybrid Ed25519 + Dilithium5 (in progress)
+- \textbf{Phase 2}: Dilithium5-primary, Ed25519 for backwards compat -
+\textbf{Phase 3}: Pure Dilithium5 peer IDs (post-quantum era)
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix D: API Idempotency \& Error Handling}
+
+\textbf{Problem}: Without idempotency keys, network failures can cause
+duplicate transactions or lost requests.
+
+\textbf{Solution}: RFC-compliant idempotency keys + standardized error
+model (RFC 9457 Problem Details)
+
+\hypertarget{idempotency-key-protocol}{%
+\paragraph{Idempotency Key Protocol}\label{idempotency-key-protocol}}
+
+\textbf{Client Request}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/mix/submit}
+\NormalTok{Authorization: MultiSig v=1; ...}
+\NormalTok{Idempotency{-}Key: client{-}generated{-}uuid{-}12345}
+\NormalTok{Content{-}Type: application/json}
+
+\NormalTok{\{}
+\NormalTok{  "chain": "ethereum",}
+\NormalTok{  "transaction\_data": \{...\}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Server Behavior}: 1. Store \texttt{Idempotency-Key} + request
+hash + response in database 2. If same key sent within 24 hours → return
+cached response (no duplicate operation) 3. If same key with different
+request body → return \texttt{409\ Conflict} 4. Key expires after 24
+hours (client should retry with new key)
+
+\textbf{Response Headers}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{HTTP/1.1 200 OK}
+\NormalTok{Idempotency{-}Key: client{-}generated{-}uuid{-}12345}
+\NormalTok{X{-}Idempotency{-}Status: hit  // "miss" for first request, "hit" for repeated requests}
+\NormalTok{X{-}Original{-}Request{-}Time: 2025{-}10{-}22T12:34:56Z}
+\NormalTok{Content{-}Type: application/json}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Idempotency Guarantees}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3793}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3793}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2414}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Operation
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Idempotent
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Notes
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{GET} requests & ✅ Naturally idempotent & No key required \\
+\textbf{POST /mix/submit} & ✅ With key & Critical for preventing
+duplicate mixes \\
+\textbf{POST /ring-signature/generate} & ✅ With key & Same input → same
+signature \\
+\textbf{POST /tor/relay} & ⚠️ Partial & Data relayed once, response
+cached \\
+\textbf{POST /zk-stark/prove} & ✅ With key & Deterministic proofs \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{standardized-error-model-rfc-9457}{%
+\paragraph{Standardized Error Model (RFC
+9457)}\label{standardized-error-model-rfc-9457}}
+
+\textbf{Error Response Format}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{HTTP/1.1 400 Bad Request}
+\NormalTok{Content{-}Type: application/problem+json}
+
+\NormalTok{\{}
+\NormalTok{  "type": "https://docs.qnarwhalknight.com/errors/insufficient{-}balance",}
+\NormalTok{  "title": "Insufficient QNK Balance",}
+\NormalTok{  "status": 400,}
+\NormalTok{  "detail": "Your account has 0.5 QNK but this operation requires 1.0 QNK",}
+\NormalTok{  "instance": "/api/v1/privacy/mix/submit/request{-}abc123",}
+\NormalTok{  "balance\_qnk": "0.5",}
+\NormalTok{  "required\_qnk": "1.0",}
+\NormalTok{  "top\_up\_url": "https://exchange.example.com/buy{-}qnk",}
+\NormalTok{  "trace\_id": "7d8e9f0a{-}1b2c{-}3d4e{-}5f6a{-}7b8c9d0e1f2"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Standard Error Types}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2973}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3514}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3514}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Error Type
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+HTTP Status
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Description
+\end{minipage} \\
+\midrule
+\endhead
+\texttt{insufficient-balance} & 400 & Not enough QNK tokens \\
+\texttt{rate-limit-exceeded} & 429 & Too many requests \\
+\texttt{tor-circuit-failed} & 503 & Cannot establish Tor circuit \\
+\texttt{mixing-pool-timeout} & 504 & Mixing pool did not fill in time \\
+\texttt{idempotency-mismatch} & 409 & Same key, different request
+body \\
+\texttt{authentication-failed} & 401 & Signature verification failed \\
+\texttt{authorization-required} & 403 & API key lacks permissions \\
+\texttt{sanctions-screening-failed} & 451 & Address blocked by
+compliance policy \\
+\texttt{invalid-request-format} & 422 & Malformed request body \\
+\bottomrule
+\end{longtable}
+
+\textbf{Request Canonicalization} (for idempotency):
+
+To ensure identical requests have identical hashes:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{// 1. Sort JSON keys alphabetically}
+\KeywordTok{const}\NormalTok{ canonical\_body }\OperatorTok{=} \BuiltInTok{JSON}\OperatorTok{.}\FunctionTok{stringify}\NormalTok{(request\_body}\OperatorTok{,} \BuiltInTok{Object}\OperatorTok{.}\FunctionTok{keys}\NormalTok{(request\_body)}\OperatorTok{.}\FunctionTok{sort}\NormalTok{())}\OperatorTok{;}
+
+\CommentTok{// 2. Reject unknown fields}
+\KeywordTok{const}\NormalTok{ allowed\_fields }\OperatorTok{=}\NormalTok{ [}\StringTok{"chain"}\OperatorTok{,} \StringTok{"transaction\_data"}\OperatorTok{,} \StringTok{"privacy\_level"}\OperatorTok{,} \StringTok{"mixing\_parameters"}\NormalTok{]}\OperatorTok{;}
+\ControlFlowTok{for}\NormalTok{ (}\KeywordTok{const}\NormalTok{ key }\KeywordTok{in}\NormalTok{ request\_body) \{}
+  \ControlFlowTok{if}\NormalTok{ (}\OperatorTok{!}\NormalTok{allowed\_fields}\OperatorTok{.}\FunctionTok{includes}\NormalTok{(key)) \{}
+    \ControlFlowTok{throw} \KeywordTok{new} \BuiltInTok{Error}\NormalTok{(}\VerbatimStringTok{\textasciigrave{}Unknown field: }\SpecialCharTok{$\{}\NormalTok{key}\SpecialCharTok{\}}\VerbatimStringTok{\textasciigrave{}}\NormalTok{)}\OperatorTok{;}
+\NormalTok{  \}}
+\NormalTok{\}}
+
+\CommentTok{// 3. Compute SHA3{-}256 hash}
+\KeywordTok{const}\NormalTok{ request\_hash }\OperatorTok{=} \FunctionTok{SHA3\_256}\NormalTok{(canonical\_body)}\OperatorTok{;}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Job State Webhooks} (Enterprise tier):
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST https://customer{-}webhook.example.com/qnk{-}status}
+\NormalTok{Content{-}Type: application/json}
+
+\NormalTok{\{}
+\NormalTok{  "job\_id": "qnk{-}mix{-}abc123",}
+\NormalTok{  "job\_type": "transaction\_mixing",}
+\NormalTok{  "state": "broadcasting",  // queued → mixing → broadcasting → confirmed → failed}
+\NormalTok{  "state\_timestamp": "2025{-}10{-}22T12:35:30Z",}
+\NormalTok{  "previous\_state": "mixing",}
+\NormalTok{  "metadata": \{}
+\NormalTok{    "anonymity\_set\_size": 320,}
+\NormalTok{    "mixing\_pool\_id": "pool{-}eth{-}large{-}0042",}
+\NormalTok{    "estimated\_confirmation\_time": "2025{-}10{-}22T12:36:00Z"}
+\NormalTok{  \},}
+\NormalTok{  "idempotency\_key": "client{-}generated{-}uuid{-}12345"}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Webhook State Machine}:
+
+\begin{verbatim}
+queued → mixing → broadcasting → confirmed
+           ↓          ↓             ↓
+         failed ← failed ← failed
+\end{verbatim}
+
+\hypertarget{request-level-privacy-budgets}{%
+\paragraph{Request-Level Privacy
+Budgets}\label{request-level-privacy-budgets}}
+
+\textbf{Privacy Tradeoff Hints}:
+
+When a client requests ``maximum privacy,'' the API returns expected
+tradeoffs:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\FunctionTok{\{}
+  \DataTypeTok{"privacy\_level"}\FunctionTok{:} \StringTok{"maximum"}\FunctionTok{,}
+  \DataTypeTok{"estimated\_tradeoffs"}\FunctionTok{:} \FunctionTok{\{}
+    \DataTypeTok{"latency\_increase\_percent"}\FunctionTok{:} \DecValTok{200}\FunctionTok{,}  \ErrorTok{//} \ErrorTok{3×} \ErrorTok{slower} \ErrorTok{than} \ErrorTok{standard}
+    \DataTypeTok{"fee\_increase\_percent"}\FunctionTok{:} \DecValTok{50}\FunctionTok{,}       \ErrorTok{//} \ErrorTok{1.5×} \ErrorTok{more} \ErrorTok{expensive}
+    \DataTypeTok{"anonymity\_set\_increase"}\FunctionTok{:} \DecValTok{400}\FunctionTok{,}    \ErrorTok{//} \ErrorTok{4×} \ErrorTok{larger} \ErrorTok{anonymity} \ErrorTok{set}
+    \DataTypeTok{"epsilon\_privacy\_loss"}\FunctionTok{:} \FloatTok{0.7}\FunctionTok{,}      \ErrorTok{//} \ErrorTok{ε} \ErrorTok{≈} \ErrorTok{0.7} \ErrorTok{(strong} \ErrorTok{privacy)}
+    \DataTypeTok{"recommendation"}\FunctionTok{:} \StringTok{"Acceptable for high{-}value transactions"}
+  \FunctionTok{\}}
+\FunctionTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+Clients can make informed decisions about privacy vs cost/latency.
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix E: Cross-Chain Implementation Details}
+
+\hypertarget{bitcoin-psbt-flow}{%
+\paragraph{Bitcoin (PSBT Flow)}\label{bitcoin-psbt-flow}}
+
+\textbf{Partially Signed Bitcoin Transactions (BIP 174)}:
+
+\begin{verbatim}
+Step 1: Client creates PSBT
+┌─────────────────────────────────────────────┐
+│ PSBT Version 2                              │
+│ ├─ Input 0: bc1q... (1.5 BTC)              │
+│ ├─ Output 0: <stealth_addr_1> (0.7 BTC)   │
+│ ├─ Output 1: <stealth_addr_2> (0.8 BTC)   │
+│ └─ Fee: 0.0001 BTC                         │
+└─────────────────────────────────────────────┘
+
+Step 2: Submit to Q-NarwhalKnight mixing
+POST /api/v1/privacy/mix/submit
+{
+  "chain": "bitcoin",
+  "psbt_base64": "cHNidP8BAHE...==",
+  "mixing_parameters": {
+    "participants_min": 16,
+    "amount_bucket": "1.0-5.0 BTC",
+    "change_handling": "new_stealth_address"
+  }
+}
+
+Step 3: Mixing coordinator combines PSBTs
+┌───────────────────────────────────────────────┐
+│ Combined CoinJoin Transaction                 │
+│ ├─ Input 0-15: 16 participants' inputs       │
+│ ├─ Output 0-31: 32 stealth addresses         │
+│ │   (16 payments + 16 change outputs)         │
+│ └─ Fee: 0.0016 BTC (shared among 16 users)  │
+└───────────────────────────────────────────────┘
+
+Step 4: Each participant signs their input
+- Q-NarwhalKnight returns partially-signed PSBT to each client
+- Clients add their signatures (ECDSA or Schnorr for Taproot)
+- Coordinator collects all signatures
+
+Step 5: Broadcast via Tor
+- Final transaction broadcast through controlled egress relays
+- Randomized timing (0-30s delay per output)
+\end{verbatim}
+
+\textbf{Bitcoin-Specific Parameters}: - \textbf{Mixing rounds}: 2-4
+rounds (more rounds = better privacy, longer latency) - \textbf{Minimum
+participants}: 8 (standard), 16 (recommended), 32 (maximum) -
+\textbf{Amount buckets}: Enforce bucket ranges to prevent unique amount
+linkability - \textbf{Change handling}: Always create new stealth
+address for change outputs - \textbf{Fee rate selection}: Dynamic fee
+estimation (mempool.space API integration) - \textbf{RBF
+(Replace-By-Fee)}: Disabled during mixing (prevents fee sniping attacks)
+
+\hypertarget{ethereum-rlp-encoded-transactions}{%
+\paragraph{Ethereum (RLP-Encoded
+Transactions)}\label{ethereum-rlp-encoded-transactions}}
+
+\textbf{EIP-1559 Transaction Format}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{const}\NormalTok{ eth\_tx }\OperatorTok{=}\NormalTok{ \{}
+  \DataTypeTok{chainId}\OperatorTok{:} \DecValTok{1}\OperatorTok{,}  \CommentTok{// Mainnet}
+  \DataTypeTok{nonce}\OperatorTok{:} \DecValTok{42}\OperatorTok{,}
+  \DataTypeTok{maxPriorityFeePerGas}\OperatorTok{:} \StringTok{\textquotesingle{}2000000000\textquotesingle{}}\OperatorTok{,}  \CommentTok{// 2 gwei}
+  \DataTypeTok{maxFeePerGas}\OperatorTok{:} \StringTok{\textquotesingle{}50000000000\textquotesingle{}}\OperatorTok{,}         \CommentTok{// 50 gwei}
+  \DataTypeTok{gasLimit}\OperatorTok{:} \StringTok{\textquotesingle{}21000\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{to}\OperatorTok{:} \StringTok{\textquotesingle{}0x8ba1f109551bD432803012645Ac136ddd64DBA72\textquotesingle{}}\OperatorTok{,}  \CommentTok{// Recipient stealth address}
+  \DataTypeTok{value}\OperatorTok{:} \StringTok{\textquotesingle{}1500000000000000000\textquotesingle{}}\OperatorTok{,}  \CommentTok{// 1.5 ETH}
+  \DataTypeTok{data}\OperatorTok{:} \StringTok{\textquotesingle{}0x\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{accessList}\OperatorTok{:}\NormalTok{ []}\OperatorTok{,}
+  \DataTypeTok{type}\OperatorTok{:} \DecValTok{2}  \CommentTok{// EIP{-}1559}
+\NormalTok{\}}\OperatorTok{;}
+
+\CommentTok{// Submit to Q{-}NarwhalKnight}
+\NormalTok{POST }\OperatorTok{/}\NormalTok{api}\OperatorTok{/}\NormalTok{v1}\OperatorTok{/}\NormalTok{privacy}\OperatorTok{/}\NormalTok{mix}\OperatorTok{/}\NormalTok{submit}
+\NormalTok{\{}
+  \StringTok{"chain"}\OperatorTok{:} \StringTok{"ethereum"}\OperatorTok{,}
+  \StringTok{"transaction\_data"}\OperatorTok{:}\NormalTok{ eth\_tx}\OperatorTok{,}
+  \StringTok{"mixing\_parameters"}\OperatorTok{:}\NormalTok{ \{}
+    \StringTok{"ring\_signatures\_experimental"}\OperatorTok{:} \KeywordTok{false}\OperatorTok{,}  \CommentTok{// Use standard mixing}
+    \StringTok{"mev\_protection"}\OperatorTok{:}\NormalTok{ \{}
+      \StringTok{"enabled"}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,}
+      \StringTok{"private\_relay"}\OperatorTok{:} \StringTok{"flashbots"}\OperatorTok{,}
+      \StringTok{"randomized\_timing\_seconds"}\OperatorTok{:} \DecValTok{5}
+\NormalTok{    \}}\OperatorTok{,}
+    \StringTok{"eip4844\_blobs"}\OperatorTok{:} \KeywordTok{false}  \CommentTok{// Not using blob transactions}
+\NormalTok{  \}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Ethereum-Specific Considerations}: - \textbf{EIP-1559 fields}:
+Must specify \texttt{maxPriorityFeePerGas} and \texttt{maxFeePerGas} -
+\textbf{EIP-4844 blob transactions}: Supported (mixing blobs separately
+from calldata) - \textbf{Contract interactions}: Supported but privacy
+reduced (function selectors visible) - \textbf{Private relay
+integration}: Flashbots, MEV-Share, bloXroute for MEV protection -
+\textbf{Gas price oracle}: ChainLink or internal oracle for gas
+estimation - \textbf{Nonce management}: Client maintains nonce; mixing
+does not reorder transactions
+
+\hypertarget{solana-borsh-serialized-transactions}{%
+\paragraph{Solana (Borsh-Serialized
+Transactions)}\label{solana-borsh-serialized-transactions}}
+
+\textbf{Solana Transaction Structure}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\KeywordTok{const}\NormalTok{ sol\_tx }\OperatorTok{=}\NormalTok{ \{}
+  \DataTypeTok{recentBlockhash}\OperatorTok{:} \StringTok{\textquotesingle{}4sGjMW1sUnHzSxGspuhpqLDx6wiyjNtZ\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{feePayer}\OperatorTok{:} \StringTok{\textquotesingle{}sender\_pubkey\textquotesingle{}}\OperatorTok{,}
+  \DataTypeTok{instructions}\OperatorTok{:}\NormalTok{ [}
+\NormalTok{    \{}
+      \DataTypeTok{programId}\OperatorTok{:} \StringTok{\textquotesingle{}TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA\textquotesingle{}}\OperatorTok{,}  \CommentTok{// SPL Token program}
+      \DataTypeTok{keys}\OperatorTok{:}\NormalTok{ [}
+\NormalTok{        \{ }\DataTypeTok{pubkey}\OperatorTok{:} \StringTok{\textquotesingle{}sender\_token\_account\textquotesingle{}}\OperatorTok{,} \DataTypeTok{isSigner}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,} \DataTypeTok{isWritable}\OperatorTok{:} \KeywordTok{true}\NormalTok{ \}}\OperatorTok{,}
+\NormalTok{        \{ }\DataTypeTok{pubkey}\OperatorTok{:} \StringTok{\textquotesingle{}recipient\_stealth\_account\textquotesingle{}}\OperatorTok{,} \DataTypeTok{isSigner}\OperatorTok{:} \KeywordTok{false}\OperatorTok{,} \DataTypeTok{isWritable}\OperatorTok{:} \KeywordTok{true}\NormalTok{ \}}\OperatorTok{,}
+\NormalTok{        \{ }\DataTypeTok{pubkey}\OperatorTok{:} \StringTok{\textquotesingle{}sender\_authority\textquotesingle{}}\OperatorTok{,} \DataTypeTok{isSigner}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,} \DataTypeTok{isWritable}\OperatorTok{:} \KeywordTok{false}\NormalTok{ \}}
+\NormalTok{      ]}\OperatorTok{,}
+      \DataTypeTok{data}\OperatorTok{:} \BuiltInTok{Buffer}\OperatorTok{.}\FunctionTok{from}\NormalTok{([}\DecValTok{3}\OperatorTok{,} \OperatorTok{...}\NormalTok{amount\_bytes])  }\CommentTok{// Transfer instruction}
+\NormalTok{    \}}
+\NormalTok{  ]}\OperatorTok{,}
+  \DataTypeTok{signatures}\OperatorTok{:}\NormalTok{ []}
+\NormalTok{\}}\OperatorTok{;}
+
+\NormalTok{POST }\OperatorTok{/}\NormalTok{api}\OperatorTok{/}\NormalTok{v1}\OperatorTok{/}\NormalTok{privacy}\OperatorTok{/}\NormalTok{mix}\OperatorTok{/}\NormalTok{submit}
+\NormalTok{\{}
+  \StringTok{"chain"}\OperatorTok{:} \StringTok{"solana"}\OperatorTok{,}
+  \StringTok{"transaction\_data"}\OperatorTok{:}\NormalTok{ borsh}\OperatorTok{.}\FunctionTok{serialize}\NormalTok{(TransactionSchema}\OperatorTok{,}\NormalTok{ sol\_tx)}\OperatorTok{,}
+  \StringTok{"mixing\_parameters"}\OperatorTok{:}\NormalTok{ \{}
+    \StringTok{"ring\_signatures\_partial"}\OperatorTok{:} \KeywordTok{true}\OperatorTok{,}  \CommentTok{// Experimental Solana ring sigs}
+    \StringTok{"priority\_fee\_lamports"}\OperatorTok{:} \DecValTok{5000}
+\NormalTok{  \}}
+\NormalTok{\}}
+\end{Highlighting}
+\end{Shaded}
+
+\textbf{Solana Limitations}: - \textbf{Ring signatures}: ⚠️ Partial
+support (not all Solana programs support custom auth) - \textbf{Mixing}:
+✅ Full support via token account mixing - \textbf{Stealth addresses}:
+✅ Full support (derived PDAs) - \textbf{Priority fees}: Required for
+timely inclusion - \textbf{Blockhash expiry}: Transactions must be
+broadcast within \textasciitilde60 seconds
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix F: Threat Model \& Abuse Handling}
+
+\hypertarget{adversary-model}{%
+\paragraph{Adversary Model}\label{adversary-model}}
+
+\textbf{In-Scope Adversaries}: 1. \textbf{Network Surveillance}
+(NSA/GCHQ-level): Passive traffic analysis, Tor deanonymization attempts
+2. \textbf{Blockchain Analytics Firms} (Chainalysis, Elliptic):
+Transaction graph analysis, heuristics 3. \textbf{Malicious Mixing
+Participants}: Sybil attacks on mixing pools, timing analysis 4.
+\textbf{Compromised Tor Nodes}: Malicious exit nodes, guard/middle
+relays 5. \textbf{Quantum Computers} (future): Attacks on ECDSA/EdDSA
+signatures
+
+\textbf{Out-of-Scope Adversaries}: 1. \textbf{Global Passive Adversary}:
+Cannot monitor all internet traffic simultaneously (unrealistic) 2.
+\textbf{Endpoint Compromise}: Keyloggers, malware on client devices (out
+of protocol scope) 3. \textbf{Social Engineering}: Phishing, extortion
+(user security responsibility)
+
+\textbf{Attack Resistance Table}:
+
+\begin{longtable}[]{@{}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.2424}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.3333}}
+  >{\raggedright\arraybackslash}p{(\columnwidth - 4\tabcolsep) * \real{0.4242}}@{}}
+\toprule
+\begin{minipage}[b]{\linewidth}\raggedright
+Attack
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Mitigation
+\end{minipage} & \begin{minipage}[b]{\linewidth}\raggedright
+Residual Risk
+\end{minipage} \\
+\midrule
+\endhead
+\textbf{IP tracking} & Tor + mDNS local-only & 🟢 Low (Tor guard
+compromise \textless1\%) \\
+\textbf{Transaction graph analysis} & Ring signatures + mixing & 🟢 Low
+(ε \textless{} 1 for max privacy) \\
+\textbf{Timing correlation} & Randomized delays & 🟡 Medium (advanced
+attackers may correlate) \\
+\textbf{Amount linkability} & Amount bucketing & 🟢 Low (uniform
+buckets) \\
+\textbf{Sybil attacks on mixing} & Resource proofs + endorsements & 🟡
+Medium (costly but possible) \\
+\textbf{MEV extraction} & Private relays + timing jitter & 🟢 Low
+(Flashbots protection) \\
+\textbf{Quantum computer attacks} & Dilithium5 + Kyber1024 & 🟢 Low
+(NIST PQC standards) \\
+\textbf{Tor exit monitoring} & End-to-end encryption & 🟢 Low (Noise
+Protocol) \\
+\textbf{Eclipse attack on DHT} & Diverse bootstrap + hybrid IDs & 🟡
+Medium (requires many resources) \\
+\bottomrule
+\end{longtable}
+
+\hypertarget{abuse-response-policy}{%
+\paragraph{Abuse Response Policy}\label{abuse-response-policy}}
+
+\textbf{Griefing Attacks} (jamming mixing pools):
+
+\textbf{Problem}: Malicious users submit transactions but never provide
+signatures, blocking pool progression.
+
+\textbf{Mitigation}: - \textbf{Deposit requirement}: Lockup 0.01 QNK per
+mixing request (refunded on completion) - \textbf{Timeout enforcement}:
+If user doesn't sign within 60 seconds, deposit forfeited -
+\textbf{Reputation system}: Track completion rate per wallet (ban
+wallets with \textless80\% completion) - \textbf{Pool isolation}:
+Separate pools for high-reputation vs new users
+
+\textbf{Spam/DoS Attacks}:
+
+\textbf{Problem}: Attacker floods API with bogus requests to exhaust
+resources.
+
+\textbf{Mitigation}: - \textbf{Proof-of-work stamps}: Anonymous tier
+requires PoW stamp (difficulty=20 bits, \textasciitilde1 second compute)
+- \textbf{Rate limiting}: Progressive backoff (1st violation: 60s ban,
+2nd: 1 hour, 3rd: 24 hours) - \textbf{API key quotas}: Enforce monthly
+request limits per tier - \textbf{DDoS protection}: Cloudflare + AWS
+Shield at edge
+
+\textbf{Example PoW Stamp}:
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\NormalTok{POST /api/v1/privacy/mix/submit}
+\NormalTok{X{-}Proof{-}Of{-}Work: nonce=123456789; difficulty=20; hash=00000abcdef...}
+\end{Highlighting}
+\end{Shaded}
+
+Server verifies:
+\texttt{SHA3-256(request\_body\ \textbar{}\textbar{}\ nonce)} has 20
+leading zero bits.
+
+\textbf{Constant-Rate Cover Traffic}:
+
+To prevent traffic analysis, Q-NarwhalKnight nodes maintain constant
+bandwidth usage:
+
+\begin{verbatim}
+Target bandwidth: 1 Mbps upload, 1 Mbps download (configurable)
+
+If real traffic < target:
+  Generate dummy traffic (encrypted random data)
+  Send to random peers via Tor circuits
+
+Adversary cannot distinguish:
+  - Real mixing transactions
+  - Dummy cover traffic
+\end{verbatim}
+
+\textbf{Bursting Rules}: - Allow bursts up to 5× target bandwidth for 60
+seconds - Sustained traffic \textgreater2× target triggers rate limiting
+- Cover traffic generation suspended during legitimate bursts
+
+\textbf{Incident Response Runbook}:
+
+\textbf{Scenario 1: Sanctions Screening Hit}
+
+\begin{verbatim}
+1. KYT API flags address as sanctioned (OFAC match)
+2. Automatically reject transaction with error code 451
+3. Log incident (address, timestamp, sanctions list)
+4. File Suspicious Activity Report (SAR) if required by jurisdiction
+5. No funds transferred (transaction never entered mixing pool)
+\end{verbatim}
+
+\textbf{Scenario 2: Mixing Pool Sybil Attack Detected}
+
+\begin{verbatim}
+1. Monitoring detects >50% of pool participants from same ASN
+2. Dissolve pool and refund deposits
+3. Ban participant peer IDs for 24 hours
+4. Adjust pool selection algorithm to enforce ASN diversity
+5. Alert security team for investigation
+\end{verbatim}
+
+\textbf{Scenario 3: Tor Exit Node Compromise Evidence}
+
+\begin{verbatim}
+1. Exit node observed tampering with traffic (TLS downgrade attempt)
+2. Blacklist exit node fingerprint
+3. Rotate all circuits using that exit
+4. Publish incident report to Tor Bad Exit list
+5. End-to-end encryption prevents data exposure
+\end{verbatim}
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Appendix G: Network Topology}
+
+\textbf{Bootstrap Nodes} (globally distributed): - US-East:
+185.182.185.227:8081 - EU-West: {[}To be announced{]} - Asia-Pacific:
+{[}To be announced{]}
+
+\textbf{Kademlia DHT Configuration}: - K-bucket size: 20 - α
+(concurrency): 3 - Replication factor: 20 - Lookup timeout: 60 seconds
+
+\textbf{Gossipsub Configuration}: - Heartbeat interval: 100ms - D
+(desired peers): 6 - D\_low: 4 - D\_high: 12 - Fanout TTL: 60 seconds
+
+\textbf{Appendix H: Legal \& Disclaimers}
+
+\textbf{Risk Disclosure}: Q-NarwhalKnight PaaS is a privacy-enhancing
+technology tool. Users are responsible for compliance with local laws
+and regulations. We do not endorse or facilitate illegal activities.
+
+\textbf{Jurisdictional Restrictions}: Service may not be available in
+all jurisdictions. Sanctioned countries blocked per OFAC regulations.
+
+\textbf{No Investment Advice}: This whitepaper is for informational
+purposes only and does not constitute investment advice.
+
+\textbf{Copyright \& License}: © 2025 Q-NarwhalKnight Foundation. All
+rights reserved. Licensed under MIT License (open-source components).
+
+\begin{center}\rule{0.5\linewidth}{0.5pt}\end{center}
+
+\textbf{Document Version}: 1.1 \textbf{Last Updated}: October 22, 2025
+\textbf{Next Review}: January 2026
+
+\end{document}

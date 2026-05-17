@@ -1,0 +1,80 @@
+import { Theme } from "theme.slint";
+
+export component SyncBar inherits Rectangle {
+    in property <bool> connected: false;
+    in property <string> current-height: "0";
+    in property <string> network-height: "0";
+    in property <float> sync-percent: 0;
+
+    height: 48px;
+    background: Theme.bg-secondary;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    // Progress bar background fill
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: parent.width * (root.sync-percent / 100.0);
+        height: parent.height;
+        background: Theme.accent-blue.with-alpha(0.12);
+        animate width { duration: 500ms; }
+    }
+
+    VerticalLayout {
+        padding: Theme.spacing-xs;
+        spacing: 2px;
+
+        // Top row: connection status + sync percentage
+        HorizontalLayout {
+            padding-left: Theme.spacing-md;
+            padding-right: Theme.spacing-md;
+            alignment: space-between;
+
+            HorizontalLayout {
+                spacing: Theme.spacing-sm;
+
+                // Connection dot
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: root.connected ? Theme.accent-green : Theme.accent-red;
+                        animate background { duration: 300ms; }
+                    }
+                }
+
+                Text {
+                    text: root.connected ? "Connected" : "Disconnected";
+                    color: root.connected ? Theme.accent-green : Theme.accent-red;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                }
+            }
+
+            Text {
+                text: root.sync-percent >= 99.9 ? "Synced" : round(root.sync-percent) + "%";
+                color: root.sync-percent >= 99.9 ? Theme.accent-green : Theme.accent-yellow;
+                font-size: Theme.font-sm;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+
+        // Bottom row: block heights
+        HorizontalLayout {
+            padding-left: Theme.spacing-md;
+            padding-right: Theme.spacing-md;
+            alignment: center;
+
+            Text {
+                text: "Block " + root.current-height + " / " + root.network-height;
+                color: Theme.text-secondary;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+            }
+        }
+    }
+}

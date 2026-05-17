@@ -1,0 +1,40 @@
+[package]
+name = "q-ivc"
+version = "0.1.0"
+edition = "2021"
+description = "Incrementally Verifiable Computation (IVC) circuits for Q-NarwhalKnight recursive SNARK bootstrap"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+ark-ff = { workspace = true }
+ark-ec = { workspace = true }
+ark-serialize = { workspace = true }
+ark-std = { workspace = true }
+ark-groth16 = { workspace = true }
+ark-r1cs-std = { workspace = true }
+ark-relations = { workspace = true }
+ark-snark = { workspace = true }
+blake3 = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# Internal: existing ZK and lattice primitives
+q-zk-snark = { path = "../q-zk-snark" }
+q-lattice-guard = { path = "../q-lattice-guard" }
+q-types = { path = "../q-types" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+# ark-r1cs-std 0.4 requires ark-ff 0.4; ark-bls12-381 0.5 uses ark-ff 0.5 — incompatible.
+# Use 0.4 here so test-only Fr matches the Field bound expected by UInt32<Fr>.
+ark-bls12-381 = "0.4"
+
+[features]
+default = []
+benchmarks = []

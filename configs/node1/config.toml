@@ -1,0 +1,36 @@
+# Node 1 Configuration - Bootstrap Leader
+[node]
+name = "node1"
+id = "12D3KooWNode1Example"
+role = "validator"
+is_bootstrap = true
+
+[network]
+listen_address = "0.0.0.0"
+p2p_port = 9001
+api_port = 8081
+metrics_port = 9091
+
+[consensus]
+algorithm = "DAG-Knight"
+round_timeout = "2.5s"
+block_time = "500ms"
+max_transactions_per_block = 1000
+
+[discovery]
+enable_mdns = true
+enable_dht = true
+bootstrap_peers = []
+
+[api]
+enable_cors = true
+max_request_size = "10MB"
+websocket_enabled = true
+sse_enabled = true
+
+[storage]
+database_path = "/data/node1"
+enable_encryption = false
+
+[logging]
+level = "info"

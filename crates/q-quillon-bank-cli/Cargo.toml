@@ -1,0 +1,67 @@
+[package]
+name = "q-quillon-bank-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "quillon-bank"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+q-types = { path = "../q-types" }
+q-quillon-bank = { path = "../q-quillon-bank" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+q-zk-stark = { path = "../q-zk-stark" }
+
+# CLI framework
+clap = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Terminal UI
+colored = "2.0"
+prettytable-rs = "0.10"
+indicatif = "0.17"
+dialoguer = "0.11"
+
+# Configuration
+toml = "0.8"
+dirs = "5.0"
+
+# Crypto
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Decimal math
+bigdecimal = { workspace = true }
+rust_decimal = { workspace = true }
+
+# Authentication
+totp-rs = "5.4"
+base64 = "0.22"

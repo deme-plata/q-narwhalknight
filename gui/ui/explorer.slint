@@ -1,0 +1,804 @@
+// Q-NarwhalKnight Explorer Page
+// Comprehensive blockchain explorer with statistics and network insights
+
+import { Colors } from "colors.slint";
+import { TabWidget, VerticalBox, HorizontalBox, Button, LineEdit, TextEdit, ScrollView, GridBox, Text } from "std-widgets.slint";
+import { DAGConsensusVisualizer } from "dag_visualization.slint";
+import { NetworkTopologyVisualizer } from "network_topology.slint";
+import { QuantumEntropyStream } from "quantum_entropy.slint";
+
+export component ExplorerPage inherits Rectangle {
+    background: @linear-gradient(45deg, #0a0e17, #1e1b4b 30%, #0a0e17);
+    
+    // Properties for dynamic data
+    in-out property <int> current-height: 50000;
+    in-out property <int> current-round: 12345;
+    in-out property <float> current-tps: 27543.2;
+    in-out property <int> total-transactions: 1000000;
+    in-out property <int> active-peers: 4;
+    in-out property <float> network-health: 0.95;
+    in-out property <float> consensus-participation: 0.95;
+    in-out property <int> mempool-size: 1234;
+    in-out property <float> quantum-entropy: 0.892;
+    in-out property <string> search-query: "";
+    
+    // Callbacks
+    callback search-explorer(string);
+    callback refresh-data();
+    callback view-transaction(string);
+    callback view-block(int);
+    callback view-vertex(string);
+    
+    ScrollView {
+        VerticalBox {
+            padding: 30px;
+            spacing: 25px;
+            
+            // Header with search
+            HorizontalBox {
+                spacing: 20px;
+                alignment: space-between;
+                
+                // Title
+                Text {
+                    text: "🔍 Q-NarwhalKnight Explorer";
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: Colors.text-primary;
+                }
+                
+                // Global search bar (enhanced)
+                HorizontalBox {
+                    width: 400px;
+                    spacing: 10px;
+                    
+                    search-input := QuantumInput {
+                        placeholder-text: "Search tx, block, address, vertex ID...";
+                        text <=> search-query;
+                        width: 320px;
+                    }
+                    
+                    SearchButton {
+                        text: "🔍";
+                        clicked => {
+                            search-explorer(search-query);
+                        }
+                    }
+                }
+                
+                // Refresh button
+                RefreshButton {
+                    text: "🔄 Refresh";
+                    clicked => {
+                        refresh-data();
+                    }
+                }
+            }
+            
+            // Network Overview Cards Row 1
+            Text {
+                text: "📊 Network Statistics";
+                font-size: 24px;
+                font-weight: 600;
+                color: Colors.text-primary;
+                margin-top: 10px;
+            }
+            
+            HorizontalBox {
+                spacing: 20px;
+                
+                StatCard {
+                    title: "Current Height";
+                    value: current-height;
+                    suffix: "blocks";
+                    icon: "📏";
+                    status: "excellent";
+                    description: "Latest committed block";
+                }
+                
+                StatCard {
+                    title: "Consensus Round";
+                    value: current-round;
+                    suffix: "";
+                    icon: "⚛️";
+                    status: "excellent";
+                    description: "DAG-Knight round";
+                }
+                
+                StatCard {
+                    title: "Throughput";
+                    value: current-tps;
+                    suffix: "TPS";
+                    icon: "⚡";
+                    status: current-tps > 25000 ? "excellent" : "good";
+                    description: "Transactions per second";
+                }
+                
+                StatCard {
+                    title: "Total Transactions";
+                    value: total-transactions;
+                    suffix: "tx";
+                    icon: "📊";
+                    status: "excellent";
+                    description: "Network lifetime total";
+                }
+            }
+            
+            // Network Health Cards Row 2
+            HorizontalBox {
+                spacing: 20px;
+                
+                StatCard {
+                    title: "Active Peers";
+                    value: active-peers;
+                    suffix: "nodes";
+                    icon: "🌐";
+                    status: active-peers >= 4 ? "excellent" : "warning";
+                    description: "Connected validators";
+                }
+                
+                StatCard {
+                    title: "Network Health";
+                    value: network-health * 100;
+                    suffix: "%";
+                    icon: "💚";
+                    status: network-health > 0.9 ? "excellent" : "good";
+                    description: "Overall network score";
+                }
+                
+                StatCard {
+                    title: "Consensus Participation";
+                    value: consensus-participation * 100;
+                    suffix: "%";
+                    icon: "🗳️";
+                    status: consensus-participation > 0.9 ? "excellent" : "good";
+                    description: "Validator participation";
+                }
+                
+                StatCard {
+                    title: "Mempool Size";
+                    value: mempool-size;
+                    suffix: "pending";
+                    icon: "⏳";
+                    status: mempool-size < 2000 ? "excellent" : "warning";
+                    description: "Unconfirmed transactions";
+                }
+            }
+            
+            // Quantum & Security Metrics Row 3
+            Text {
+                text: "🔐 Quantum & Security Metrics";
+                font-size: 24px;
+                font-weight: 600;
+                color: Colors.text-primary;
+                margin-top: 20px;
+            }
+            
+            HorizontalBox {
+                spacing: 20px;
+                
+                StatCard {
+                    title: "Quantum Entropy";
+                    value: quantum-entropy * 100;
+                    suffix: "%";
+                    icon: "🌌";
+                    status: quantum-entropy > 0.85 ? "excellent" : "good";
+                    description: "Randomness quality";
+                }
+                
+                StatCard {
+                    title: "Post-Quantum Ready";
+                    value: 85;
+                    suffix: "%";
+                    icon: "🔒";
+                    status: "excellent";
+                    description: "PQ crypto adoption";
+                }
+                
+                StatCard {
+                    title: "Byzantine Tolerance";
+                    value: 33;
+                    suffix: "%";
+                    icon: "🛡️";
+                    status: "excellent";
+                    description: "Fault tolerance (f=1)";
+                }
+                
+                StatCard {
+                    title: "VDF Computations";
+                    value: 1234;
+                    suffix: "anchors";
+                    icon: "⏱️";
+                    status: "excellent";
+                    description: "Quantum anchor elections";
+                }
+            }
+            
+            // Mining & Resource Statistics Row 4
+            Text {
+                text: "⛏️ Mining & Resource Statistics";
+                font-size: 24px;
+                font-weight: 600;
+                color: Colors.text-primary;
+                margin-top: 20px;
+            }
+            
+            HorizontalBox {
+                spacing: 20px;
+                
+                StatCard {
+                    title: "Average Block Time";
+                    value: 2.5;
+                    suffix: "sec";
+                    icon: "⏰";
+                    status: "excellent";
+                    description: "Block finalization time";
+                }
+                
+                StatCard {
+                    title: "Network Hash Rate";
+                    value: 1000000;
+                    suffix: "H/s";
+                    icon: "💎";
+                    status: "excellent";
+                    description: "Collective compute power";
+                }
+                
+                StatCard {
+                    title: "Memory Usage";
+                    value: 25;
+                    suffix: "%";
+                    icon: "💾";
+                    status: "excellent";
+                    description: "Network resource usage";
+                }
+                
+                StatCard {
+                    title: "Data Storage";
+                    value: 50;
+                    suffix: "GB";
+                    icon: "💿";
+                    status: "excellent";
+                    description: "Total chain data";
+                }
+            }
+            
+            // Live Visualizations Section
+            Text {
+                text: "📈 Live Network Visualizations";
+                font-size: 24px;
+                font-weight: 600;
+                color: Colors.text-primary;
+                margin-top: 20px;
+            }
+            
+            // Visualization Grid
+            HorizontalBox {
+                spacing: 20px;
+                
+                // Left column - DAG Visualization
+                VerticalBox {
+                    width: 50%;
+                    spacing: 15px;
+                    
+                    VisualizationCard {
+                        title: "🕸️ DAG-Knight Consensus";
+                        height: 350px;
+                        
+                        DAGConsensusVisualizer {
+                            height: 300px;
+                        }
+                    }
+                    
+                    VisualizationCard {
+                        title: "🌊 Quantum Entropy Stream";
+                        height: 200px;
+                        
+                        QuantumEntropyStream {
+                            height: 150px;
+                        }
+                    }
+                }
+                
+                // Right column - Network Topology
+                VerticalBox {
+                    width: 50%;
+                    spacing: 15px;
+                    
+                    VisualizationCard {
+                        title: "🌐 Network Topology";
+                        height: 350px;
+                        
+                        NetworkTopologyVisualizer {
+                            height: 300px;
+                        }
+                    }
+                    
+                    VisualizationCard {
+                        title: "📊 Performance Metrics";
+                        height: 200px;
+                        
+                        PerformanceChart {
+                            height: 150px;
+                        }
+                    }
+                }
+            }
+            
+            // Recent Activity Section
+            Text {
+                text: "🔥 Recent Network Activity";
+                font-size: 24px;
+                font-weight: 600;
+                color: Colors.text-primary;
+                margin-top: 20px;
+            }
+            
+            HorizontalBox {
+                spacing: 20px;
+                
+                // Recent Transactions
+                ActivityCard {
+                    title: "💸 Recent Transactions";
+                    width: 33%;
+                    
+                    ScrollView {
+                        height: 300px;
+                        
+                        VerticalBox {
+                            spacing: 8px;
+                            
+                            for tx in ["tx_abc123", "tx_def456", "tx_ghi789"] : TransactionItem {
+                                tx-hash: tx;
+                                amount: "1,250.5 QNK";
+                                time: "2 min ago";
+                                clicked => {
+                                    view-transaction(tx);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Recent Blocks
+                ActivityCard {
+                    title: "🧱 Recent Blocks";
+                    width: 33%;
+                    
+                    ScrollView {
+                        height: 300px;
+                        
+                        VerticalBox {
+                            spacing: 8px;
+                            
+                            for height in [50000, 49999, 49998] : BlockItem {
+                                block-height: height;
+                                tx-count: "25 txs";
+                                time: "5 min ago";
+                                clicked => {
+                                    view-block(height);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Recent Vertices
+                ActivityCard {
+                    title: "⚛️ Recent Vertices";
+                    width: 33%;
+                    
+                    ScrollView {
+                        height: 300px;
+                        
+                        VerticalBox {
+                            spacing: 8px;
+                            
+                            for vertex in ["vtx_123", "vtx_456", "vtx_789"] : VertexItem {
+                                vertex-id: vertex;
+                                round: "12345";
+                                status: "committed";
+                                clicked => {
+                                    view-vertex(vertex);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Reusable Statistics Card Component
+component StatCard inherits Rectangle {
+    in-out property <string> title;
+    in-out property <float> value;
+    in-out property <string> suffix;
+    in-out property <string> icon;
+    in-out property <string> status;
+    in-out property <string> description;
+    
+    background: Colors.card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    width: 250px;
+    height: 120px;
+    
+    // Hover effect
+    states [
+        hovered when touch-area.has-hover: {
+            background: #1e293b99;
+            border-color: Colors.quantum-blue;
+        }
+    ]
+    
+    animate background { duration: 200ms; }
+    animate border-color { duration: 200ms; }
+    
+    VerticalBox {
+        padding: 15px;
+        spacing: 8px;
+        
+        // Header row with icon and status
+        HorizontalBox {
+            spacing: 10px;
+            alignment: space-between;
+            
+            HorizontalBox {
+                spacing: 8px;
+                
+                Text {
+                    text: icon;
+                    font-size: 20px;
+                }
+                
+                Text {
+                    text: title;
+                    font-size: 13px;
+                    color: Colors.text-secondary;
+                }
+            }
+            
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: status == "excellent" ? Colors.quantum-green : 
+                           status == "good" ? Colors.quantum-blue : 
+                           status == "warning" ? Colors.quantum-gold : Colors.quantum-red;
+            }
+        }
+        
+        // Value display
+        Text {
+            text: value >= 1000 ? (value / 1000).toFixed(1) + "K" + " " + suffix : value.toFixed(value >= 10 ? 0 : 1) + " " + suffix;
+            font-size: 22px;
+            font-weight: 700;
+            color: Colors.text-primary;
+        }
+        
+        // Description
+        Text {
+            text: description;
+            font-size: 10px;
+            color: Colors.text-secondary;
+            wrap: word-wrap;
+        }
+    }
+    
+    touch-area := TouchArea {}
+}
+
+// Visualization Container Card
+component VisualizationCard inherits Rectangle {
+    in-out property <string> title;
+    
+    background: Colors.card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: title;
+            font-size: 16px;
+            font-weight: 600;
+            color: Colors.text-primary;
+        }
+        
+        @children
+    }
+}
+
+// Activity Container Card
+component ActivityCard inherits Rectangle {
+    in-out property <string> title;
+    
+    background: Colors.card-bg;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: #334155;
+    
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+        
+        Text {
+            text: title;
+            font-size: 16px;
+            font-weight: 600;
+            color: Colors.text-primary;
+        }
+        
+        @children
+    }
+}
+
+// Individual Activity Items
+component TransactionItem inherits Rectangle {
+    in-out property <string> tx-hash;
+    in-out property <string> amount;
+    in-out property <string> time;
+    callback clicked;
+    
+    background: #1e293b44;
+    border-radius: 8px;
+    height: 50px;
+    
+    states [
+        hovered when touch-area.has-hover: {
+            background: #1e293b88;
+        }
+    ]
+    
+    animate background { duration: 150ms; }
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: space-between;
+        
+        VerticalBox {
+            spacing: 3px;
+            
+            Text {
+                text: tx-hash;
+                font-size: 12px;
+                font-family: "Monaco";
+                color: Colors.text-primary;
+            }
+            
+            Text {
+                text: amount;
+                font-size: 10px;
+                color: Colors.quantum-green;
+            }
+        }
+        
+        Text {
+            text: time;
+            font-size: 10px;
+            color: Colors.text-secondary;
+        }
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+component BlockItem inherits Rectangle {
+    in-out property <int> block-height;
+    in-out property <string> tx-count;
+    in-out property <string> time;
+    callback clicked;
+    
+    background: #1e293b44;
+    border-radius: 8px;
+    height: 50px;
+    
+    states [
+        hovered when touch-area.has-hover: {
+            background: #1e293b88;
+        }
+    ]
+    
+    animate background { duration: 150ms; }
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: space-between;
+        
+        VerticalBox {
+            spacing: 3px;
+            
+            Text {
+                text: "Block " + block-height;
+                font-size: 12px;
+                color: Colors.text-primary;
+            }
+            
+            Text {
+                text: tx-count;
+                font-size: 10px;
+                color: Colors.quantum-blue;
+            }
+        }
+        
+        Text {
+            text: time;
+            font-size: 10px;
+            color: Colors.text-secondary;
+        }
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+component VertexItem inherits Rectangle {
+    in-out property <string> vertex-id;
+    in-out property <string> round;
+    in-out property <string> status;
+    callback clicked;
+    
+    background: #1e293b44;
+    border-radius: 8px;
+    height: 50px;
+    
+    states [
+        hovered when touch-area.has-hover: {
+            background: #1e293b88;
+        }
+    ]
+    
+    animate background { duration: 150ms; }
+    
+    HorizontalBox {
+        padding: 10px;
+        spacing: 10px;
+        alignment: space-between;
+        
+        VerticalBox {
+            spacing: 3px;
+            
+            Text {
+                text: vertex-id;
+                font-size: 12px;
+                font-family: "Monaco";
+                color: Colors.text-primary;
+            }
+            
+            Text {
+                text: "Round " + round + " • " + status;
+                font-size: 10px;
+                color: Colors.quantum-purple;
+            }
+        }
+        
+        Rectangle {
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: status == "committed" ? Colors.quantum-green : 
+                       status == "certified" ? Colors.quantum-blue : Colors.quantum-gold;
+        }
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+// Performance Chart Placeholder
+component PerformanceChart inherits Rectangle {
+    background: #0f1419;
+    border-radius: 8px;
+    
+    Text {
+        text: "📊 Real-time Performance Graph\nTPS: 27,543 • Latency: 45ms";
+        color: Colors.quantum-blue;
+        font-size: 14px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Button Components
+component SearchButton inherits Rectangle {
+    in-out property <string> text;
+    callback clicked;
+    
+    width: 50px;
+    height: 45px;
+    background: Colors.quantum-blue;
+    border-radius: 8px;
+    
+    states [
+        pressed when touch-area.pressed: {
+            background: #0ea5e9;
+        }
+    ]
+    
+    animate background { duration: 150ms; }
+    
+    Text {
+        text: parent.text;
+        color: white;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+component RefreshButton inherits Rectangle {
+    in-out property <string> text;
+    callback clicked;
+    
+    width: 100px;
+    height: 45px;
+    background: Colors.quantum-purple;
+    border-radius: 8px;
+    
+    states [
+        pressed when touch-area.pressed: {
+            background: #7c3aed;
+        }
+    ]
+    
+    animate background { duration: 150ms; }
+    
+    Text {
+        text: parent.text;
+        color: white;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    
+    touch-area := TouchArea {
+        clicked => { parent.clicked(); }
+    }
+}
+
+// Input Component (matching main.slint style)
+component QuantumInput inherits Rectangle {
+    in-out property <string> placeholder-text;
+    in-out property <string> text;
+    
+    height: 45px;
+    background: #1e293b;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #475569;
+    
+    states [
+        focused when line-edit.has-focus: {
+            border-color: Colors.quantum-blue;
+        }
+    ]
+    
+    line-edit := LineEdit {
+        x: 15px;
+        y: 0px;
+        width: parent.width - 30px;
+        height: 100%;
+        placeholder-text: parent.placeholder-text;
+        text <=> parent.text;
+        background: transparent;
+        color: Colors.text-primary;
+        font-size: 14px;
+    }
+}

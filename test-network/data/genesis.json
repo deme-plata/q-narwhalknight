@@ -1,0 +1,18 @@
+{
+  "network_id": "qnk-testnet-001",
+  "timestamp": 1756827600,
+  "difficulty": "0x1e0ffff0",
+  "validator_set": [
+    "qnk1_alpha_validator_test_mining_001",
+    "qnk1_beta_validator_test_mining_002",
+    "qnk1_gamma_validator_test_mining_003"
+  ],
+  "initial_supply": "21000000000000000",
+  "block_reward": "5000000000",
+  "consensus_params": {
+    "block_time": 2300,
+    "max_block_size": 1048576,
+    "max_transactions_per_block": 10000,
+    "vdf_iterations": 1024
+  }
+}

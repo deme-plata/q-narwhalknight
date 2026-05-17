@@ -1,0 +1,76 @@
+[package]
+name = "q-trading-bot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "q-trading-bot"
+path = "src/main.rs"
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP client for API calls
+reqwest = { version = "0.11", features = ["json"] }
+
+# Async utilities
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Configuration
+config = "0.14"
+toml = "0.8"
+
+# CLI
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# Time handling
+chrono = "0.4"
+
+# Math for trading calculations
+rust_decimal = "1.33"
+rust_decimal_macros = "1.33"
+
+# RNG for DCA strategies
+rand = "0.8"
+
+# SIMD-accelerated indicators (Dagknight)
+wide = "0.7"
+
+# DashMap for concurrent indicator registry
+dashmap = "6"
+
+# P2P / Bracha integration
+q-narwhal-core = { path = "../q-narwhal-core" }
+
+# Database for trade history
+sled = "0.34"
+
+# Crypto for wallet operations and Binance HMAC-SHA256 auth
+blake3 = "1.5"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+q-wallet = { path = "../q-wallet" }
+
+# Post-quantum crypto
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.7"
+pqcrypto-traits = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"

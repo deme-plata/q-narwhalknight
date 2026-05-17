@@ -1,0 +1,2055 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2
+}
+
+\lstset{style=mystyle}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    pdftitle={Q-NarwhalKnight PaaS Developer Guide},
+    pdfpagemode=FullScreen,
+}
+
+\pagestyle{fancy}
+\fancyhead[L]{Q-NarwhalKnight PaaS}
+\fancyhead[R]{Developer Integration Guide}
+
+\title{\textbf{Q-NarwhalKnight Privacy-as-a-Service}\\
+\large Developer Integration Guide\\
+\vspace{0.5cm}
+8 Blockchain Networks - Universal Privacy Layer}
+
+\author{Q-NarwhalKnight Developer Relations\\
+\texttt{bitknight.dipper688@passmail.net}}
+
+\date{\today\\Version 3.0 - Multi-Chain Expansion}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+This guide provides comprehensive integration instructions for developers building on \textbf{8 major blockchain networks}: Bitcoin, Ethereum, Solana, SUI, Litecoin, Dogecoin, Polygon, and Avalanche. Learn how to integrate Q-NarwhalKnight's Privacy-as-a-Service (PaaS) API to add enterprise-grade privacy features to your wallets, dApps, exchanges, and blockchain applications.
+
+\vspace{0.3cm}
+\noindent
+\textbf{What You'll Learn:}
+\begin{itemize}
+    \item Quick start integration (5 minutes to first private transaction)
+    \item Chain-specific integration examples for 8 blockchains
+    \item API authentication and security best practices
+    \item Production deployment guidelines
+    \item Error handling and retry logic
+    \item Performance optimization techniques
+\end{itemize}
+
+\vspace{0.3cm}
+\noindent
+\textbf{Supported Chains:} Bitcoin (UTXO), Ethereum (EVM), Solana (SVM), SUI (Move), Litecoin (MWEB), Dogecoin, Polygon (L2), Avalanche (Subnets)
+
+\vspace{0.3cm}
+\noindent
+\textbf{Prerequisites:} Basic understanding of your target blockchain, REST API concepts, and JSON.
+
+\vspace{0.3cm}
+\noindent
+\textbf{Support:} \texttt{bitknight.dipper688@passmail.net} | Documentation: \texttt{https://code.quillon.xyz/}
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+\section{Getting Started}
+
+\subsection{1.1 Overview}
+
+Q-NarwhalKnight Privacy-as-a-Service (PaaS) is a universal privacy layer that adds advanced privacy features to ANY blockchain through a simple RESTful API. Instead of building privacy into individual blockchains (like Zcash or Monero), we provide privacy as a service that works across all chains.
+
+\subsubsection{What Makes Us Different}
+
+\begin{itemize}
+    \item \textbf{Universal}: One API works with Bitcoin, Ethereum, Solana, and 100+ other chains
+    \item \textbf{Quantum-Resistant}: Future-proof cryptography (Dilithium5, Kyber1024)
+    \item \textbf{Compliance-Ready}: Built-in KYT/AML screening, regulatory reporting
+    \item \textbf{Enterprise SLA}: 99.95\% uptime, 24/7 support, <500ms latency
+    \item \textbf{Developer-Friendly}: RESTful API, comprehensive SDKs, extensive documentation
+\end{itemize}
+
+\subsection{1.2 Architecture Overview}
+
+\begin{verbatim}
++-------------------------------------------------------------+
+|          Your Wallet / dApp / Exchange / Application        |
++-------------------------------------------------------------+
+                            |
+                            | HTTPS REST API
+                            v
++-------------------------------------------------------------+
+|              Q-NarwhalKnight PaaS API Gateway               |
+|    - Authentication (API Keys / OAuth2)                     |
+|    - Rate Limiting (100-10,000 req/min)                     |
+|    - Request Validation                                     |
++-------------------------------------------------------------+
+                            |
+                            v
++-------------------------------------------------------------+
+|                   Privacy Services Layer                     |
+|    - Transaction Mixing (e < 0.7 differential privacy)      |
+|    - Tor Relay (IP masking)                                 |
+|    - ZK-STARK Proofs (10M+ constraints)                     |
+|    - Ring Signatures (64-participant anonymity)             |
+|    - Stealth Addresses (unlinkable recipients)              |
++-------------------------------------------------------------+
+                            |
+                            v
++-------------------------------------------------------------+
+|         Target Blockchain (Bitcoin/Ethereum/Solana)         |
++-------------------------------------------------------------+
+\end{verbatim}
+
+\subsection{1.3 Quick Start (5 Minutes)}
+
+\subsubsection{Step 1: Get an API Key}
+
+\textbf{Option 1: Via Quillon Wallet (Recommended)}
+
+Open the Quillon Wallet at \texttt{https://quillon.xyz}, navigate to \textbf{Settings → PaaS Configuration}, and click \textbf{"Generate Key"}. Your API key will be displayed for 5 seconds (copy it immediately):
+
+\begin{lstlisting}[language=bash]
+# Example API key (keep this secret!)
+API_KEY="paas_1a2b3c4d5e6f7g8h9i0j_checksum123abc"
+\end{lstlisting}
+
+\textbf{Option 2: Via API Request (Programmatic)}
+
+\begin{lstlisting}[language=bash]
+curl -X POST "http://localhost:8080/api/v1/privacy/paas/api-keys/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "wallet_address": "your-wallet-address",
+    "tier": "free",
+    "expires_days": 90
+  }'
+\end{lstlisting}
+
+\subsubsection{Step 2: Make Your First Request}
+
+Test the API with a simple \texttt{curl} request:
+
+\begin{lstlisting}[language=bash]
+curl -X GET "https://quillon.xyz/api/v1/privacy/paas/statistics" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json"
+\end{lstlisting}
+
+\textbf{Expected Response:}
+\begin{lstlisting}[language=json]
+{
+  "success": true,
+  "data": {
+    "total_requests": 1234567,
+    "total_revenue_qug": 4560000000000,
+    "active_api_keys": 892,
+    "avg_latency_ms": 145.3
+  }
+}
+\end{lstlisting}
+
+\subsubsection{Step 3: Mix Your First Transaction}
+
+Send a transaction through our quantum mixing service:
+
+\begin{lstlisting}[language=bash]
+curl -X POST "https://quillon.xyz/api/v1/privacy/mix/submit" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{
+    "chain": "bitcoin",
+    "transaction_hex": "0100000001...",
+    "privacy_level": "maximum",
+    "recipient_address": "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+  }'
+\end{lstlisting}
+
+\textbf{That's it!} Your transaction is now mixed with 64+ others, IP masked via Tor, and delivered with ε < 0.7 differential privacy.
+
+\section{2. API Authentication}
+
+\subsection{2.1 API Key Authentication (Recommended for Server-Side)}
+
+\textbf{How It Works:}
+\begin{enumerate}
+    \item Generate an API key via Quillon Wallet (Settings → PaaS → Generate Key) or API endpoint
+    \item Include it in the \texttt{Authorization: Bearer} header
+    \item Keys are hashed with argon2id and stored securely
+    \item Keys auto-rotate every 90 days (configurable)
+\end{enumerate}
+
+\textbf{API Key Generation Endpoint:}
+\begin{lstlisting}[language=bash]
+POST /api/v1/privacy/paas/api-keys/generate
+Content-Type: application/json
+
+{
+  "wallet_address": "your-wallet-address",
+  "tier": "free",  # or "standard", "premium", "enterprise"
+  "expires_days": 90
+}
+
+Response:
+{
+  "success": true,
+  "data": {
+    "api_key": "paas_1a2b3c4d5e6f7g8h9i0j_checksum123abc",
+    "tier": "free",
+    "expires_at": "2026-01-20T10:30:00Z",
+    "rate_limit": 100  # requests per minute
+  }
+}
+\end{lstlisting}
+
+\textbf{Example Request:}
+\begin{lstlisting}[language=python]
+import requests
+
+API_KEY = "paas_1a2b3c4d5e6f7g8h9i0j_checksum123abc"
+BASE_URL = "https://quillon.xyz"
+
+headers = {
+    "Authorization": f"Bearer {API_KEY}",
+    "Content-Type": "application/json"
+}
+
+response = requests.get(f"{BASE_URL}/api/v1/privacy/paas/pricing",
+                        headers=headers)
+print(response.json())
+\end{lstlisting}
+
+\subsection{2.2 OAuth2 Authentication (For Client-Side / Third-Party Apps)}
+
+\textbf{Use Case:} When building a wallet or dApp that needs user authorization.
+
+\textbf{OAuth2 Flow:}
+\begin{enumerate}
+    \item Redirect user to: \\\texttt{https://quillon.xyz/auth/oauth/authorize?client\_id=YOUR\_ID}
+    \item User approves scopes (e.g., \texttt{privacy:mix}, \texttt{privacy:tor-relay})
+    \item Receive authorization code via redirect
+    \item Exchange code for access token
+    \item Use access token in \texttt{Authorization} header
+\end{enumerate}
+
+\textbf{Example (JavaScript):}
+\begin{lstlisting}[language=JavaScript]
+// Step 1: Redirect to authorization
+const CLIENT_ID = "your_client_id";
+const REDIRECT_URI = "https://yourapp.com/callback";
+const authUrl = `https://quillon.xyz/auth/oauth/authorize?` +
+  `client_id=${CLIENT_ID}&` +
+  `redirect_uri=${encodeURIComponent(REDIRECT_URI)}&` +
+  `scope=privacy:mix privacy:tor-relay&` +
+  `response_type=code`;
+
+window.location.href = authUrl;
+
+// Step 2: Exchange authorization code for token (in callback)
+async function exchangeCodeForToken(code) {
+  const response = await fetch(
+    'https://quillon.xyz/auth/oauth/token',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'authorization_code',
+        code: code,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET, // Keep server-side!
+        redirect_uri: REDIRECT_URI
+      })
+    }
+  );
+
+  const { access_token } = await response.json();
+  return access_token;
+}
+
+// Step 3: Use access token
+async function mixTransaction(txHex, accessToken) {
+  const response = await fetch(
+    'https://quillon.xyz/api/v1/privacy/mix/submit',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        chain: 'ethereum',
+        transaction_hex: txHex,
+        privacy_level: 'standard'
+      })
+    }
+  );
+
+  return response.json();
+}
+\end{lstlisting}
+
+\subsection{2.3 Rate Limits by Tier}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Tier} & \textbf{Requests/Min} & \textbf{Daily Limit} & \textbf{Price} \\
+\midrule
+Free & 100 & 10,000 & \$0 \\
+Developer & 1,000 & 100,000 & \$99/mo \\
+Professional & 5,000 & 500,000 & \$499/mo \\
+Enterprise & 10,000 & Unlimited & \$1,999/mo \\
+White-Label & Unlimited & Unlimited & Custom \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Rate Limit Headers:}
+\begin{lstlisting}[language=bash]
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 847
+X-RateLimit-Reset: 1698765432
+\end{lstlisting}
+
+\section{3. Bitcoin Integration}
+
+\subsection{3.1 Bitcoin Transaction Mixing}
+
+\textbf{Use Case:} Send Bitcoin privately without on-chain traceability.
+
+\subsubsection{Production Integration with Official SDK}
+
+\textbf{IMPORTANT:} The examples below show the high-level API interface. For PRODUCTION-READY implementation with proper UTXO selection, transaction construction, and signing, use our official SDK:
+
+\begin{lstlisting}[language=bash]
+pip install q-narwhalknight-paas python-bitcoinlib coincurve
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/python/q\_paas\_bitcoin\_production.py}
+
+\subsubsection{SDK Quick Start Example}
+
+\begin{lstlisting}[language=python]
+from q_paas import QNarwhalKnightPaaSClient, BitcoinWallet, PrivacyLevel
+import uuid
+
+# Step 1: Initialize production-ready client
+API_KEY = "your_api_key"
+client = QNarwhalKnightPaaSClient(
+    api_key=API_KEY,
+    base_url="https://quillon.xyz",
+    max_retries=3  # Automatic retry with exponential backoff
+)
+
+# Step 2: Initialize wallet (handles UTXO management)
+wallet = BitcoinWallet(
+    private_key_wif="YOUR_WIF_KEY",  # ⚠️ STAYS ON YOUR MACHINE
+    network="mainnet"  # or "testnet"
+)
+
+# Step 3: Fetch UTXOs from Bitcoin node
+bitcoin_rpc_url = "http://localhost:8332"  # Your Bitcoin Core node
+utxos = wallet.fetch_utxos(bitcoin_rpc_url)
+print(f"Found {len(utxos)} UTXOs")
+
+# Step 4: Create transaction (with proper UTXO selection)
+recipient = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+amount_sats = 10_000_000  # 0.1 BTC
+fee_sats = 5_000  # 0.00005 BTC
+
+# Select UTXOs using greedy algorithm
+selected_utxos = wallet.select_utxos(amount_sats, fee_sats)
+
+# Create unsigned transaction
+unsigned_tx = wallet.create_transaction(
+    recipient_address=recipient,
+    amount=amount_sats,
+    fee=fee_sats,
+    utxos=selected_utxos
+)
+
+# Step 5: Sign transaction CLIENT-SIDE (private key never sent!)
+signed_tx = wallet.sign_transaction(unsigned_tx, selected_utxos)
+signed_tx_hex = signed_tx.hex()
+
+# Step 6: Submit to mixing service
+result = client.mix_bitcoin_transaction(
+    signed_tx_hex=signed_tx_hex,
+    privacy_level=PrivacyLevel.MAXIMUM,  # epsilon < 0.7
+    tor_relay=True,
+    timing_jitter_seconds=180,
+    stealth_address=True
+)
+
+print(f"✓ Transaction mixed successfully!")
+print(f"  TX ID: {result['data']['transaction_id']}")
+print(f"  Privacy: epsilon = {result['data']['privacy_epsilon']}")
+print(f"  Anonymity set: {result['data']['anonymity_set']} participants")
+\end{lstlisting}
+
+\textbf{Production Features:}
+\begin{itemize}
+    \item \textbf{Real UTXO Selection:} Greedy algorithm with dust handling
+    \item \textbf{Proper Transaction Construction:} Full Bitcoin protocol implementation
+    \item \textbf{Actual Signing:} secp256k1 ECDSA with proper nonce generation
+    \item \textbf{Retry Logic:} Exponential backoff for network failures
+    \item \textbf{Idempotency:} Automatic idempotency key generation
+    \item \textbf{Error Handling:} Comprehensive exception handling
+\end{itemize}
+
+\textbf{Security Model:}
+\begin{itemize}
+    \item ✅ Private keys NEVER leave your machine
+    \item ✅ Transactions signed CLIENT-SIDE with your key
+    \item ✅ API only receives SIGNED transactions
+    \item ✅ We CANNOT steal funds (tx already signed to recipient)
+    \item ✅ Source code available for audit: \texttt{github.com/q-narwhalknight/sdk}
+\end{itemize}\end{lstlisting}
+
+\subsubsection{Advanced: Stealth Addresses}
+
+Generate unlinkable one-time addresses for each transaction:
+
+\begin{lstlisting}[language=python]
+def generate_stealth_address(recipient_public_key: str) -> dict:
+    """
+    Generate a stealth address for a recipient.
+    The recipient can claim funds without revealing their master address.
+    """
+
+    response = requests.post(
+        f"{BASE_URL}/api/v1/privacy/stealth-address/generate",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "chain": "bitcoin",
+            "recipient_public_key": recipient_public_key,
+            "count": 1
+        }
+    )
+
+    result = response.json()
+
+    return {
+        "stealth_address": result["data"]["addresses"][0],
+        "ephemeral_public_key": result["data"]["ephemeral_keys"][0],
+        "shared_secret": result["data"]["shared_secrets"][0]
+    }
+
+# Example: Alice sends to Bob's stealth address
+bob_public_key = "02a1633cafcc01ebfb6d78e39f687a1f0995c62fc95f51ead10a02ee0be551b5dc"
+stealth = generate_stealth_address(bob_public_key)
+
+# Alice sends to stealth_address
+# Bob can scan blockchain with his private key to detect and claim funds
+print(f"Send funds to: {stealth['stealth_address']}")
+\end{lstlisting}
+
+\subsection{3.2 Bitcoin Lightning Network Integration}
+
+\textbf{Use Case:} Private instant Bitcoin payments via Lightning Network.
+
+\begin{lstlisting}[language=python]
+def private_lightning_payment(
+    invoice: str,
+    amount_msats: int
+) -> dict:
+    """
+    Pay a Lightning invoice with IP privacy via Tor.
+    """
+
+    response = requests.post(
+        f"{BASE_URL}/api/v1/privacy/lightning/pay",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "invoice": invoice,
+            "amount_msats": amount_msats,
+            "options": {
+                "tor_routing": True,      # Route via Tor
+                "max_fee_msats": 1000,    # Maximum routing fee
+                "timeout_seconds": 60
+            }
+        }
+    )
+
+    return response.json()
+
+# Example
+result = private_lightning_payment(
+    invoice="lnbc10u1p3pj257pp5yztkwjcz59ylhhrxym5fjv5v0es...",
+    amount_msats=1_000_000  # 1,000 sats
+)
+
+print(f"Payment hash: {result['data']['payment_hash']}")
+print(f"Routed via Tor: {result['data']['tor_routed']}")
+\end{lstlisting}
+
+\section{4. Ethereum Integration}
+
+\subsection{4.1 MEV Protection for DeFi Trades}
+
+\textbf{Problem:} Front-running bots steal \$500M+ annually from Ethereum users.
+
+\textbf{Solution:} Route transactions through private mempool (Flashbots) + Tor.
+
+\subsubsection{Production Integration with Official SDK}
+
+\textbf{IMPORTANT:} The examples below show the high-level API interface. For PRODUCTION-READY implementation with proper nonce management, gas estimation, and MEV protection, use our official SDK:
+
+\begin{lstlisting}[language=bash]
+npm install q-narwhalknight-paas ethers axios uuid
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/javascript/q\_paas\_ethereum\_production.js}
+
+\textbf{Production Features:}
+\begin{itemize}
+    \item \textbf{Real Nonce Management:} Proper pending transaction tracking
+    \item \textbf{Gas Estimation:} EIP-1559 support with 20\% buffer
+    \item \textbf{MEV Protection:} Flashbots private mempool integration
+    \item \textbf{Retry Logic:} Exponential backoff for network failures
+    \item \textbf{Idempotency:} Automatic duplicate prevention
+    \item \textbf{Error Handling:} Comprehensive exception handling
+\end{itemize}
+
+\subsubsection{Example: Private Uniswap Swap}
+
+\begin{lstlisting}[language=javascript]
+const { ethers } = require('ethers');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+async function privateUniswapSwap(
+  tokenIn,      // e.g., WETH address
+  tokenOut,     // e.g., USDC address
+  amountIn,     // Amount in Wei
+  minAmountOut, // Minimum output (slippage protection)
+  wallet        // ethers.Wallet instance
+) {
+  // Step 1: Build Uniswap swap transaction
+  const uniswapRouter = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
+  const abi = [
+    "function swapExactTokensForTokens(uint amountIn, " +
+    "uint amountOutMin, address[] path, address to, uint deadline)"
+  ];
+
+  const router = new ethers.Contract(uniswapRouter, abi, wallet);
+
+  const tx = await router.populateTransaction.swapExactTokensForTokens(
+    amountIn,
+    minAmountOut,
+    [tokenIn, tokenOut],
+    wallet.address,
+    Math.floor(Date.now() / 1000) + 60 * 20 // 20 min deadline
+  );
+
+  // Step 2: Sign transaction
+  const signedTx = await wallet.signTransaction(tx);
+
+  // Step 3: Submit to Q-NarwhalKnight private relay
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/ethereum/mev-protect`,
+    {
+      signed_transaction: signedTx,
+      max_block_number: null,  // No expiry
+      options: {
+        tor_relay: true,          // Hide IP
+        flashbots_relay: true,    // Private mempool
+        simulate: true,           // Pre-execution simulation
+        require_success: true     // Revert if unprofitable
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': ethers.utils.id(signedTx)  // Prevent duplicates
+      }
+    }
+  );
+
+  const result = response.data;
+
+  if (result.success) {
+    return {
+      transactionHash: result.data.transaction_hash,
+      mevProtected: true,
+      estimatedSavings: result.data.estimated_mev_savings_usd,
+      blockNumber: result.data.included_in_block
+    };
+  } else {
+    throw new Error(`MEV protection failed: ${result.error}`);
+  }
+}
+
+// Example usage
+const provider = new ethers.providers.JsonRpcProvider(
+  "https://mainnet.infura.io/v3/YOUR_KEY"
+);
+const wallet = new ethers.Wallet("YOUR_PRIVATE_KEY", provider);
+
+const WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+
+privateUniswapSwap(
+  WETH,
+  USDC,
+  ethers.utils.parseEther("1.0"),    // 1 WETH
+  ethers.utils.parseUnits("1800", 6), // Min 1800 USDC
+  wallet
+).then(result => {
+  console.log(`Trade executed with MEV protection!`);
+  console.log(`Estimated savings: $${result.estimatedSavings}`);
+  console.log(`TX Hash: ${result.transactionHash}`);
+});
+\end{lstlisting}
+
+\subsection{4.2 Private ERC-20 Transfers}
+
+Mix ERC-20 token transfers for complete privacy:
+
+\begin{lstlisting}[language=javascript]
+async function mixERC20Transfer(
+  tokenAddress,
+  recipientAddress,
+  amount,
+  wallet
+) {
+  // Step 1: Approve token spending
+  const tokenContract = new ethers.Contract(
+    tokenAddress,
+    ["function approve(address spender, uint256 amount)"],
+    wallet
+  );
+
+  const mixingContractAddress = "0x..."; // Q-NarwhalKnight contract
+  await tokenContract.approve(mixingContractAddress, amount);
+
+  // Step 2: Submit to mixing API
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "ethereum",
+      token_address: tokenAddress,
+      recipient_address: recipientAddress,
+      amount: amount.toString(),
+      privacy_level: "maximum",
+      options: {
+        generate_stealth_address: true,
+        timing_jitter_seconds: 180,  // Up to 3 minutes
+        tor_relay: true
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+
+  return response.data;
+}
+
+// Example: Mix 1000 USDC
+const USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const recipient = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1";
+
+mixERC20Transfer(
+  USDC,
+  recipient,
+  ethers.utils.parseUnits("1000", 6),  // 1000 USDC
+  wallet
+).then(result => {
+  console.log(`Mixing complete!`);
+  console.log(`Privacy: epsilon = ${result.data.privacy_epsilon}`);
+  console.log(`Anonymity set: ${result.data.anonymity_set} participants`);
+});
+\end{lstlisting}
+
+\subsection{4.3 ZK-STARK Proof Generation}
+
+Generate zero-knowledge proofs for Ethereum smart contracts:
+
+\begin{lstlisting}[language=python]
+from q_narwhalknight import ZKProver  # Client-side proving library
+
+def generate_balance_proof(
+    wallet_address: str,
+    minimum_balance_wei: int,
+    private_key: str  # ⚠️ STAYS ON YOUR MACHINE - never sent to API
+) -> dict:
+    """
+    Prove you have at least X ETH without revealing:
+    - Your exact balance
+    - Your wallet address
+    - Your transaction history
+
+    SECURITY: Proofs are generated CLIENT-SIDE with local prover.
+              Private keys NEVER leave your machine.
+
+    Use case: Qualify for DeFi loans, governance voting, airdrops
+    """
+
+    # Step 1: Initialize LOCAL prover (runs on YOUR machine)
+    prover = ZKProver.local_prover(
+        circuit_type="balance_threshold",
+        witness_data={
+            "wallet_address": wallet_address,
+            "private_key": private_key,  # Used locally only
+            "balance": get_balance_from_rpc(wallet_address)
+        }
+    )
+
+    # Step 2: Generate proof locally (30s on RTX 3080, 2min on CPU)
+    proof = prover.generate_proof(
+        public_inputs={
+            "minimum_balance_wei": minimum_balance_wei,
+            "block_number": get_latest_block()
+        },
+        options={
+            "gpu_acceleration": True,  # Use GPU if available
+            "compression": "high"      # Smaller proof size
+        }
+    )
+
+    # Step 3: ONLY send the proof (not private key!)
+    response = requests.post(
+        f"{BASE_URL}/api/v1/privacy/zk-stark/verify",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "proof": proof.to_hex(),  # Just the ZK proof
+            "public_inputs": {
+                "minimum_balance_wei": minimum_balance_wei,
+                "block_number": proof.block_number
+            }
+        }
+    )
+
+    result = response.json()
+
+    return {
+        "proof": proof.to_hex(),                    # ZK-STARK proof (hex)
+        "proof_size_bytes": len(proof.to_bytes()),
+        "verification_gas": result["data"]["verification_gas_cost"],
+        "proving_time_ms": proof.proving_time_ms,
+        "verified": result["data"]["verified"]
+    }
+
+# Example: Prove you have at least 10 ETH
+proof = generate_balance_proof(
+    wallet_address="0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1",
+    minimum_balance_wei=10 * 10**18,  # 10 ETH
+    private_key="your_private_key"
+)
+
+print(f"Proof generated in {proof['proving_time_ms']}ms")
+print(f"Proof size: {proof['proof_size_bytes']} bytes")
+print(f"Verification gas: {proof['verification_gas']}")
+
+# Submit proof to smart contract
+contract = web3.eth.contract(address=loan_contract_address, abi=abi)
+tx = contract.functions.submitBalanceProof(proof["proof"]).buildTransaction({
+    'from': your_address,
+    'gas': proof["verification_gas"],
+    'nonce': web3.eth.getTransactionCount(your_address)
+})
+\end{lstlisting}
+
+\section{5. Solana Integration}
+
+\subsection{5.1 Solana Transaction Mixing}
+
+\textbf{Challenge:} Solana's account model makes privacy harder than UTXO chains.
+
+\textbf{Solution:} Temporary accounts + cross-program invocation (CPI) mixing.
+
+\subsubsection{Production Integration with Official SDK}
+
+\textbf{IMPORTANT:} The examples below show the high-level API interface. For PRODUCTION-READY implementation with proper recent blockhash handling, priority fees, and account management, use our official SDK:
+
+\begin{lstlisting}[language=bash]
+npm install q-narwhalknight-paas @solana/web3.js axios uuid bs58
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/javascript/q\_paas\_solana\_production.js}
+
+\textbf{Production Features:}
+\begin{itemize}
+    \item \textbf{Blockhash Management:} Automatic recent blockhash with lastValidBlockHeight
+    \item \textbf{Priority Fees:} Dynamic fee calculation based on network conditions
+    \item \textbf{Compute Budget:} Proper compute unit limits and pricing
+    \item \textbf{Retry Logic:} Exponential backoff for network failures
+    \item \textbf{SPL Token Support:} Associated token account handling
+    \item \textbf{Error Handling:} Comprehensive exception handling
+\end{itemize}
+
+\subsubsection{Example: Mix Solana Transaction}
+
+\begin{lstlisting}[language=javascript]
+const { Connection, PublicKey, Transaction } = require('@solana/web3.js');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+async function mixSolanaTransaction(
+  fromPubkey,
+  toPubkey,
+  amountLamports,
+  wallet
+) {
+  // Step 1: Build Solana transfer instruction
+  const connection = new Connection(
+    "https://api.mainnet-beta.solana.com"
+  );
+
+  const transaction = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: fromPubkey,
+      toPubkey: toPubkey,
+      lamports: amountLamports
+    })
+  );
+
+  // Step 2: Get recent blockhash
+  const { blockhash } = await connection.getRecentBlockhash();
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = fromPubkey;
+
+  // Step 3: Sign transaction
+  transaction.sign(wallet);
+
+  // Step 4: Serialize and submit to mixing API
+  const serializedTx = transaction.serialize({
+    requireAllSignatures: false
+  }).toString('base64');
+
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "solana",
+      transaction_base64: serializedTx,
+      privacy_level: "standard",  // Solana: epsilon ~2.3
+      recipient_address: toPubkey.toBase58(),
+      amount_lamports: amountLamports,
+      options: {
+        temporary_accounts: 3,     // Create 3 intermediate accounts
+        tor_relay: true,
+        timing_jitter: 60
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': transaction.signature.toString('hex')
+      }
+    }
+  );
+
+  return response.data;
+}
+
+// Example usage
+const { Keypair } = require('@solana/web3.js');
+const wallet = Keypair.fromSecretKey(
+  Uint8Array.from([/* your secret key */])
+);
+
+const recipient = new PublicKey(
+  "9B5XszUGdMaxCZ7uSQhPzdks5ZQSmWxrmzCSvtJ6Ns6g"
+);
+
+mixSolanaTransaction(
+  wallet.publicKey,
+  recipient,
+  1_000_000_000,  // 1 SOL
+  wallet
+).then(result => {
+  console.log(`Solana mixing complete!`);
+  console.log(`Transaction signature: ${result.data.signature}`);
+  console.log(`Privacy epsilon: ${result.data.privacy_epsilon}`);
+});
+\end{lstlisting}
+
+\subsection{5.2 SPL Token Privacy}
+
+Mix SPL token transfers (USDC, USDT, etc.):
+
+\begin{lstlisting}[language=javascript]
+const { Token, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
+
+async function mixSPLToken(
+  tokenMintAddress,
+  fromTokenAccount,
+  toWalletAddress,
+  amount,
+  wallet
+) {
+  // Similar to SOL mixing, but with SPL token transfer instruction
+
+  const connection = new Connection("https://api.mainnet-beta.solana.com");
+
+  // Create or get destination token account
+  const toTokenAccount = await Token.getAssociatedTokenAddress(
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+    new PublicKey(tokenMintAddress),
+    new PublicKey(toWalletAddress)
+  );
+
+  // Build transfer instruction
+  const transferIx = Token.createTransferInstruction(
+    TOKEN_PROGRAM_ID,
+    fromTokenAccount,
+    toTokenAccount,
+    wallet.publicKey,
+    [],
+    amount
+  );
+
+  const transaction = new Transaction().add(transferIx);
+
+  // ... (rest similar to SOL mixing)
+
+  return submitToMixingAPI(transaction);
+}
+
+// Example: Mix 1000 USDC on Solana
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+mixSPLToken(
+  USDC_MINT,
+  yourUSDCAccount,
+  recipientWallet,
+  1000 * 10**6,  // 1000 USDC (6 decimals)
+  wallet
+);
+\end{lstlisting}
+
+\section{6. SUI Integration}
+
+\subsection{6.1 SUI Transaction Mixing}
+
+\textbf{SUI Highlights:} Move-based smart contracts, object-centric transaction model, high throughput.
+
+\subsubsection{Production SDK Reference}
+
+\textbf{NOTE:} SUI uses a similar account-based model to Solana. For PRODUCTION implementation with proper gas coin selection, object management, and Move smart contract integration, refer to our SDK architecture pattern from \texttt{sdk/javascript/q\_paas\_solana\_production.js} and adapt for SUI's \texttt{@mysten/sui.js} library.
+
+\textbf{Installation:}
+\begin{lstlisting}[language=bash]
+npm install q-narwhalknight-paas @mysten/sui.js axios uuid
+\end{lstlisting}
+
+\subsubsection{Example: Mix SUI Transaction}
+
+\begin{lstlisting}[language=javascript]
+const { JsonRpcProvider, RawSigner, TransactionBlock } = require('@mysten/sui.js');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+async function mixSuiTransaction(
+  senderAddress,
+  recipientAddress,
+  amountMist,  // 1 SUI = 1,000,000,000 MIST
+  signer
+) {
+  // Step 1: Build SUI transfer transaction
+  const tx = new TransactionBlock();
+  const [coin] = tx.splitCoins(tx.gas, [tx.pure(amountMist)]);
+  tx.transferObjects([coin], tx.pure(recipientAddress));
+
+  // Step 2: Sign transaction LOCALLY (private key never sent!)
+  const signedTx = await signer.signTransactionBlock({
+    transactionBlock: tx
+  });
+
+  // Step 3: Submit signed transaction to mixing API
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "sui",
+      transaction_bytes: signedTx.bytes,  // Already signed by YOU
+      signature: signedTx.signature,
+      privacy_level: "standard",  // epsilon ~2.3
+      options: {
+        tor_relay: true,
+        timing_jitter: 90,  // 0-90 seconds random delay
+        stealth_address: true
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': signedTx.digest
+      }
+    }
+  );
+
+  return response.data;
+}
+
+// Example usage
+const provider = new JsonRpcProvider('https://fullnode.mainnet.sui.io');
+const signer = new RawSigner(keypair, provider);
+
+mixSuiTransaction(
+  '0xSENDER_ADDRESS',
+  '0xRECIPIENT_ADDRESS',
+  1000000000,  // 1 SUI
+  signer
+).then(result => {
+  console.log(`SUI mixing complete!`);
+  console.log(`Transaction digest: ${result.data.digest}`);
+  console.log(`Privacy epsilon: ${result.data.privacy_epsilon}`);
+});
+\end{lstlisting}
+
+\textbf{SUI-Specific Features:}
+\begin{itemize}
+    \item Move language support (type-safe)
+    \item Object-centric transaction model
+    \item TransactionBlock API for complex operations
+    \item High throughput (sub-second finality)
+\end{itemize}
+
+\section{7. Litecoin Integration}
+
+\subsection{7.1 Litecoin Transaction Mixing with MWEB}
+
+\textbf{Litecoin Highlights:} Bitcoin fork, MWEB (MimbleWimble Extension Blocks) privacy, faster block times (2.5 min).
+
+\subsubsection{Production SDK Reference}
+
+\textbf{NOTE:} Litecoin is a Bitcoin fork with compatible transaction structure. For PRODUCTION implementation with proper UTXO selection, transaction construction, and MWEB support, use our Bitcoin SDK with Litecoin-specific parameters:
+
+\begin{lstlisting}[language=bash]
+pip install q-narwhalknight-paas python-bitcoinlib coincurve
+# Configure for Litecoin network (different address prefixes, magic bytes)
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/python/q\_paas\_bitcoin\_production.py} (adapt network parameters for Litecoin).
+
+\subsubsection{Example: Mix Litecoin Transaction}
+
+\begin{lstlisting}[language=python]
+import requests
+import bitcoin  # Works with Litecoin too
+
+API_KEY = "your_api_key"
+BASE_URL = "https://quillon.xyz"
+
+def mix_litecoin_transaction(
+    from_address: str,
+    to_address: str,
+    amount_litoshis: int,  # 1 LTC = 100,000,000 litoshis
+    private_key: str  # ⚠️ STAYS ON YOUR MACHINE - never sent to API
+) -> dict:
+    """
+    Mix Litecoin transaction with MWEB privacy integration.
+
+    SECURITY: You sign transactions CLIENT-SIDE, then send signed TX.
+              Private keys NEVER leave your machine.
+    """
+
+    # Step 1: Create Litecoin transaction (Bitcoin-compatible)
+    network = bitcoin.networks.litecoin
+    keyPair = bitcoin.ECPair.fromWIF(private_key, network)
+    psbt = bitcoin.Psbt({ 'network': network })
+
+    # ... (add inputs, outputs with Litecoin addresses)
+
+    # Step 2: Sign transaction LOCALLY
+    psbt.signAllInputs(keyPair)
+    psbt.finalizeAllInputs()
+    signed_tx_hex = psbt.extractTransaction().toHex()
+
+    # Step 3: Submit to mixing service
+    response = requests.post(
+        f"{BASE_URL}/api/v1/privacy/mix/submit",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+            "Idempotency-Key": str(uuid.uuid4())
+        },
+        json={
+            "chain": "litecoin",
+            "signed_transaction_hex": signed_tx_hex,  # Already signed by YOU
+            "privacy_level": "maximum",  # epsilon < 0.7
+            "options": {
+                "stealth_address": True,
+                "tor_relay": True,
+                "mweb_integration": True,  # ✨ Litecoin MWEB privacy
+                "timing_jitter": 150
+            }
+        }
+    )
+
+    result = response.json()
+
+    return {
+        "mixed_tx_id": result["data"]["transaction_id"],
+        "privacy_epsilon": result["data"]["privacy_epsilon"],
+        "mweb_enabled": result["data"]["mweb_used"],
+        "anonymity_set": result["data"]["anonymity_set"]
+    }
+
+# Example: Mix 5 LTC
+result = mix_litecoin_transaction(
+    from_address="ltc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
+    to_address="ltc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+    amount_litoshis=500_000_000,  # 5 LTC
+    private_key="YOUR_LITECOIN_WIF_KEY"  # LOCAL ONLY
+)
+
+print(f"Litecoin mixed successfully!")
+print(f"MWEB privacy: {result['mweb_enabled']}")
+print(f"Privacy level: epsilon = {result['privacy_epsilon']}")
+\end{lstlisting}
+
+\textbf{Litecoin-Specific Features:}
+\begin{itemize}
+    \item \textbf{MWEB Integration:} Native MimbleWimble privacy protocol
+    \item Bitcoin-compatible libraries and tooling
+    \item Faster confirmations (2.5 min blocks vs 10 min)
+    \item Lower fees than Bitcoin
+    \item SegWit and bech32 address support
+\end{itemize}
+
+\section{8. Dogecoin Integration}
+
+\subsection{8.1 Dogecoin Transaction Mixing}
+
+\textbf{Dogecoin Highlights:} Community favorite, meme-powered, Bitcoin fork, large block size (1MB).
+
+\subsubsection{Production SDK Reference}
+
+\textbf{NOTE:} Dogecoin is also a Bitcoin fork. For PRODUCTION implementation with proper UTXO selection and transaction construction, use our Bitcoin SDK with Dogecoin-specific network parameters:
+
+\begin{lstlisting}[language=bash]
+pip install q-narwhalknight-paas python-bitcoinlib coincurve
+# Configure for Dogecoin network (different address prefixes: D...)
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/python/q\_paas\_bitcoin\_production.py} (adapt network parameters for Dogecoin).
+
+\subsubsection{Example: Mix Dogecoin Transaction}
+
+\begin{lstlisting}[language=javascript]
+const bitcoin = require('bitcoinjs-lib');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+// Step 1: Define Dogecoin network parameters
+const dogecoinNetwork = {
+  messagePrefix: '\x19Dogecoin Signed Message:\n',
+  bech32: 'doge',
+  bip32: {
+    public: 0x02facafd,
+    private: 0x02fac398
+  },
+  pubKeyHash: 0x1e,
+  scriptHash: 0x16,
+  wif: 0x9e
+};
+
+async function mixDogecoinTransaction(
+  fromAddress,
+  toAddress,
+  amountDogeoshis,  // 1 DOGE = 100,000,000 dogeoshis
+  privateKeyWIF
+) {
+  // Step 1: Create Dogecoin transaction
+  const keyPair = bitcoin.ECPair.fromWIF(privateKeyWIF, dogecoinNetwork);
+  const psbt = new bitcoin.Psbt({ network: dogecoinNetwork });
+
+  // ... (add inputs, outputs with Dogecoin addresses)
+
+  // Step 2: Sign transaction LOCALLY (Much secure! Very privacy!)
+  psbt.signAllInputs(keyPair);
+  psbt.finalizeAllInputs();
+  const signedTxHex = psbt.extractTransaction().toHex();
+
+  // Step 3: Submit to mixing service (Wow!)
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "dogecoin",
+      signed_transaction_hex: signedTxHex,  // Already signed by YOU
+      privacy_level: "standard",  // Such privacy! epsilon ~2.3
+      options: {
+        stealth_address: true,  // Much anonymous!
+        tor_relay: true,         // Very hidden!
+        timing_jitter: 180       // So random! (0-180 seconds)
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': signedTxHex.slice(0, 32)
+      }
+    }
+  );
+
+  const result = response.data;
+
+  console.log(`Such privacy! Much success!`);
+  console.log(`Transaction ID: ${result.data.transaction_id}`);
+  console.log(`Anonymity set: ${result.data.anonymity_set} shibes`);
+  console.log(`To the moon! 🚀🐕`);
+
+  return result;
+}
+
+// Example: Mix 1000 DOGE (Much Wow!)
+mixDogecoinTransaction(
+  'D7Y55JhVz1QCJzfHPZ5yPqjPq1qK4jQqX7',
+  'DGPKKvQBcx9iHw9yd4PmULtvQmP1aWd8v8',
+  100000000000,  // 1000 DOGE
+  'YOUR_DOGE_WIF_KEY'  // LOCAL ONLY
+);
+\end{lstlisting}
+
+\textbf{Dogecoin-Specific Features:}
+\begin{itemize}
+    \item Community-friendly meme integration ("Much anonymous!", "Such privacy!")
+    \item Bitcoin-compatible transaction structure
+    \item Large block size (1MB) for high throughput
+    \item Fast block times (1 minute)
+    \item Custom network parameters (0x1e pubKeyHash, 0x9e WIF)
+\end{itemize}
+
+\section{9. Polygon Integration}
+
+\subsection{9.1 Polygon Transaction Mixing (Ethereum L2)}
+
+\textbf{Polygon Highlights:} Ethereum L2, low gas fees (\$0.01), EVM-compatible, EIP-1559 support.
+
+\subsubsection{Production SDK Reference}
+
+\textbf{NOTE:} Polygon is EVM-compatible (Ethereum L2). For PRODUCTION implementation with proper nonce management, gas estimation, and EIP-1559 support, use our Ethereum SDK configured for Polygon RPC:
+
+\begin{lstlisting}[language=bash]
+npm install q-narwhalknight-paas ethers axios uuid
+# Configure RPC URL: https://polygon-rpc.com (chainId: 137)
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/javascript/q\_paas\_ethereum\_production.js} (use Polygon RPC endpoint).
+
+\subsubsection{Example: Mix Polygon Transaction}
+
+\begin{lstlisting}[language=javascript]
+const { ethers } = require('ethers');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+async function mixPolygonTransaction(
+  fromAddress,
+  toAddress,
+  amountWei,
+  wallet
+) {
+  // Step 1: Build Polygon (EVM-compatible) transaction
+  const provider = new ethers.providers.JsonRpcProvider(
+    'https://polygon-rpc.com'
+  );
+
+  const tx = {
+    to: toAddress,
+    value: amountWei,
+    gasLimit: 21000,
+    maxFeePerGas: ethers.utils.parseUnits('50', 'gwei'),       // Polygon gas
+    maxPriorityFeePerGas: ethers.utils.parseUnits('30', 'gwei'),
+    nonce: await provider.getTransactionCount(fromAddress),
+    type: 2,  // EIP-1559 transaction
+    chainId: 137  // Polygon Mainnet
+  };
+
+  // Step 2: Sign transaction LOCALLY (private key never sent!)
+  const signedTx = await wallet.signTransaction(tx);
+
+  // Step 3: Submit to mixing API
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "polygon",
+      signed_transaction: signedTx,  // Already signed by YOU
+      privacy_level: "standard",  // epsilon ~2.3
+      options: {
+        tor_relay: true,
+        timing_jitter: 60,
+        stealth_address: true,
+        eip1559: true  // Use EIP-1559 gas model
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': ethers.utils.id(signedTx)
+      }
+    }
+  );
+
+  return response.data;
+}
+
+// Example: Mix 100 MATIC
+const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+const wallet = new ethers.Wallet('YOUR_PRIVATE_KEY', provider);
+
+mixPolygonTransaction(
+  wallet.address,
+  '0xRECIPIENT_ADDRESS',
+  ethers.utils.parseEther('100'),  // 100 MATIC
+  wallet
+).then(result => {
+  console.log(`Polygon mixing complete!`);
+  console.log(`Gas savings: ~95% vs Ethereum`);
+  console.log(`Privacy epsilon: ${result.data.privacy_epsilon}`);
+});
+\end{lstlisting}
+
+\textbf{Polygon-Specific Features:}
+\begin{itemize}
+    \item \textbf{Low Gas Fees:} \$0.01 per transaction (95\% cheaper than Ethereum)
+    \item EVM-compatible (same code as Ethereum)
+    \item EIP-1559 transaction format
+    \item Fast finality (2-3 seconds)
+    \item No Flashbots needed (MEV less problematic on L2)
+    \item ChainID: 137 (Mainnet), 80001 (Mumbai Testnet)
+\end{itemize}
+
+\section{10. Avalanche Integration}
+
+\subsection{10.1 Avalanche Transaction Mixing (C-Chain)}
+
+\textbf{Avalanche Highlights:} Sub-second finality, subnet routing, EVM-compatible C-Chain.
+
+\subsubsection{Production SDK Reference}
+
+\textbf{NOTE:} Avalanche C-Chain is EVM-compatible. For PRODUCTION implementation with proper nonce management, gas estimation, and sub-second finality handling, use our Ethereum SDK configured for Avalanche RPC:
+
+\begin{lstlisting}[language=bash]
+npm install q-narwhalknight-paas ethers axios uuid
+# Configure RPC URL: https://api.avax.network/ext/bc/C/rpc (chainId: 43114)
+\end{lstlisting}
+
+Complete production code is available in \texttt{sdk/javascript/q\_paas\_ethereum\_production.js} (use Avalanche C-Chain RPC endpoint).
+
+\subsubsection{Example: Mix Avalanche Transaction}
+
+\begin{lstlisting}[language=javascript]
+const { ethers } = require('ethers');
+const axios = require('axios');
+
+const API_KEY = "your_api_key";
+const BASE_URL = "https://quillon.xyz";
+
+async function mixAvalancheTransaction(
+  fromAddress,
+  toAddress,
+  amountWei,  // AVAX in wei (1 AVAX = 10^18 wei)
+  wallet
+) {
+  // Step 1: Build Avalanche C-Chain transaction (EVM-compatible)
+  const provider = new ethers.providers.JsonRpcProvider(
+    'https://api.avax.network/ext/bc/C/rpc'
+  );
+
+  const tx = {
+    to: toAddress,
+    value: amountWei,
+    gasLimit: 21000,
+    gasPrice: await provider.getGasPrice(),
+    nonce: await provider.getTransactionCount(fromAddress),
+    chainId: 43114  // Avalanche C-Chain Mainnet
+  };
+
+  // Step 2: Sign transaction LOCALLY (private key never sent!)
+  const signedTx = await wallet.signTransaction(tx);
+
+  // Step 3: Submit to mixing API
+  const response = await axios.post(
+    `${BASE_URL}/api/v1/privacy/mix/submit`,
+    {
+      chain: "avalanche",
+      signed_transaction: signedTx,  // Already signed by YOU
+      privacy_level: "standard",  // epsilon ~2.3
+      options: {
+        tor_relay: true,
+        subnet_routing: "c-chain",  // C-Chain, X-Chain, or P-Chain
+        timing_jitter: 30  // Fast finality = shorter jitter
+      }
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': ethers.utils.id(signedTx)
+      }
+    }
+  );
+
+  return response.data;
+}
+
+// Example: Mix 10 AVAX
+const provider = new ethers.providers.JsonRpcProvider(
+  'https://api.avax.network/ext/bc/C/rpc'
+);
+const wallet = new ethers.Wallet('YOUR_PRIVATE_KEY', provider);
+
+mixAvalancheTransaction(
+  wallet.address,
+  '0xRECIPIENT_ADDRESS',
+  ethers.utils.parseEther('10'),  // 10 AVAX
+  wallet
+).then(result => {
+  console.log(`Avalanche mixing complete!`);
+  console.log(`Finality: <1 second`);
+  console.log(`Privacy epsilon: ${result.data.privacy_epsilon}`);
+});
+\end{lstlisting}
+
+\textbf{Avalanche-Specific Features:}
+\begin{itemize}
+    \item \textbf{Sub-Second Finality:} <1s transaction confirmation
+    \item Subnet routing (C-Chain for smart contracts, X-Chain for assets, P-Chain for validators)
+    \item EVM-compatible C-Chain (same as Ethereum)
+    \item Low gas fees (\$0.01-0.10)
+    \item High throughput (4,500+ TPS)
+    \item ChainID: 43114 (Mainnet), 43113 (Fuji Testnet)
+\end{itemize}
+
+\section{11. Multi-Chain Comparison}
+
+\subsection{11.1 Chain Selection Guide}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Chain} & \textbf{Privacy} & \textbf{Gas Fee} & \textbf{Finality} & \textbf{Best For} \\
+\midrule
+Bitcoin & Maximum & \$1-5 & 60 min & Store of value \\
+Ethereum & High & \$1-20 & 15 sec & DeFi, NFTs \\
+Solana & Standard & \$0.0001 & <1 sec & High-speed apps \\
+SUI & Standard & \$0.001 & <1 sec & Move contracts \\
+Litecoin & Maximum & \$0.01 & 15 min & Payments, MWEB \\
+Dogecoin & Standard & \$0.01 & 6 min & Community, memes \\
+Polygon & Standard & \$0.01 & 3 sec & Scalable dApps \\
+Avalanche & Standard & \$0.05 & <1 sec & Fast finality \\
+\bottomrule
+\end{tabular}
+\caption{Privacy levels: Maximum (epsilon < 0.7), High (epsilon < 1.5), Standard (epsilon ~2.3)}
+\end{table}
+
+\textbf{Privacy Levels Explained:}
+\begin{itemize}
+    \item \textbf{Maximum (ε < 0.7):} Bitcoin, Litecoin - UTXO model with extensive mixing
+    \item \textbf{High (ε < 1.5):} Ethereum with MEV protection - Flashbots + Tor
+    \item \textbf{Standard (ε ~2.3):} Account-based chains - Tor + stealth addresses
+\end{itemize}
+
+\section{12. Advanced Features}
+
+\subsection{12.1 Idempotency and Error Handling}
+
+\textbf{Why Idempotency Matters:}
+\begin{itemize}
+    \item Network failures can cause retries
+    \item Without idempotency, you might pay twice
+    \item We cache responses for 24 hours
+\end{itemize}
+
+\textbf{Best Practice:}
+\begin{lstlisting}[language=python]
+import uuid
+import requests
+
+def idempotent_request(endpoint, payload):
+    """
+    Make an idempotent API request.
+    Safe to retry without double-charging.
+    """
+
+    # Generate unique idempotency key (deterministic based on payload)
+    idempotency_key = str(uuid.uuid5(
+        uuid.NAMESPACE_DNS,
+        f"myapp:{endpoint}:{json.dumps(payload, sort_keys=True)}"
+    ))
+
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                f"{BASE_URL}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": idempotency_key
+                },
+                json=payload,
+                timeout=30
+            )
+
+            if response.status_code == 409:
+                # Conflict: Idempotency key reused with different body
+                raise ValueError("Request body changed, use new key")
+
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.Timeout:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)  # Exponential backoff
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                # Rate limited
+                retry_after = int(e.response.headers.get('Retry-After', 60))
+                time.sleep(retry_after)
+            else:
+                raise
+
+# Example usage
+result = idempotent_request("/api/v1/privacy/mix/submit", {
+    "chain": "bitcoin",
+    "transaction_hex": "...",
+    "privacy_level": "maximum"
+})
+\end{lstlisting}
+
+\subsection{12.2 Batch Processing}
+
+Process multiple transactions efficiently:
+
+\begin{lstlisting}[language=python]
+def batch_mix_transactions(transactions: list) -> list:
+    """
+    Mix multiple transactions in a single request.
+    Saves on API calls and gets volume discounts.
+    """
+
+    response = requests.post(
+        f"{BASE_URL}/api/v1/privacy/mix/batch",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "transactions": [
+                {
+                    "chain": tx["chain"],
+                    "transaction_hex": tx["hex"],
+                    "privacy_level": "standard"
+                }
+                for tx in transactions
+            ],
+            "options": {
+                "parallel_processing": True,  # Mix concurrently
+                "volume_discount": True       # 10% off for 10+ txs
+            }
+        }
+    )
+
+    return response.json()
+
+# Example: Mix 50 Bitcoin transactions
+transactions = [
+    {"chain": "bitcoin", "hex": tx1_hex},
+    {"chain": "bitcoin", "hex": tx2_hex},
+    # ... 48 more
+]
+
+results = batch_mix_transactions(transactions)
+print(f"Batch mixing complete: {len(results['data'])} transactions")
+print(f"Volume discount applied: {results['data']['discount_percent']}%")
+\end{lstlisting}
+
+\subsection{12.3 Webhooks for Async Notifications}
+
+Get notified when long-running operations complete:
+
+\begin{lstlisting}[language=python]
+# Step 1: Register webhook endpoint
+requests.post(
+    f"{BASE_URL}/api/v1/webhooks/register",
+    headers={"Authorization": f"Bearer {API_KEY}"},
+    json={
+        "url": "https://yourapp.com/webhooks/paas",
+        "events": [
+            "mixing.completed",
+            "mixing.failed",
+            "proof.generated"
+        ],
+        "secret": "webhook_secret_for_signature_verification"
+    }
+)
+
+# Step 2: Handle webhook in your app (Flask example)
+from flask import Flask, request
+import hmac
+import hashlib
+
+app = Flask(__name__)
+
+@app.route('/webhooks/paas', methods=['POST'])
+def handle_paas_webhook():
+    # Verify signature
+    signature = request.headers.get('X-QNK-Signature')
+    body = request.get_data()
+    expected = hmac.new(
+        b'webhook_secret_for_signature_verification',
+        body,
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected):
+        return "Invalid signature", 401
+
+    # Process event
+    event = request.json
+
+    if event['type'] == 'mixing.completed':
+        tx_id = event['data']['transaction_id']
+        epsilon = event['data']['privacy_epsilon']
+        print(f"Transaction {tx_id} mixed with epsilon={epsilon}")
+
+        # Update your database, notify user, etc.
+
+    return "OK", 200
+\end{lstlisting}
+
+\section{13. Production Best Practices}
+
+\subsection{13.1 Security Checklist}
+
+\begin{itemize}
+    \item[$\square$] \textbf{Never expose API keys in client-side code} - Use backend proxy or OAuth2
+    \item[$\square$] \textbf{Rotate API keys every 90 days} - Set up calendar reminders
+    \item[$\square$] \textbf{Use environment variables} - Never hardcode keys: \texttt{os.getenv('PAAS\_API\_KEY')}
+    \item[$\square$] \textbf{Implement rate limit handling} - Check \texttt{X-RateLimit-*} headers
+    \item[$\square$] \textbf{Validate webhook signatures} - Prevent spoofed notifications
+    \item[$\square$] \textbf{Use HTTPS only} - Never send requests over HTTP
+    \item[$\square$] \textbf{Log API errors securely} - Don't log full request/response (may contain keys)
+\end{itemize}
+
+\subsection{13.2 Performance Optimization}
+
+\begin{lstlisting}[language=python]
+import asyncio
+import aiohttp
+
+async def parallel_mixing(transactions):
+    """
+    Mix multiple transactions in parallel for maximum throughput.
+    """
+
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+
+        for tx in transactions:
+            task = mix_transaction_async(session, tx)
+            tasks.append(task)
+
+        # Execute all mixing requests concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        return results
+
+async def mix_transaction_async(session, tx):
+    async with session.post(
+        f"{BASE_URL}/api/v1/privacy/mix/submit",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json=tx
+    ) as response:
+        return await response.json()
+
+# Example: Mix 100 transactions in ~2 seconds instead of 200 seconds
+results = asyncio.run(parallel_mixing(transactions))
+\end{lstlisting}
+
+\subsection{13.3 Monitoring and Alerting}
+
+\begin{lstlisting}[language=python]
+import time
+import logging
+
+class PaaSClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.logger = logging.getLogger('paas_client')
+
+        # Track metrics
+        self.requests_sent = 0
+        self.requests_failed = 0
+        self.avg_latency_ms = 0
+
+    def mix_transaction(self, tx):
+        start = time.time()
+
+        try:
+            response = self._make_request("/api/v1/privacy/mix/submit", tx)
+
+            latency = (time.time() - start) * 1000
+            self._update_metrics(success=True, latency=latency)
+
+            if latency > 1000:  # Slow request
+                self.logger.warning(f"Slow mixing request: {latency}ms")
+
+            return response
+
+        except Exception as e:
+            self._update_metrics(success=False)
+            self.logger.error(f"Mixing failed: {str(e)}")
+
+            # Alert on-call engineer if error rate > 5%
+            if self.requests_failed / self.requests_sent > 0.05:
+                self._send_alert("High PaaS error rate!")
+
+            raise
+
+    def _update_metrics(self, success, latency=0):
+        self.requests_sent += 1
+        if not success:
+            self.requests_failed += 1
+        if latency > 0:
+            self.avg_latency_ms = (
+                (self.avg_latency_ms * (self.requests_sent - 1) + latency)
+                / self.requests_sent
+            )
+\end{lstlisting}
+
+\section{14. Pricing and Billing}
+
+\subsection{14.1 Understanding Costs}
+
+\textbf{Pay-Per-Use Pricing (in QUG tokens):}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Service} & \textbf{Cost (QUG)} & \textbf{Est. USD} \\
+\midrule
+Transaction Mixing & 0.01 + 0.1\% of value & \$0.005 \\
+Tor Relay (per MB) & 0.001 & \$0.0005 \\
+Ring Signature & 0.001 & \$0.0005 \\
+Stealth Address & 0.0001 & \$0.00005 \\
+ZK-STARK Proof & 0.01 & \$0.005 \\
+MEV Protection & 0.05 & \$0.025 \\
+\bottomrule
+\end{tabular}
+\caption{1 QUG ≈ \$0.50 (market price, updated real-time)}
+\end{table}
+
+\subsection{14.2 Checking Your Balance}
+
+\begin{lstlisting}[language=bash]
+curl -X GET "https://quillon.xyz/api/v1/billing/balance" \
+  -H "Authorization: Bearer $API_KEY"
+
+# Response:
+{
+  "success": true,
+  "data": {
+    "balance_qug": 125000000000,  # 1250 QUG
+    "balance_usd": 625.00,
+    "reserved_qug": 5000000000,   # 50 QUG (pending transactions)
+    "available_qug": 120000000000
+  }
+}
+\end{lstlisting}
+
+\subsection{14.3 Auto-Recharge}
+
+Set up automatic top-ups to avoid service interruptions:
+
+\begin{lstlisting}[language=python]
+requests.post(
+    f"{BASE_URL}/api/v1/billing/auto-recharge",
+    headers={"Authorization": f"Bearer {API_KEY}"},
+    json={
+        "enabled": True,
+        "threshold_qug": 10_00000000,  # Recharge when below 10 QUG
+        "amount_qug": 100_00000000,    # Add 100 QUG
+        "payment_method": "stripe",    # Credit card via Stripe
+        "payment_method_id": "pm_1abc123..."
+    }
+)
+\end{lstlisting}
+
+\section{15. Compliance Mode (Enterprise)}
+
+\subsection{15.1 KYT Screening}
+
+Automatically screen transactions for regulatory compliance:
+
+\begin{lstlisting}[language=python]
+# Enable compliance mode for your API key
+requests.post(
+    f"{BASE_URL}/api/v1/compliance/enable",
+    headers={"Authorization": f"Bearer {API_KEY}"},
+    json={
+        "kyc_required": True,
+        "sanctions_screening": True,
+        "risk_threshold": "medium",  # Auto-block high-risk only
+        "jurisdictions": ["US", "EU", "UK"]
+    }
+)
+
+# All subsequent mixing requests are screened
+result = mix_bitcoin_transaction(...)
+
+# Check if transaction was flagged
+if result.get("compliance_flags"):
+    print(f"Transaction flagged: {result['compliance_flags']}")
+    # Example: ["associated_with_sanctioned_entity"]
+\end{lstlisting}
+
+\subsection{15.2 Audit Trail Export}
+
+Export compliance reports for regulators:
+
+\begin{lstlisting}[language=python]
+# Generate audit report for date range
+response = requests.post(
+    f"{BASE_URL}/api/v1/compliance/audit-report",
+    headers={"Authorization": f"Bearer {API_KEY}"},
+    json={
+        "start_date": "2024-01-01",
+        "end_date": "2024-12-31",
+        "format": "csv",  # or "json", "pdf"
+        "include_fields": [
+            "transaction_id",
+            "wallet_address_hash",  # Hashed for privacy
+            "amount_qug",
+            "risk_score",
+            "screening_results"
+        ]
+    }
+)
+
+# Download report
+report_url = response.json()["data"]["download_url"]
+audit_csv = requests.get(report_url).content
+\end{lstlisting}
+
+\section{16. Troubleshooting}
+
+\subsection{16.1 Common Error Codes}
+
+\begin{longtable}{lp{10cm}}
+\toprule
+\textbf{Code} & \textbf{Solution} \\
+\midrule
+\endhead
+400 & \textbf{Bad Request:} Check request body format. Ensure all required fields present. \\
+401 & \textbf{Unauthorized:} Invalid API key. Verify key is correct and not expired. \\
+402 & \textbf{Payment Required:} Insufficient balance. Top up your QUG balance. \\
+409 & \textbf{Conflict:} Idempotency key reused with different body. Use new key or same body. \\
+429 & \textbf{Rate Limited:} Too many requests. Check \texttt{Retry-After} header and slow down. \\
+500 & \textbf{Server Error:} Our fault. Retry with exponential backoff. Contact support if persists. \\
+503 & \textbf{Service Unavailable:} Temporary downtime. Check status page: \texttt{status.q-narwhalknight.io} \\
+\bottomrule
+\end{longtable}
+
+\subsection{16.2 Debug Mode}
+
+Enable verbose logging for troubleshooting:
+
+\begin{lstlisting}[language=python]
+import logging
+
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
+
+# PaaS client will now log all requests/responses
+client = PaaSClient(api_key, debug=True)
+
+# Example debug output:
+# DEBUG: POST https://quillon.xyz/api/v1/privacy/mix/submit
+# DEBUG: Headers: {'Authorization': 'Bearer paas_***', ...}
+# DEBUG: Body: {'chain': 'bitcoin', 'privacy_level': 'maximum'}
+# DEBUG: Response: 200 OK in 145ms
+\end{lstlisting}
+
+\subsection{16.3 Support Channels}
+
+\begin{itemize}
+    \item \textbf{Documentation:} \texttt{https://code.quillon.xyz/} (clone \texttt{https://code.quillon.xyz/repo.git})
+    \item \textbf{Email Support:} \texttt{bitknight.dipper688@passmail.net}
+    \item \textbf{Discord Community:} \texttt{https://discord.gg/jEhaYtAhfx}
+    \item \textbf{GitHub Issues:} \texttt{https://github.com/q-narwhalknight/sdk}
+    \item \textbf{Enterprise Support:} \texttt{bitknight.dipper688@passmail.net} (24/7, <1hr response)
+\end{itemize}
+
+\section{17. SDKs and Libraries}
+
+\subsection{17.1 Official SDKs}
+
+We provide official libraries for popular languages:
+
+\begin{itemize}
+    \item \textbf{Python:} \texttt{pip install q-narwhalknight-paas}
+    \item \textbf{JavaScript/TypeScript:} \texttt{npm install @q-narwhalknight/paas-sdk}
+    \item \textbf{Rust:} \texttt{cargo add q-paas-client}
+    \item \textbf{Go:} \texttt{go get github.com/q-narwhalknight/paas-go}
+\end{itemize}
+
+\subsection{17.2 Python SDK Example}
+
+\begin{lstlisting}[language=python]
+from q_narwhalknight import PaaSClient
+
+# Initialize client
+client = PaaSClient(api_key="your_api_key")
+
+# Mix Bitcoin transaction (one line!)
+result = client.bitcoin.mix(
+    from_address="bc1q...",
+    to_address="bc1q...",
+    amount_satoshis=10_000_000,
+    privacy_level="maximum"
+)
+
+print(f"Transaction mixed! TX ID: {result.tx_id}")
+print(f"Privacy guarantee: epsilon = {result.epsilon}")
+\end{lstlisting}
+
+\subsection{17.3 JavaScript SDK Example}
+
+\begin{lstlisting}[language=javascript]
+import { PaaSClient } from '@q-narwhalknight/paas-sdk';
+
+const client = new PaaSClient({ apiKey: 'your_api_key' });
+
+// Protect Ethereum trade from MEV
+const result = await client.ethereum.protectFromMEV({
+  signedTransaction: '0x...',
+  flashbotsRelay: true,
+  torRouting: true
+});
+
+console.log(`MEV protected! Saved $${result.estimatedSavingsUSD}`);
+\end{lstlisting}
+
+\section{18. Next Steps}
+
+\subsection{Congratulations!}
+
+You now know how to integrate Q-NarwhalKnight Privacy-as-a-Service into your blockchain applications. Here's what to do next:
+
+\begin{enumerate}
+    \item \textbf{Get an API Key:} Sign up at \texttt{https://quillon.xyz/console}
+
+    \item \textbf{Explore Examples:} Visit \texttt{https://github.com/q-narwhalknight/examples}
+
+    \item \textbf{Read Full API Docs:} \texttt{https://quillon.xyz/docs/api-reference}
+
+    \item \textbf{Join Community:} Discord, Twitter, Reddit for support and updates
+
+    \item \textbf{Go to Production:} Upgrade to Professional or Enterprise tier for SLAs
+\end{enumerate}
+
+\subsection{Additional Resources}
+
+\begin{itemize}
+    \item \textbf{Technical Whitepaper:} Deep dive into cryptography and architecture
+    \item \textbf{Video Tutorials:} Step-by-step integration walkthroughs
+    \item \textbf{Case Studies:} See how others are using PaaS
+    \item \textbf{Security Audits:} Third-party audit reports
+    \item \textbf{Changelog:} Stay updated on new features
+\end{itemize}
+
+\vspace{1cm}
+
+\begin{tcolorbox}[colback=blue!5!white,colframe=blue!75!black,title=Need Help?]
+Our developer relations team is here to help you succeed.
+
+\textbf{Email:} \texttt{bitknight.dipper688@passmail.net}
+
+\textbf{Documentation:} \texttt{https://code.quillon.xyz/} (clone \texttt{https://code.quillon.xyz/repo.git})
+
+\textbf{Discord Community:} \texttt{https://discord.gg/jEhaYtAhfx}
+
+\textbf{Enterprise Support:} \texttt{bitknight.dipper688@passmail.net} (24/7, <1 hour response)
+
+We typically respond within 4 hours (Enterprise: <1 hour).
+\end{tcolorbox}
+
+\vspace{0.5cm}
+
+\textbf{Build privacy into your blockchain applications. Start today.}
+
+\end{document}

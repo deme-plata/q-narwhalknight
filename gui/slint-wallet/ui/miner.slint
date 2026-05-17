@@ -1,0 +1,581 @@
+import { Theme, QButton, Card, Icon } from "theme.slint";
+
+export component MinerScreen inherits Rectangle {
+    in property <bool> mining: false;
+    in property <string> hashrate: "0";
+    in property <string> blocks-found: "0";
+    in property <string> difficulty: "0";
+    in property <string> miner-address: "";
+    in property <string> reward-per-block: "0";
+    in property <string> miner-status: "";
+    in property <string> thread-count: "0";
+    in-out property <bool> pool-mode: false;
+    // GPU mining properties
+    in property <string> gpu-hashrate: "0";
+    in property <string> gpu-device-count: "0";
+    in property <string> gpu-status: "";
+    in property <string> gpu-blocks-found: "0";
+
+    // v10.9.x: User-tunable resource controls (default low: 1 thread / 5% GPU).
+    // Users dial up via the in-app +/- buttons; choices persist to disk.
+    in property <int> cpu-threads-current: 1;
+    in property <int> cpu-threads-max: 16;
+    in property <int> gpu-intensity-current: 5; // percent 1..100
+
+    callback toggle-mining();
+    callback go-back();
+    callback set-cpu-threads(int);
+    callback set-gpu-intensity(int);
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+
+                back-touch := TouchArea {
+                    clicked => { root.go-back(); }
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-left.svg");
+                        icon-color: Theme.text-primary;
+                    }
+                }
+            }
+
+            Text {
+                text: "Miner";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        // Mining status
+        Card {
+            height: 160px;
+
+            VerticalLayout {
+                padding: Theme.spacing-lg;
+                alignment: center;
+                spacing: Theme.spacing-sm;
+
+                // Status indicator with animated pulse
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 48px;
+                        height: 48px;
+                        border-radius: 24px;
+                        background: root.mining ? Theme.accent-green.with-alpha(0.2) : Theme.bg-hover;
+                        animate background { duration: 300ms; }
+
+                        // Outer pulse ring (visible when mining)
+                        if root.mining : Rectangle {
+                            x: -6px;
+                            y: -6px;
+                            width: 60px;
+                            height: 60px;
+                            border-radius: 30px;
+                            background: Theme.accent-green.with-alpha(0.08);
+                            border-width: 1px;
+                            border-color: Theme.accent-green.with-alpha(0.15);
+                        }
+
+                        // Inner dot
+                        Rectangle {
+                            x: 14px;
+                            y: 14px;
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: root.mining ? Theme.accent-green : Theme.text-muted;
+                            drop-shadow-blur: root.mining ? 8px : 0px;
+                            drop-shadow-color: Theme.accent-green.with-alpha(0.4);
+                            animate background, drop-shadow-blur { duration: 300ms; }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.mining ? "Mining Active" : "Miner Stopped";
+                    color: root.mining ? Theme.accent-green : Theme.text-muted;
+                    font-size: Theme.font-lg;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                // Status message
+                if root.miner-status != "" : Text {
+                    text: root.miner-status;
+                    color: root.miner-status == "Block found!" ? Theme.accent-yellow
+                        : (root.miner-status == "Waiting for sync..." ? Theme.accent-yellow
+                        : Theme.text-muted);
+                    font-size: Theme.font-sm;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Stats grid
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+
+            Card {
+                horizontal-stretch: 1;
+                height: 80px;
+
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    alignment: center;
+
+                    Text {
+                        text: "Hashrate";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.hashrate;
+                        color: Theme.accent-cyan;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "H/s";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            Card {
+                horizontal-stretch: 1;
+                height: 80px;
+
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    alignment: center;
+
+                    Text {
+                        text: "Blocks Found";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: root.blocks-found;
+                        color: Theme.accent-yellow;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // GPU Mining stats (visible when GPUs detected)
+        if root.gpu-device-count != "0" : Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "GPU Mining";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: gpu-badge-text.preferred-width + 12px;
+                        height: 20px;
+                        border-radius: 4px;
+                        background: Theme.accent-cyan.with-alpha(0.15);
+
+                        gpu-badge-text := Text {
+                            text: root.gpu-device-count + " GPU";
+                            color: Theme.accent-cyan;
+                            font-size: Theme.font-xs;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // GPU Hashrate
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 50px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-hover;
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "GPU H/s";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.gpu-hashrate;
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-lg;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // GPU Blocks
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 50px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-hover;
+
+                        VerticalLayout {
+                            padding-top: 6px;
+                            padding-bottom: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: "GPU Blocks";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: root.gpu-blocks-found;
+                                color: Theme.accent-yellow;
+                                font-size: Theme.font-lg;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
+                if root.gpu-status != "" : Text {
+                    text: root.gpu-status;
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Difficulty, Reward & Threads
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Difficulty Target";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.difficulty;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                        max-width: 200px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Reward per Block";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.reward-per-block + " QUG";
+                        color: Theme.accent-green;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // CPU threads stepper (default 1 = ~5% on a 16-core box)
+                HorizontalLayout {
+                    alignment: space-between;
+                    spacing: Theme.spacing-sm;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "CPU Threads";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                        }
+                        Text {
+                            text: "live: " + root.thread-count + " · max: " + root.cpu-threads-max;
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: cpu-minus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            cpu-minus := TouchArea {
+                                clicked => {
+                                    if (root.cpu-threads-current > 1) {
+                                        root.set-cpu-threads(root.cpu-threads-current - 1);
+                                    }
+                                }
+                            }
+                            Text { text: "−"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+
+                        Rectangle {
+                            width: 56px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-cyan.with-alpha(0.10);
+                            border-width: 1px;
+                            border-color: Theme.accent-cyan.with-alpha(0.4);
+                            Text {
+                                text: root.cpu-threads-current;
+                                color: Theme.accent-cyan;
+                                font-size: Theme.font-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: cpu-plus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            cpu-plus := TouchArea {
+                                clicked => {
+                                    if (root.cpu-threads-current < root.cpu-threads-max) {
+                                        root.set-cpu-threads(root.cpu-threads-current + 1);
+                                    }
+                                }
+                            }
+                            Text { text: "+"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // GPU intensity stepper (5% steps; default 5%)
+                if root.gpu-device-count != "0" : HorizontalLayout {
+                    alignment: space-between;
+                    spacing: Theme.spacing-sm;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "GPU Intensity";
+                            color: Theme.text-secondary;
+                            font-size: Theme.font-sm;
+                        }
+                        Text {
+                            text: "default low — increase if your GPU is idle";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: gpu-minus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            gpu-minus := TouchArea {
+                                clicked => {
+                                    if (root.gpu-intensity-current > 5) {
+                                        root.set-gpu-intensity(root.gpu-intensity-current - 5);
+                                    }
+                                }
+                            }
+                            Text { text: "−"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+
+                        Rectangle {
+                            width: 56px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: Theme.accent-purple.with-alpha(0.10);
+                            border-width: 1px;
+                            border-color: Theme.accent-purple.with-alpha(0.4);
+                            Text {
+                                text: root.gpu-intensity-current + "%";
+                                color: Theme.accent-purple;
+                                font-size: Theme.font-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            width: 32px; height: 32px;
+                            border-radius: Theme.radius-sm;
+                            background: gpu-plus.has-hover ? Theme.bg-hover : Theme.bg-input;
+                            border-width: 1px; border-color: Theme.border;
+                            gpu-plus := TouchArea {
+                                clicked => {
+                                    if (root.gpu-intensity-current < 100) {
+                                        root.set-gpu-intensity(root.gpu-intensity-current + 5);
+                                    }
+                                }
+                            }
+                            Text { text: "+"; color: Theme.text-primary; font-size: Theme.font-md; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text {
+                        text: "Mining Address";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.miner-address;
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        overflow: elide;
+                        max-width: 200px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Mining mode selector
+        Card {
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                Text {
+                    text: "Mining Mode";
+                    color: Theme.text-secondary;
+                    font-size: Theme.font-sm;
+                    font-weight: 600;
+                }
+
+                HorizontalLayout {
+                    spacing: Theme.spacing-sm;
+
+                    // Solo button
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        border-radius: Theme.radius-sm;
+                        background: !root.pool-mode ? Theme.accent-cyan.with-alpha(0.2) : Theme.bg-hover;
+                        border-width: !root.pool-mode ? 1px : 0px;
+                        border-color: Theme.accent-cyan;
+
+                        TouchArea {
+                            clicked => { root.pool-mode = false; }
+                        }
+
+                        Text {
+                            text: "Solo";
+                            color: !root.pool-mode ? Theme.accent-cyan : Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            font-weight: !root.pool-mode ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Pool button
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 36px;
+                        border-radius: Theme.radius-sm;
+                        background: root.pool-mode ? Theme.accent-yellow.with-alpha(0.2) : Theme.bg-hover;
+                        border-width: root.pool-mode ? 1px : 0px;
+                        border-color: Theme.accent-yellow;
+
+                        TouchArea {
+                            clicked => { root.pool-mode = true; }
+                        }
+
+                        Text {
+                            text: "Pool";
+                            color: root.pool-mode ? Theme.accent-yellow : Theme.text-muted;
+                            font-size: Theme.font-sm;
+                            font-weight: root.pool-mode ? 700 : 400;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.pool-mode
+                        ? "Share rewards with pool (PPLNS)"
+                        : "Keep 100% of block rewards";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Spacer
+        Rectangle { vertical-stretch: 1; }
+
+        // Toggle button with SVG icon
+        QButton {
+            label: root.mining ? "Stop Mining" : "Start Mining";
+            button-color: root.mining ? Theme.accent-red : Theme.accent-green;
+            has-icon: true;
+            btn-icon: root.mining ? @image-url("icons/square.svg") : @image-url("icons/play.svg");
+            clicked => { root.toggle-mining(); }
+        }
+    }
+}

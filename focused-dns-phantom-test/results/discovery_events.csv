@@ -1,0 +1,23 @@
+timestamp,node_id,event_type,details,dns_provider,peer_count,success
+2025-09-10T16:50:23,dns-phantom-node-5,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:23,dns-phantom-node-5,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:21,dns-phantom-node-3,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:21,dns-phantom-node-3,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:22,dns-phantom-node-4,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:22,dns-phantom-node-4,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:24,dns-phantom-node-6,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:24,dns-phantom-node-6,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:27,dns-phantom-node-9,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:27,dns-phantom-node-9,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:19,dns-phantom-node-1,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:19,dns-phantom-node-1,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:14,dns-phantom-hub,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:14,dns-phantom-hub,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:28,dns-phantom-node-10,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:28,dns-phantom-node-10,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:25,dns-phantom-node-7,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:25,dns-phantom-node-7,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:20,dns-phantom-node-2,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:20,dns-phantom-node-2,initialization,Steganographic communication,,0,True
+2025-09-10T16:50:26,dns-phantom-node-8,initialization,Invisible internet within the internet is now active,,0,True
+2025-09-10T16:50:26,dns-phantom-node-8,initialization,Steganographic communication,,0,True

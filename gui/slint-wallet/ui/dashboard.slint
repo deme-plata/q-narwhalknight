@@ -1,0 +1,510 @@
+import { Theme, Card, GradientCard, NavButton, Icon } from "theme.slint";
+
+export struct TokenInfo {
+    name: string,
+    symbol: string,
+    balance: string,
+    value-usd: string,
+}
+
+export component DashboardScreen inherits Rectangle {
+    in property <string> address: "";
+    in property <string> qug-balance: "0.00";
+    in property <string> qug-value-usd: "$0.00";
+    in property <[TokenInfo]> tokens: [];
+    in-out property <bool> copy-feedback: false;
+
+    callback navigate(int);
+    callback copy-address();
+    callback send-token(string);
+    // v11.5.0: AI TRADE — request MCP setup so user's Claude Code can analyse the portfolio
+    callback ai-trade-clicked();
+
+    background: Theme.bg-primary;
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // Header
+        HorizontalLayout {
+            alignment: space-between;
+            height: 32px;
+
+            Text {
+                text: "Dashboard";
+                color: Theme.text-primary;
+                font-size: Theme.font-xl;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+        }
+
+        // Wallet Address Card
+        Card {
+            height: 56px;
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-md;
+                padding-right: Theme.spacing-md;
+                alignment: space-between;
+
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Wallet Address";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                    }
+                    Text {
+                        text: root.address;
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        overflow: elide;
+                        max-width: 280px;
+                    }
+                }
+
+                Rectangle {
+                    width: 72px;
+                    border-radius: Theme.radius-sm;
+                    background: copy-touch.has-hover ? Theme.bg-hover : transparent;
+
+                    copy-touch := TouchArea {
+                        clicked => { root.copy-address(); }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 4px;
+                        Icon {
+                            source: @image-url("icons/copy.svg");
+                            icon-color: root.copy-feedback ? Theme.accent-green : Theme.accent-blue;
+                            width: 14px;
+                            height: 14px;
+                        }
+                        Text {
+                            text: root.copy-feedback ? "Copied!" : "Copy";
+                            color: root.copy-feedback ? Theme.accent-green : Theme.accent-blue;
+                            font-size: Theme.font-sm;
+                            font-weight: root.copy-feedback ? 700 : 400;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // QUG Balance Card — compact horizontal layout with empty-state hint.
+        // v11.6.0: was 130px tall hero with 3xl number; now 80px with side-by-side
+        // label/value plus an explanatory line when the balance is zero, which
+        // told users nothing useful before.
+        GradientCard {
+            card-gradient: @linear-gradient(135deg, #1a2744, #0f172a);
+            height: root.qug-balance == "0.00" || root.qug-balance == "0.0000" ? 96px : 80px;
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-lg;
+                padding-right: Theme.spacing-lg;
+                spacing: Theme.spacing-md;
+                alignment: space-between;
+
+                // Left: label + helper text
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: "QUG Balance";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-sm;
+                        font-weight: 600;
+                    }
+                    if root.qug-balance == "0.00" || root.qug-balance == "0.0000" : Text {
+                        text: "Start mining or receive QUG to begin";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // Right: number + USD value
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 0;
+
+                    Text {
+                        text: root.qug-balance;
+                        color: Theme.text-primary;
+                        font-size: Theme.font-xl;
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: root.qug-value-usd;
+                        color: Theme.accent-green;
+                        font-size: Theme.font-xs;
+                        horizontal-alignment: right;
+                    }
+                }
+            }
+        }
+
+        // Custom Tokens header
+        HorizontalLayout {
+            alignment: space-between;
+            height: 24px;
+
+            Text {
+                text: "My Tokens";
+                color: Theme.text-primary;
+                font-size: Theme.font-lg;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+
+            if root.tokens.length > 0 : Text {
+                text: root.tokens.length + " token" + (root.tokens.length > 1 ? "s" : "");
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+                vertical-alignment: center;
+            }
+        }
+
+        // Token list (scrollable)
+        Flickable {
+            viewport-height: root.tokens.length * 72px;
+
+            VerticalLayout {
+                spacing: Theme.spacing-sm;
+
+                for token[i] in root.tokens : Card {
+                    height: 64px;
+                    elevated: true;
+
+                    HorizontalLayout {
+                        padding-left: Theme.spacing-md;
+                        padding-right: Theme.spacing-sm;
+                        alignment: space-between;
+
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: token.name;
+                                color: Theme.text-primary;
+                                font-size: Theme.font-md;
+                                font-weight: 500;
+                            }
+                            Text {
+                                text: token.symbol;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            alignment: end;
+
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+                                Text {
+                                    text: token.balance;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-md;
+                                    horizontal-alignment: right;
+                                }
+                                Text {
+                                    text: token.value-usd;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-xs;
+                                    horizontal-alignment: right;
+                                }
+                            }
+
+                            // Send button with icon
+                            Rectangle {
+                                width: 52px;
+                                height: 32px;
+                                border-radius: Theme.radius-sm;
+                                background: send-touch.pressed ? Theme.accent-green.darker(25%)
+                                    : send-touch.has-hover ? Theme.accent-green.darker(10%)
+                                    : Theme.accent-green;
+                                drop-shadow-blur: send-touch.pressed ? 1px : 4px;
+                                drop-shadow-color: Theme.accent-green.with-alpha(0.25);
+                                animate background, drop-shadow-blur { duration: 100ms; }
+
+                                send-touch := TouchArea {
+                                    clicked => { root.send-token(token.symbol); }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 3px;
+                                    Icon {
+                                        source: @image-url("icons/send.svg");
+                                        icon-color: Theme.text-primary;
+                                        width: 13px;
+                                        height: 13px;
+                                    }
+                                    Text {
+                                        text: "Send";
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-xs;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Quick Actions — icon tiles with SVG icons
+        HorizontalLayout {
+            spacing: Theme.spacing-sm;
+
+            // Receive
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 64px;
+                border-radius: Theme.radius-md;
+                background: recv-touch.has-hover ? Theme.bg-card : Theme.bg-secondary;
+                border-width: 1px;
+                border-color: recv-touch.has-hover ? Theme.accent-green.with-alpha(0.3) : transparent;
+                drop-shadow-blur: recv-touch.has-hover ? 6px : 0px;
+                drop-shadow-color: Theme.accent-green.with-alpha(0.1);
+                animate background, border-color, drop-shadow-blur { duration: 150ms; }
+
+                recv-touch := TouchArea { clicked => { root.navigate(5); } }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/arrow-down-to-line.svg");
+                            icon-color: Theme.accent-green;
+                            width: Theme.icon-lg;
+                            height: Theme.icon-lg;
+                        }
+                    }
+                    Text { text: "Receive"; color: Theme.text-secondary; font-size: Theme.font-xs; font-weight: 500; horizontal-alignment: center; }
+                }
+            }
+
+            // Send
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 64px;
+                border-radius: Theme.radius-md;
+                background: send-act-touch.has-hover ? Theme.bg-card : Theme.bg-secondary;
+                border-width: 1px;
+                border-color: send-act-touch.has-hover ? Theme.accent-blue.with-alpha(0.3) : transparent;
+                drop-shadow-blur: send-act-touch.has-hover ? 6px : 0px;
+                drop-shadow-color: Theme.accent-blue.with-alpha(0.1);
+                animate background, border-color, drop-shadow-blur { duration: 150ms; }
+
+                send-act-touch := TouchArea { clicked => { root.navigate(2); } }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/arrow-up-from-line.svg");
+                            icon-color: Theme.accent-blue;
+                            width: Theme.icon-lg;
+                            height: Theme.icon-lg;
+                        }
+                    }
+                    Text { text: "Send"; color: Theme.text-secondary; font-size: Theme.font-xs; font-weight: 500; horizontal-alignment: center; }
+                }
+            }
+
+            // DEX
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 64px;
+                border-radius: Theme.radius-md;
+                background: dex-touch.has-hover ? Theme.bg-card : Theme.bg-secondary;
+                border-width: 1px;
+                border-color: dex-touch.has-hover ? Theme.accent-purple.with-alpha(0.3) : transparent;
+                drop-shadow-blur: dex-touch.has-hover ? 6px : 0px;
+                drop-shadow-color: Theme.accent-purple.with-alpha(0.1);
+                animate background, border-color, drop-shadow-blur { duration: 150ms; }
+
+                dex-touch := TouchArea { clicked => { root.navigate(8); } }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/arrow-up-down.svg");
+                            icon-color: Theme.accent-purple;
+                            width: Theme.icon-lg;
+                            height: Theme.icon-lg;
+                        }
+                    }
+                    Text { text: "DEX"; color: Theme.text-secondary; font-size: Theme.font-xs; font-weight: 500; horizontal-alignment: center; }
+                }
+            }
+
+            // Miner
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 64px;
+                border-radius: Theme.radius-md;
+                background: mine-touch.has-hover ? Theme.bg-card : Theme.bg-secondary;
+                border-width: 1px;
+                border-color: mine-touch.has-hover ? Theme.accent-yellow.with-alpha(0.3) : transparent;
+                drop-shadow-blur: mine-touch.has-hover ? 6px : 0px;
+                drop-shadow-color: Theme.accent-yellow.with-alpha(0.1);
+                animate background, border-color, drop-shadow-blur { duration: 150ms; }
+
+                mine-touch := TouchArea { clicked => { root.navigate(4); } }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        alignment: center;
+                        Icon {
+                            source: @image-url("icons/pickaxe.svg");
+                            icon-color: Theme.accent-yellow;
+                            width: Theme.icon-lg;
+                            height: Theme.icon-lg;
+                        }
+                    }
+                    Text { text: "Miner"; color: Theme.text-secondary; font-size: Theme.font-xs; font-weight: 500; horizontal-alignment: center; }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // AI TRADE — flagship card: connect Claude Code via OAuth2 + MCP
+        // ─────────────────────────────────────────────
+        Rectangle {
+            height: 84px;
+            border-radius: Theme.radius-lg;
+            background: ai-touch.has-hover
+                ? @linear-gradient(135deg,
+                    Theme.accent-purple.with-alpha(0.18),
+                    Theme.accent-cyan.with-alpha(0.12))
+                : @linear-gradient(135deg,
+                    Theme.accent-purple.with-alpha(0.10),
+                    Theme.accent-cyan.with-alpha(0.06));
+            border-width: 1px;
+            border-color: ai-touch.has-hover
+                ? Theme.accent-purple.with-alpha(0.6)
+                : Theme.accent-purple.with-alpha(0.3);
+            drop-shadow-blur: ai-touch.has-hover ? 16px : 6px;
+            drop-shadow-offset-y: ai-touch.has-hover ? 4px : 2px;
+            drop-shadow-color: Theme.accent-purple.with-alpha(0.25);
+            animate background, border-color, drop-shadow-blur, drop-shadow-offset-y { duration: 180ms; }
+
+            // Left accent stripe
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: 4px;
+                height: parent.height;
+                background: @linear-gradient(180deg, Theme.accent-purple, Theme.accent-cyan);
+                border-top-left-radius: Theme.radius-lg;
+                border-bottom-left-radius: Theme.radius-lg;
+            }
+
+            ai-touch := TouchArea {
+                clicked => { root.ai-trade-clicked(); }
+            }
+
+            HorizontalLayout {
+                padding-left: Theme.spacing-lg;
+                padding-right: Theme.spacing-md;
+                spacing: Theme.spacing-md;
+
+                // Bot avatar tile
+                Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: Theme.radius-md;
+                    background: @radial-gradient(circle,
+                        Theme.accent-purple.with-alpha(0.30) 0%,
+                        Theme.accent-cyan.with-alpha(0.10) 60%,
+                        transparent 100%);
+                    y: (parent.height - 56px) / 2;
+
+                    Icon {
+                        source: @image-url("icons/bot.svg");
+                        icon-color: Theme.accent-purple;
+                        width: 30px;
+                        height: 30px;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    horizontal-stretch: 1;
+
+                    HorizontalLayout {
+                        spacing: Theme.spacing-sm;
+                        Text {
+                            text: "AI TRADE";
+                            color: Theme.text-primary;
+                            font-size: Theme.font-lg;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                        }
+                        // "Beta" pill
+                        Rectangle {
+                            width: 44px;
+                            height: 18px;
+                            border-radius: 9px;
+                            background: Theme.accent-cyan.with-alpha(0.18);
+                            border-width: 1px;
+                            border-color: Theme.accent-cyan.with-alpha(0.4);
+                            Text {
+                                text: "BETA";
+                                color: Theme.accent-cyan;
+                                font-size: 9px;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                    Text {
+                        text: "Connect Claude Code via OAuth2 + MCP — read-only portfolio analysis & trade suggestions";
+                        color: Theme.text-secondary;
+                        font-size: Theme.font-xs;
+                        wrap: word-wrap;
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        source: @image-url("icons/arrow-right.svg");
+                        icon-color: Theme.accent-purple.with-alpha(0.7);
+                        width: Theme.icon-md;
+                        height: Theme.icon-md;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,445 @@
+[center]
+[size=28pt][color=#6B46C1][b]Q-NarwhalKnight[/b][/color][/size]
+[size=14pt][color=#805AD5]The Quantum-Ready Blockchain[/color][/size]
+
+[img]https://quillon.xyz/logo-256.png[/img]
+
+[size=12pt][b]Post-Quantum Native | Zero-Knowledge Privacy | Decentralized AI | DAG-Knight Consensus[/b][/size]
+
+[url=https://quillon.xyz][b]Website[/b][/url] | [url=https://quillon.xyz/whitepaper][b]Whitepaper[/b][/url] | [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Investor-Pitch-2026.pdf][b]Investor Pitch[/b][/url] | [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf][b]Technical Report[/b][/url]
+[/center]
+
+[hr]
+
+[center]
+[size=22pt][color=#EF4444][b]7 DAYS TO MAINNET[/b][/color][/size]
+[size=14pt][i]February 15, 2026 - The Quantum-Safe Era Begins[/i][/size]
+[/center]
+
+[hr]
+
+[size=18pt][color=#6B46C1][b]Development Update - February 2026[/b][/color][/size]
+[hr]
+
+Fellow cypherpunks,
+
+It has been a long road from the first commit to today, but we're finally here: [b][color=#10B981]7 days until mainnet launch[/color][/b]. What follows is a comprehensive update covering the massive engineering work that has gone into making Q-NarwhalKnight production-ready, the recent decentralization hardening, and what the mainnet launch means for the network.
+
+This is not vaporware. This is not a whitepaper promise. This is [b]500,000+ lines of compiled, tested, deployed Rust code[/b] across 83 modular crates with 4,000+ automated tests, running a live testnet that has produced [b]2.4 million+ blocks[/b].
+
+
+[size=18pt][color=#6B46C1][b]Network Status (Live Now)[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Metric[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Current Block Height[/td]
+[td][color=#10B981][b]2,436,000+[/b][/color][/td]
+[/tr]
+[tr]
+[td]Network Uptime[/td]
+[td]99.9%+[/td]
+[/tr]
+[tr]
+[td]Consensus Protocol[/td]
+[td]DAG-Knight + Narwhal Mempool + Bullshark Finality[/td]
+[/tr]
+[tr]
+[td]Transaction Finality[/td]
+[td]< 3 seconds[/td]
+[/tr]
+[tr]
+[td]Throughput (measured)[/td]
+[td]2,800+ TPS[/td]
+[/tr]
+[tr]
+[td]Codebase Size[/td]
+[td]500,000+ LOC Rust (83 crates)[/td]
+[/tr]
+[tr]
+[td]Test Suite[/td]
+[td]4,000+ automated tests (incl. mainnet safety)[/td]
+[/tr]
+[tr]
+[td]Total Supply (hard cap)[/td]
+[td]21,000,000 QUG[/td]
+[/tr]
+[tr]
+[td]Mining[/td]
+[td]SHA-3 + VDF (consumer hardware, ASIC-resistant)[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]What Makes Q-NarwhalKnight Different[/b][/color][/size]
+[hr]
+
+Every major blockchain today - Bitcoin, Ethereum, Solana, Cardano - relies on elliptic curve cryptography (ECDSA, Ed25519) that [b]Shor's algorithm can break in polynomial time[/b] on a sufficiently powerful quantum computer. This isn't science fiction:
+
+[list]
+[li][b]IBM Quantum Heron (2024):[/b] 1,121 physical qubits with record-low error rates[/li]
+[li][b]Google Willow (2024):[/b] Demonstrated quantum error correction below threshold[/li]
+[li][b]NIST FIPS 203/204/205 (2024):[/b] Post-quantum algorithm standards finalized[/li]
+[li][b]NSA CNSA 2.0:[/b] Mandates post-quantum algorithms for classified systems by 2035[/li]
+[li][b]"Harvest Now, Decrypt Later":[/b] Nation-states are already storing encrypted traffic for future quantum decryption[/li]
+[/list]
+
+The $3+ trillion crypto market cap is sitting on an unhedged existential risk. Q-NarwhalKnight is the [b]only production-ready Layer 1[/b] that has already completed the post-quantum transition.
+
+
+[size=16pt][color=#3B82F6][b]Five Pillars of Q-NarwhalKnight[/b][/color][/size]
+
+[b][color=#EF4444]Pillar 1: Quantum Security at Every Layer[/color][/b]
+
+Post-quantum cryptography isn't bolted on - it's native to every protocol layer:
+
+[table]
+[tr]
+[td][b]Layer[/b][/td]
+[td][b]Algorithm[/b][/td]
+[td][b]Security[/b][/td]
+[/tr]
+[tr]
+[td]Transaction Signing[/td]
+[td]Dilithium5[/td]
+[td]NIST Level 5 (lattice-based)[/td]
+[/tr]
+[tr]
+[td]Certificate Signing[/td]
+[td]SQIsign[/td]
+[td]Supersingular isogenies (204-byte sigs)[/td]
+[/tr]
+[tr]
+[td]Key Exchange[/td]
+[td]Kyber1024[/td]
+[td]NIST Level 5 (lattice-based)[/td]
+[/tr]
+[tr]
+[td]Symmetric Encryption[/td]
+[td]AEGIS-256[/td]
+[td]AES-based AEAD (2-5x faster)[/td]
+[/tr]
+[tr]
+[td]VDF Mining[/td]
+[td]Genus-2 VDF[/td]
+[td]Hyperelliptic curve time-locking[/td]
+[/tr]
+[tr]
+[td]Ring Signatures[/td]
+[td]Module-LWE[/td]
+[td]Lattice-based unlinkability[/td]
+[/tr]
+[tr]
+[td]Threshold Signing[/td]
+[td]FROST[/td]
+[td]Schnorr-based multi-party[/td]
+[/tr]
+[/table]
+
+A quantum adversary cannot attack [i]any[/i] layer of the protocol stack.
+
+
+[b][color=#10B981]Pillar 2: Physics-Grounded Consensus (K-Parameter Master Equation)[/color][/b]
+
+The consensus mechanism is derived from quantum field theory - specifically the Gross-Pitaevskii equation for Bose-Einstein condensates. The K-Parameter Master Equation governs validator agreement dynamics with a key result: [b]Byzantine Fault Tolerance with n >= 2f+1 validators[/b] (classical BFT requires n >= 3f+1). A network of 7 validators can tolerate 3 Byzantine faults where classically you'd need 10.
+
+Full 50-page whitepaper with mathematical proofs available at [url=https://quillon.xyz/whitepaper]quillon.xyz/whitepaper[/url].
+
+
+[b][color=#8B5CF6]Pillar 3: Privacy Without Compromise[/color][/b]
+
+The most comprehensive privacy stack in any production blockchain:
+
+[list]
+[li][b]Sender Privacy:[/b] CLSAG ring signatures (who sent it)[/li]
+[li][b]Recipient Privacy:[/b] Stealth addresses (who received it)[/li]
+[li][b]Amount Privacy:[/b] Bulletproofs++ range proofs (how much)[/li]
+[li][b]Transaction Graph:[/b] Chaumian mixing pools (link between sender/recipient)[/li]
+[li][b]Network Privacy:[/b] Tor with 4 dedicated circuits per validator (IP addresses)[/li]
+[li][b]Propagation Privacy:[/b] Dandelion++ protocol (origin node)[/li]
+[li][b]Validity Proofs:[/b] ZK-STARKs (transaction correctness without revealing data)[/li]
+[/list]
+
+
+[b][color=#F59E0B]Pillar 4: Decentralized AI - On-Chain, Private, Verifiable[/color][/b]
+
+The world's first blockchain with embedded distributed AI inference. Every validator node participates in AI computation:
+
+[list]
+[li]Mistral-7B and BitNet b1.58 running natively on validator hardware[/li]
+[li]All inference encrypted with AEGIS-256 (Kyber1024 key exchange)[/li]
+[li]ZK proofs of computation correctness (Proof-of-Inference)[/li]
+[li]Tensor parallelism across multiple nodes for large models[/li]
+[li]Zero reliance on external APIs (OpenAI, Google, etc.)[/li]
+[/list]
+
+
+[b][color=#06B6D4]Pillar 5: Complete DeFi Ecosystem (Live Now)[/color][/b]
+
+Not just a blockchain - a complete financial platform running today:
+
+[list]
+[li][b]Quantum DEX:[/b] Constant-product AMM with cross-decimal support, real-time price oracle[/li]
+[li][b]QUGUSD Stablecoin:[/b] Collateral-backed stablecoin pegged via AMM pool reserves[/li]
+[li][b]Quillon Bank:[/b] Decentralized lending with AI credit assessment, CDP system[/li]
+[li][b]QNK10 Index Fund:[/b] Diversified basket of top network tokens[/li]
+[li][b]Custom Tokens:[/b] Deploy your own tokens (ERC-20 equivalent)[/li]
+[li][b]NITRO Boost:[/b] Marketing/liquidity incentive mechanism[/li]
+[li][b]Governance DAO:[/b] Mining-weighted voting with reputation system[/li]
+[/list]
+
+
+[size=18pt][color=#6B46C1][b]Recent Engineering: Decentralization Hardening (February 2026)[/b][/color][/size]
+[hr]
+
+In the final push toward mainnet, we completed a comprehensive decentralization and money integrity audit. Five critical areas were identified and resolved:
+
+[b][color=#EF4444]1. State Root Computation (P0 - Fixed)[/color][/b]
+
+Block headers now contain a real SHA3-256 state root computed over all transaction IDs. This enables any node to independently verify block integrity. The upgrade is height-gated through our consensus upgrade system, meaning historical blocks remain valid while new blocks carry cryptographic state proofs.
+
+[b][color=#EF4444]2. DEX Swaps On-Chain (P0 - Fixed)[/color][/b]
+
+Previously, DEX swaps were executed locally but not included in blocks propagated to other nodes. Pool reserves could diverge between peers. Now, swap transactions are included in blocks via the production mempool, and all nodes process incoming swap transactions from P2P blocks. A deduplication mechanism prevents double-crediting when a locally-executed swap arrives in a block.
+
+[b][color=#EF4444]3. P2P Balance Update Validation (P0 - Fixed)[/color][/b]
+
+P2P balance updates now carry block evidence fields (block_hash, tx_index) to prevent unsubstantiated balance inflation. Rate limits were tightened from 50,000 to 2,000 updates/node/minute. An aggregate amount cap of 100 QUG/node/minute prevents supply inflation attacks. Unknown peers are rejected unless they're verified bootstrap nodes.
+
+[b][color=#F59E0B]4. Bootstrap Decentralization (P1 - Fixed)[/color][/b]
+
+The network no longer depends on just 2 hardcoded bootstrap nodes. Peer discovery now uses 6 sources in priority order:
+[list]
+[li]Environment variables (Q_BOOTSTRAP_PEERS)[/li]
+[li]Config file (config.toml in data directory)[/li]
+[li]Cached peers (known_peers.json - persists top 20 across restarts)[/li]
+[li]DNS bootstrap (bootstrap.quillon.xyz TXT records)[/li]
+[li]Hardcoded defaults (always available as fallback)[/li]
+[/list]
+
+[b][color=#F59E0B]5. Token Deployment Authentication (P2 - Fixed)[/color][/b]
+
+Token deployment now requires wallet authentication, pre-checks balance before execution, and enforces a rate limit of 5 deployments per wallet per hour. No more anonymous token spam.
+
+
+[size=18pt][color=#6B46C1][b]Tokenomics: QUG[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Parameter[/b][/td]
+[td][b]Value[/b][/td]
+[/tr]
+[tr]
+[td]Total Supply (Hard Cap)[/td]
+[td]21,000,000 QUG[/td]
+[/tr]
+[tr]
+[td]Base Block Reward[/td]
+[td]0.001 QUG[/td]
+[/tr]
+[tr]
+[td]Halving Schedule[/td]
+[td]Time-based (annual calendar dates)[/td]
+[/tr]
+[tr]
+[td]First Halving[/td]
+[td]October 26, 2026[/td]
+[/tr]
+[tr]
+[td]Mining Type[/td]
+[td]SHA-3 + VDF (consumer hardware)[/td]
+[/tr]
+[tr]
+[td]Development Fee[/td]
+[td]0.5% of mining rewards only[/td]
+[/tr]
+[/table]
+
+[b]Why time-based halvings?[/b] Traditional blockchains couple emission to block height. Protocol improvements that produce faster blocks [i]accelerate[/i] the halving schedule, making tokenomics unpredictable. QUG halvings occur on fixed calendar dates regardless of block production rate. Faster blocks = more utility, same scarcity.
+
+[b]Fair launch.[/b] No premine. No ICO. No VC allocation. VDF mining levels the playing field - your laptop contributes meaningfully. The 0.5% dev fee is the only team allocation.
+
+
+[size=18pt][color=#6B46C1][b]Competitive Landscape[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Feature[/b][/td]
+[td][b]Q-NarwhalKnight[/b][/td]
+[td][b]Bitcoin[/b][/td]
+[td][b]Ethereum[/b][/td]
+[td][b]Solana[/b][/td]
+[td][b]Monero[/b][/td]
+[/tr]
+[tr]
+[td]Post-Quantum[/td]
+[td][color=#10B981][b]Native[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[/tr]
+[tr]
+[td]Privacy[/td]
+[td][color=#10B981][b]Full Stack[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#F59E0B]Optional[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#10B981]Ring Sigs[/color][/td]
+[/tr]
+[tr]
+[td]Decentralized AI[/td]
+[td][color=#10B981][b]Distributed[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[/tr]
+[tr]
+[td]Built-in DEX[/td]
+[td][color=#10B981][b]Full AMM[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#F59E0B]L2 only[/color][/td]
+[td][color=#F59E0B]Separate[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[/tr]
+[tr]
+[td]Lending[/td]
+[td][color=#10B981][b]Quillon Bank[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#F59E0B]Separate[/color][/td]
+[td][color=#F59E0B]Separate[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[/tr]
+[tr]
+[td]ASIC Resistant[/td]
+[td][color=#10B981][b]VDF[/b][/color][/td]
+[td][color=#EF4444]No[/color][/td]
+[td]N/A (PoS)[/td]
+[td]N/A (PoS)[/td]
+[td][color=#10B981]RandomX[/color][/td]
+[/tr]
+[tr]
+[td]BFT Threshold[/td]
+[td][color=#10B981][b]2f+1[/b][/color][/td]
+[td]N/A[/td]
+[td]3f+1[/td]
+[td]3f+1[/td]
+[td]N/A[/td]
+[/tr]
+[tr]
+[td]ZK Proofs[/td]
+[td][color=#10B981][b]Native[/b][/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#F59E0B]L2[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[td][color=#EF4444]None[/color][/td]
+[/tr]
+[/table]
+
+No existing blockchain offers [i]all[/i] of: post-quantum crypto + full privacy + decentralized AI + built-in DeFi + ZK proofs + ASIC-resistant mining + improved BFT. Q-NarwhalKnight is the only entry in the intersection of all categories.
+
+
+[size=18pt][color=#6B46C1][b]The 500,000-Line Head Start[/b][/color][/size]
+[hr]
+
+This codebase represents an estimated 25+ engineer-years of development effort. Any competitor starting today faces:
+
+[list]
+[li][b]2-3 years[/b] to replicate the post-quantum crypto stack[/li]
+[li][b]1-2 years[/b] to build the privacy layer (ring sigs + STARKs + Tor)[/li]
+[li][b]1-2 years[/b] to implement distributed AI inference[/li]
+[li][b]1 year[/b] to build the DeFi ecosystem[/li]
+[li]Meanwhile, Q-NarwhalKnight continues advancing[/li]
+[/list]
+
+The moat isn't static - it widens every day.
+
+
+[size=18pt][color=#6B46C1][b]Mainnet Roadmap[/b][/color][/size]
+[hr]
+
+[table]
+[tr]
+[td][b]Date[/b][/td]
+[td][b]Milestone[/b][/td]
+[td][b]Status[/b][/td]
+[/tr]
+[tr]
+[td]Q1 2026[/td]
+[td]Testnet live with mining, DEX, AI, P2P sync[/td]
+[td][color=#10B981][b]COMPLETE[/b][/color][/td]
+[/tr]
+[tr]
+[td]Feb 8, 2026[/td]
+[td]Decentralization hardening (state roots, on-chain swaps, auth)[/td]
+[td][color=#10B981][b]COMPLETE[/b][/color][/td]
+[/tr]
+[tr]
+[td][color=#EF4444][b]Feb 15, 2026[/b][/color][/td]
+[td][color=#EF4444][b]MAINNET LAUNCH[/b][/color][/td]
+[td][color=#F59E0B][b]7 DAYS[/b][/color][/td]
+[/tr]
+[tr]
+[td]Oct 26, 2026[/td]
+[td]First halving event[/td]
+[td]Scheduled[/td]
+[/tr]
+[tr]
+[td]Q1 2027[/td]
+[td]Enterprise SDK, sovereign chain toolkit[/td]
+[td]Planned[/td]
+[/tr]
+[tr]
+[td]Q2 2027[/td]
+[td]Cross-chain bridges (Bitcoin, Ethereum), mobile wallet[/td]
+[td]Planned[/td]
+[/tr]
+[/table]
+
+
+[size=18pt][color=#6B46C1][b]How to Get Involved[/b][/color][/size]
+[hr]
+
+[b]Run a Node (It's Easy):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-linux-x86_64
+chmod +x q-api-server-linux-x86_64
+./q-api-server-linux-x86_64 --port 8080 --p2p-port 9001[/code]
+
+[b]Mine QUG:[/b] The built-in miner runs on consumer hardware. No ASICs needed. Your laptop contributes meaningfully thanks to VDF-based mining that resists hardware centralization.
+
+[b]Use the Wallet:[/b] Visit [url=https://quillon.xyz]quillon.xyz[/url] for the full web wallet with DEX, token deployment, AI chat, and more.
+
+[b]Deploy Tokens:[/b] Create your own tokens on Q-NarwhalKnight - custom name, symbol, supply, and decimals.
+
+
+[size=18pt][color=#6B46C1][b]Downloads[/b][/color][/size]
+[hr]
+
+[b]Pre-compiled Binary (Linux x86_64):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-linux-x86_64 && chmod +x q-api-server-linux-x86_64[/code]
+
+[b]Investor Pitch (PDF):[/b] [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Investor-Pitch-2026.pdf]Q-NarwhalKnight-Investor-Pitch-2026.pdf[/url]
+[b]Technical Report:[/b] [url=https://quillon.xyz/downloads/Q-NarwhalKnight-Project-Report.pdf]Q-NarwhalKnight-Project-Report.pdf[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+[b]Source Code:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+
+
+[hr]
+
+[center]
+[size=14pt][color=#6B46C1][i]"Physical laws should have mathematical beauty." - Paul Dirac[/i][/color][/size]
+[size=12pt][i]Q-NarwhalKnight's consensus dynamics satisfy this criterion.[/i][/size]
+
+[size=16pt][b][color=#EF4444]7 days. The quantum-safe era begins.[/color][/b][/size]
+[/center]
+
+[hr]
+
+[size=10pt][color=#94A3B8][i]Disclaimer: This post is for informational purposes only and does not constitute financial advice. Cryptocurrency investments carry significant risk. Past performance is not indicative of future results. Conduct your own research before participating.[/i][/color][/size]

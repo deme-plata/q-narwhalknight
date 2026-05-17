@@ -1,0 +1,66 @@
+[package]
+name = "q-robot-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Claude Code <claude@anthropic.com>"]
+description = "Quantum Water Robot Control CLI for Claude Code"
+
+[[bin]]
+name = "qrobot"
+path = "src/main.rs"
+
+[dependencies]
+# CLI and TUI
+clap = { version = "4.5", features = ["derive", "color", "suggestions"] }
+ratatui = "0.26"
+crossterm = "0.27"
+tokio = { workspace = true }
+
+# Quantum and Crypto
+q-dag-knight = { path = "../q-dag-knight" }
+q-network = { path = "../q-network" }
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+pqcrypto-traits = { workspace = true }
+rand = { workspace = true }
+sha3 = { workspace = true }
+
+# Communication
+libp2p = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Logging and Monitoring
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+
+# Robot Control
+q-robot-control = { path = "../q-robot-control" }
+q-types = { path = "../q-types" }
+void-walker = { path = "../void-walker" }  # Warp drive + water robots
+q-bio-dsl = { path = "../q-bio-dsl" }  # Biological programming DSL
+# q-consensus = { path = "../q-consensus" }  # Using local consensus module
+nalgebra = { workspace = true }
+num-complex = "0.4"  # Complex numbers for quantum amplitudes
+uuid = { workspace = true }
+
+# Visualization
+plotters = "0.3"
+colored = "2.1"
+indicatif = "0.17"  # Progress bars
+comfy-table = "7.1"
+hex = "0.4"  # Hex encoding for onion addresses
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Configuration
+toml = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }

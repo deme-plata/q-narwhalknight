@@ -1,0 +1,40 @@
+[package]
+name = "q-zcash-bridge"
+version = "0.3.0"
+edition = "2021"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+description = "🧅⚡ Tor-Only Zcash Shielded Bridge - Turn the entire Zcash shielded pool into a stealth layer"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "socks"] }
+blake3 = "1.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.21"
+tracing = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+
+# Zcash-specific dependencies
+zcash_primitives = { version = "0.13", features = ["transparent-inputs"] }
+zcash_proofs = "0.13"
+zcash_client_backend = { version = "0.10", features = ["transparent-inputs"] }
+orchard = "0.6"
+sapling-crypto = "0.1"
+
+# Q-NarwhalKnight internal dependencies
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-tor-client = { path = "../q-tor-client" }
+
+[features]
+default = ["stealth-relayer", "shield-bridge", "memo-channel"]
+stealth-relayer = []
+shield-bridge = []
+memo-channel = []
+quantum-safe = []

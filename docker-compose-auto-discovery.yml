@@ -1,0 +1,209 @@
+version: '3.8'
+
+networks:
+  qnarwhal-mesh:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+services:
+  # DNS-Phantom Hub for steganographic discovery
+  dns-phantom-hub:
+    image: qnarwhal:latest
+    container_name: dns-phantom-hub
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.10
+    environment:
+      - Q_NODE_ID=dns-phantom-hub
+      - Q_SERVER_ROLE=dns_phantom_hub
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - RUST_LOG=info
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    command: ["/app/bin/q-api-server", "--node-id", "dns-phantom-hub"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Tor Proxy for anonymous networking
+  tor-proxy:
+    image: qnarwhal:latest
+    container_name: tor-proxy
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.11
+    environment:
+      - Q_NODE_ID=tor-proxy
+      - Q_SERVER_ROLE=tor-proxy
+      - RUST_LOG=info
+    ports:
+      - "9050:9050"
+    command: ["sleep", "infinity"]  # Simple Tor proxy simulation
+
+  # Beta Coordinator (Server Beta simulation)
+  beta-coordinator:
+    image: qnarwhal:latest
+    container_name: beta-coordinator
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.20
+    environment:
+      - Q_NODE_ID=beta-coordinator
+      - Q_SERVER_ROLE=beta
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - RUST_LOG=info
+    ports:
+      - "8180:8080"
+      - "8181:8081"
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+    command: ["/app/bin/q-api-server", "--node-id", "beta-coordinator", "--port", "8080"]
+
+  # Alpha Node 1 - Auto-discovery enabled
+  alpha-node-1:
+    image: qnarwhal:latest
+    container_name: alpha-node-1
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.31
+    environment:
+      - Q_NODE_ID=alpha-node-1
+      - Q_SERVER_ROLE=alpha
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - Q_BOOTSTRAP_PEERS=""  # No hardcoded peers - use auto-discovery
+      - RUST_LOG=info
+    ports:
+      - "8280:8080"
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+      - beta-coordinator
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-1", "--target-beta", "--port", "8080"]
+
+  # Alpha Node 2 - Auto-discovery enabled
+  alpha-node-2:
+    image: qnarwhal:latest
+    container_name: alpha-node-2
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.32
+    environment:
+      - Q_NODE_ID=alpha-node-2
+      - Q_SERVER_ROLE=alpha
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - Q_BOOTSTRAP_PEERS=""  # No hardcoded peers - use auto-discovery
+      - RUST_LOG=info
+    ports:
+      - "8281:8080"
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+      - beta-coordinator
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-2", "--target-beta", "--port", "8080"]
+
+  # Alpha Node 3 - Auto-discovery enabled  
+  alpha-node-3:
+    image: qnarwhal:latest
+    container_name: alpha-node-3
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.33
+    environment:
+      - Q_NODE_ID=alpha-node-3
+      - Q_SERVER_ROLE=alpha
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - Q_BOOTSTRAP_PEERS=""  # No hardcoded peers - use auto-discovery
+      - RUST_LOG=info
+    ports:
+      - "8282:8080"
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+      - beta-coordinator
+    command: ["/app/bin/q-api-server", "--node-id", "alpha-node-3", "--target-beta", "--port", "8080"]
+
+  # Validator Node 1 - Discovers Alpha nodes automatically
+  validator-node-1:
+    image: qnarwhal:latest
+    container_name: validator-node-1
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.41
+    environment:
+      - Q_NODE_ID=validator-node-1
+      - Q_SERVER_ROLE=validator
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_IS_VALIDATOR=true
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - Q_BOOTSTRAP_PEERS=""  # Auto-discovery via DNS-Phantom
+      - RUST_LOG=info
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+      - alpha-node-1
+    command: ["/app/bin/q-api-server", "--node-id", "validator-node-1", "--port", "8080"]
+
+  # Validator Node 2 - Discovers Alpha nodes automatically
+  validator-node-2:
+    image: qnarwhal:latest
+    container_name: validator-node-2
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.42
+    environment:
+      - Q_NODE_ID=validator-node-2
+      - Q_SERVER_ROLE=validator
+      - Q_API_PORT=8080
+      - Q_P2P_PORT=8081
+      - Q_IS_VALIDATOR=true
+      - Q_TOR_ENABLED=true
+      - Q_TOR_SOCKS5_ADDR=tor-proxy:9050
+      - Q_BOOTSTRAP_PEERS=""  # Auto-discovery via DNS-Phantom
+      - RUST_LOG=info
+    depends_on:
+      - dns-phantom-hub
+      - tor-proxy
+      - alpha-node-2
+    command: ["/app/bin/q-api-server", "--node-id", "validator-node-2", "--port", "8080"]
+
+  # Network Monitor - Tracks automatic connections
+  network-monitor:
+    image: qnarwhal:latest
+    container_name: network-monitor
+    networks:
+      qnarwhal-mesh:
+        ipv4_address: 172.20.0.50
+    environment:
+      - Q_NODE_ID=network-monitor
+      - Q_SERVER_ROLE=monitor
+      - Q_API_PORT=8080
+      - RUST_LOG=info
+    ports:
+      - "8380:8080"
+    depends_on:
+      - dns-phantom-hub
+      - validator-node-1
+      - validator-node-2
+    command: ["/app/bin/q-api-server", "--node-id", "network-monitor", "--port", "8080"]

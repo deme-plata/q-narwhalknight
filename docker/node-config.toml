@@ -1,0 +1,55 @@
+# Q-NarwhalKnight Node Configuration
+# Optimized for 50-node massive scale testing
+
+[network]
+max_peers = 100
+target_peers = 50
+connection_timeout_secs = 30
+heartbeat_interval_secs = 10
+gossip_fanout = 8
+
+[consensus]
+algorithm = "dag_knight"
+byzantine_threshold = 0.33
+block_time_ms = 1000
+max_transactions_per_block = 10000
+consensus_timeout_secs = 30
+
+[dns_phantom]
+enabled = true
+steganographic_discovery = true
+query_interval_secs = 5
+max_anomalies_cache = 10000
+discovery_domains = [
+    "phantom.qnk",
+    "discovery.qnk", 
+    "mesh.qnk",
+    "tor.qnk"
+]
+
+[tor]
+enabled = true
+socks5_proxy = "tor-proxy:9050"
+onion_services = true
+circuit_timeout_secs = 60
+max_circuits = 8
+
+[api]
+enable_rest = true
+enable_websocket = true
+enable_sse = true
+cors_origins = ["*"]
+max_connections = 1000
+
+[logging]
+level = "info"
+json_format = false
+log_to_file = true
+max_log_size_mb = 100
+max_log_files = 5
+
+[performance]
+worker_threads = 4
+async_executor_threads = 2
+memory_pool_size_mb = 512
+disk_cache_size_mb = 1024

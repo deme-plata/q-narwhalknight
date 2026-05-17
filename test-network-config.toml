@@ -1,0 +1,75 @@
+# Q-NarwhalKnight Test Network Configuration
+# Real node testing environment for mining and transactions
+
+[network]
+network_id = "qnk-testnet-001"
+genesis_time = 1725271200  # September 2, 2025 09:00:00 UTC
+consensus_algorithm = "dag-knight-vdf"
+block_time_target = 2300   # 2.3 seconds
+difficulty_adjustment_period = 2016  # blocks
+
+[genesis]
+# Initial difficulty (low for testing)
+difficulty = 0x1e0ffff0
+# Initial reward
+block_reward = 50000000  # 50 QNK (in satoshis)
+# Genesis validator set
+validators = [
+    "qnk1_validator_alpha_test_node_001",
+    "qnk1_validator_beta_test_node_002", 
+    "qnk1_validator_gamma_test_node_003"
+]
+
+[nodes]
+# Test network nodes
+[[nodes.validator]]
+node_id = "validator-alpha"
+host = "127.0.0.1"
+port = 8001
+rpc_port = 9001
+wallet_address = "qnk1_alpha_validator_test_mining_001"
+mining_enabled = true
+tor_enabled = false  # Disabled for local testing
+
+[[nodes.validator]]
+node_id = "validator-beta"
+host = "127.0.0.1"
+port = 8002
+rpc_port = 9002
+wallet_address = "qnk1_beta_validator_test_mining_002"
+mining_enabled = true
+tor_enabled = false
+
+[[nodes.validator]]
+node_id = "validator-gamma"
+host = "127.0.0.1"
+port = 8003
+rpc_port = 9003
+wallet_address = "qnk1_gamma_validator_test_mining_003"
+mining_enabled = true
+tor_enabled = false
+
+[mining]
+# Mining pool configuration for testing
+pool_enabled = true
+pool_port = 4444
+stratum_protocol = "v2"
+difficulty_target = 0x1e0ffff0
+share_target = 0x1e0fffff  # Easier shares for testing
+
+# Test miner configuration
+[test_miner]
+wallet_address = "qnk1_test_miner_real_wallet_address_001"
+intensity = 5  # Lower intensity for stability
+cpu_threads = 4
+gpu_enabled = false  # Start with CPU only
+pool_url = "stratum+tcp://127.0.0.1:4444"
+
+[performance_metrics]
+# Metrics to track during testing
+track_hash_rate = true
+track_memory_usage = true
+track_network_latency = true
+track_block_propagation = true
+track_transaction_throughput = true
+log_interval_seconds = 10

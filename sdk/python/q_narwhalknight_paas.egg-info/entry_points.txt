@@ -1,0 +1,2 @@
+[console_scripts]
+q-paas = q_paas.cli:main

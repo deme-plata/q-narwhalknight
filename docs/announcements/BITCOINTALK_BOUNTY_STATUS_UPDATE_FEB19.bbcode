@@ -1,0 +1,170 @@
+[center][size=24pt][b][color=#9333ea]Q[/color]-[color=#3b82f6]NarwhalKnight[/color] [color=#06b6d4]Bounty Campaign Status Update[/color][/b][/size]
+
+[size=12pt][i]February 19, 2026 | v7.4.2 Deployed | Emission Rehearsal Live | 27 Active Miners[/i][/size]
+[/center]
+
+[hr]
+
+[size=18pt][b][color=#22c55e]NETWORK STATUS[/color][/b][/size]
+
+[table]
+[tr][td][b]Metric[/b][/td][td][b]Value[/b][/td][/tr]
+[tr][td]Block Height[/td][td][b]12,289[/b] (mainnet2026.1.1)[/td][/tr]
+[tr][td]Active Miners[/td][td][b]27 unique wallets[/b][/td][/tr]
+[tr][td]Connected Peers[/td][td][b]2 bootstrap + user nodes[/b][/td][/tr]
+[tr][td]Total Mined[/td][td][b]1,693.65 QUG[/b] (target: 12,404 QUG)[/td][/tr]
+[tr][td]Emission Rate[/td][td][b]2,625,000 QUG/year[/b] (Era 0, ~7,187 QUG/day)[/td][/tr]
+[tr][td]Correction Factor[/td][td][b]1.43x[/b] (adaptive, boosting rewards to catch up)[/td][/tr]
+[tr][td]Bootstrap Nodes[/td][td][b]4 servers[/b] (Beta, Gamma, Delta, Alpha)[/td][/tr]
+[tr][td]Software Version[/td][td][b]v7.4.2[/b] (deployed today across all servers)[/td][/tr]
+[/table]
+
+[hr]
+
+[size=18pt][b][color=#3b82f6]v7.4.2 RELEASE HIGHLIGHTS[/color][/b][/size]
+
+Today's release fixes critical emission controller bugs and confirms mining works across all production servers:
+
+[b][color=#ef4444]Critical Fixes:[/color][/b]
+[list]
+[li][b]Emission Genesis Timestamp[/b] - REHEARSAL_GENESIS_TIMESTAMP was off by exactly 1 year (Feb 2025 instead of Feb 2026). Emission target was 2.6M QUG instead of the correct ~12K QUG for elapsed time. [color=#22c55e]FIXED[/color][/li]
+[li][b]Persisted State Override[/b] - EmissionController state serialized to RocksDB included a stale genesis timestamp. On restart, the old value overwrote the corrected value. Added set_genesis_timestamp() method to force-correct after restore. [color=#22c55e]FIXED[/color][/li]
+[li][b]Height Regression Protection[/b] - Safe floor mechanism (v7.4.1) confirmed working: nodes restart at correct height via persisted safe_floor, not falling back to genesis scan. [color=#22c55e]VERIFIED[/color][/li]
+[/list]
+
+[b][color=#f59e0b]Other Fixes:[/color][/b]
+[list]
+[li][b]Hardcoded Genesis in lib.rs[/b] - Two instances of hardcoded genesis_timestamp=1700000000 (Nov 2023 testnet value) replaced with active_genesis_timestamp()[/li]
+[li][b]Pool Topics Wire Format[/b] - Gossipsub pool topics used display_name() (human-readable) instead of as_str() (wire format), breaking P2P pool communication[/li]
+[li][b]RocksDB Memory Management[/b] - Block cache capped at 4096MB (was auto-scaling to 16GB, causing OOM)[/li]
+[/list]
+
+[hr]
+
+[size=18pt][b][color=#9333ea]MINING IS LIVE[/color][/b][/size]
+
+Mining confirmed working on all servers. Test results from today:
+
+[table]
+[tr][td][b]Server[/b][/td][td][b]Location[/b][/td][td][b]Hashrate[/b][/td][td][b]Status[/b][/td][/tr]
+[tr][td]Beta (Primary)[/td][td]185.182.185.227[/td][td]Multi-miner hub[/td][td][color=#22c55e]ONLINE[/color][/td][/tr]
+[tr][td]Gamma (Backup)[/td][td]109.205.176.60[/td][td]0.07 MH/s (test)[/td][td][color=#22c55e]ONLINE[/color][/td][/tr]
+[tr][td]Delta (Bootstrap)[/td][td]5.79.79.158[/td][td]0.10 MH/s (test)[/td][td][color=#22c55e]ONLINE[/color][/td][/tr]
+[/table]
+
+All solutions accepted at [b]0.082 QNK per share[/b] with server-side blake3+VDF hash verification.
+
+[hr]
+
+[size=18pt][b][color=#06b6d4]BUG BOUNTY SUBMISSIONS[/color][/b][/size]
+
+6 bugs reported and logged via the bounty platform today:
+
+[table]
+[tr][td][b]Bug[/b][/td][td][b]Severity[/b][/td][td][b]Points[/b][/td][td][b]Status[/b][/td][/tr]
+[tr][td]REHEARSAL_GENESIS_TIMESTAMP off by 1 year[/td][td][color=#ef4444]Critical[/color][/td][td]100[/td][td][color=#22c55e]Fixed in v7.4.2[/color][/td][/tr]
+[tr][td]Persisted emission state stale genesis[/td][td][color=#ef4444]Critical[/color][/td][td]100[/td][td][color=#22c55e]Fixed in v7.4.2[/color][/td][/tr]
+[tr][td]Height regression after restart[/td][td][color=#ef4444]Critical[/color][/td][td]100[/td][td][color=#22c55e]Fixed in v7.4.1[/color][/td][/tr]
+[tr][td]Hardcoded genesis in lib.rs[/td][td][color=#f59e0b]High[/color][/td][td]50[/td][td][color=#22c55e]Fixed in v7.4.2[/color][/td][/tr]
+[tr][td]RocksDB block cache OOM[/td][td][color=#f59e0b]High[/color][/td][td]50[/td][td][color=#22c55e]Fixed in v7.4.1[/color][/td][/tr]
+[tr][td]Pool topics display_name() mismatch[/td][td][color=#3b82f6]Medium[/color][/td][td]20[/td][td][color=#22c55e]Fixed in v7.4.2[/color][/td][/tr]
+[/table]
+
+[b]Total bug bounty points awarded: 420 pts[/b]
+
+These bugs were found during the emission rehearsal for the upcoming mainnet2026.2 launch. This demonstrates exactly why we run rehearsals - catching critical issues before they affect the real network.
+
+[hr]
+
+[size=18pt][b][color=#ec4899]BOUNTY PLATFORM UPDATES[/color][/b][/size]
+
+The bounty platform at [url=https://bounty.quillon.xyz]bounty.quillon.xyz[/url] has been updated:
+
+[list]
+[li][b]Frontend redeployed[/b] - Latest React build synced to production[/li]
+[li][b]Bug report API[/b] - Submit bugs with severity levels (Critical/High/Medium/Low)[/li]
+[li][b]Social activity tracking[/b] - Twitter, GitHub, Discord, Medium, YouTube submissions[/li]
+[li][b]JWT authentication[/b] - Secure token-based access for all API endpoints[/li]
+[li][b]Leaderboard[/b] - Real-time ranking across 5 scoring categories[/li]
+[li][b]Health endpoint[/b] - API health check at /health (version 7.4.2 confirmed)[/li]
+[/list]
+
+[hr]
+
+[size=18pt][b][color=#14b8a6]HOW TO START EARNING[/color][/b][/size]
+
+[b]1. Run a Node (30% of score)[/b]
+[code]
+# Download the latest node binary
+wget https://quillon.xyz/downloads/q-api-server-linux-x86_64
+chmod +x q-api-server-linux-x86_64
+./q-api-server-linux-x86_64 --port 8080
+[/code]
+
+[b]2. Start Mining (earns transaction + node ops points)[/b]
+[code]
+# Linux miner
+wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
+./q-miner-linux-x64 --mode solo --wallet YOUR_WALLET --server http://localhost:8080
+
+# Windows miner
+# Download: https://quillon.xyz/downloads/q-miner-windows-x64.exe
+q-miner-windows-x64.exe --mode solo --wallet YOUR_WALLET --server https://quillon.xyz
+[/code]
+
+[b]3. Register for Bounty (start earning points)[/b]
+Visit [url=https://bounty.quillon.xyz/register]bounty.quillon.xyz/register[/url] with your QNK wallet address.
+
+[b]4. Report Bugs (up to 100 pts each)[/b]
+Found a bug? Submit at [url=https://bounty.quillon.xyz/bugs]bounty.quillon.xyz/bugs[/url] with severity and description.
+
+[b]5. Create Content (10-50 pts each)[/b]
+Write articles, make videos, tweet about QNK. Submit at [url=https://bounty.quillon.xyz/social]bounty.quillon.xyz/social[/url].
+
+[hr]
+
+[size=18pt][b][color=#facc15]UPCOMING: MAINNET 2026.2 LAUNCH[/color][/b][/size]
+
+[b]Launch date: February 22, 2026 at 12:00 UTC[/b]
+
+The current mainnet2026.1.1 serves as the emission rehearsal for the mainnet2026.2 launch. Key parameters:
+
+[list]
+[li][b]Genesis[/b]: Feb 22, 2026 12:00 UTC (timestamp: 1771761600)[/li]
+[li][b]Chain ID[/b]: 1000[/li]
+[li][b]Emission[/b]: 2,625,000 QUG/year (Era 0), 21M max supply, 4-year halving[/li]
+[li][b]Network ID[/b]: mainnet2026.2[/li]
+[li][b]Version[/b]: v7.3.0 (dedicated launch binary)[/li]
+[/list]
+
+All bounty participants who helped test mainnet2026.1.1 will receive [b]early adopter bonuses[/b] (up to 2x multiplier) on mainnet2026.2.
+
+[hr]
+
+[size=18pt][b][color=#9333ea]DOWNLOAD LINKS[/color][/b][/size]
+
+[b]Node (Linux x86_64):[/b]
+[code]wget https://quillon.xyz/downloads/q-api-server-linux-x86_64 && chmod +x q-api-server-linux-x86_64[/code]
+
+[b]Miner (Linux x64):[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-linux-x64 && chmod +x q-miner-linux-x64[/code]
+
+[b]Miner (Windows x64):[/b]
+[url=https://quillon.xyz/downloads/q-miner-windows-x64.exe]https://quillon.xyz/downloads/q-miner-windows-x64.exe[/url]
+
+[b]Miner (macOS ARM64):[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-macos-arm64 && chmod +x q-miner-macos-arm64[/code]
+
+[b]Miner (macOS x64):[/b]
+[code]wget https://quillon.xyz/downloads/q-miner-macos-x64 && chmod +x q-miner-macos-x64[/code]
+
+[hr]
+
+[center][size=12pt][i]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+[b]Bounty:[/b] [url=https://bounty.quillon.xyz]bounty.quillon.xyz[/url]
+[b]Explorer:[/b] [url=https://quillon.xyz/explorer]quillon.xyz/explorer[/url]
+
+Next update: Post-launch report after mainnet2026.2 goes live on Feb 22.
+[/i][/size][/center]

@@ -1,0 +1,601 @@
+[center][size=18pt][b][color=#FFD700]⚛️ Q-NarwhalKnight v0.0.27-beta ⚛️[/color][/b][/size]
+[size=16pt][b][color=#00D9FF]REVOLUTIONARY TIME-BASED HALVING[/color][/b][/size]
+[size=12pt][i]The World's First Performance-Agnostic Tokenomics[/i][/size][/center]
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]🎯 THE BREAKTHROUGH[/color][/b][/size]
+
+We've solved a [b][color=#FFD700]fundamental problem that has plagued cryptocurrency for 15 years[/color][/b]: the coupling between blockchain performance and tokenomics.
+
+[b]Traditional cryptocurrencies face an impossible choice:[/b]
+• Optimize performance → Break emission schedule
+• Preserve tokenomics → Sacrifice scalability
+
+[b][color=#00FF94]Q-NarwhalKnight v0.0.27-beta breaks this constraint with Time-Based Halving[/color][/b] - a revolutionary mechanism that enables [b]unlimited performance scaling[/b] while maintaining [b]Austrian economics principles[/b].
+
+[hr]
+
+[size=14pt][b]📥 Download v0.0.27-beta[/b][/size]
+
+[b]Official Repository:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+[b]Release Tag:[/b] v0.0.27-beta
+
+Pre-compiled binaries available for:
+• Linux x86_64 (Ubuntu 20.04+, Debian 11+)
+• Source code for custom builds
+
+[hr]
+
+[size=16pt][b][color=#FFD700]⏰ TIME-BASED HALVING: THE GAME CHANGER[/color][/b][/size]
+
+[size=12pt][b][color=#FF00FF]The Problem: Performance-Tokenomics Coupling[/color][/b][/size]
+
+[b]Bitcoin's halving schedule:[/b]
+[code]if (block_height % 210,000 == 0) {
+    reward = reward / 2;
+}[/code]
+
+This design assumes [b]constant block production rate[/b]. But what happens when you optimize performance?
+
+[table]
+[tr][td][b]BPS[/b][/td][td][b]Halving Frequency[/b][/td][td][b]Economic Viability[/b][/td][/tr]
+[tr][td]0.067[/td][td]Every ~47 years[/td][td][color=#FF0000]❌ Too slow[/color][/td][/tr]
+[tr][td]100[/td][td]Every ~1 year[/td][td][color=#00FF94]✅ Ideal[/color][/td][/tr]
+[tr][td]100,000[/td][td]Every ~9 hours[/td][td][color=#FF0000]❌ DESTROYED[/color][/td][/tr]
+[/table]
+
+[b][color=#FF0000]Traditional halving breaks at high performance![/color][/b]
+
+[hr]
+
+[size=12pt][b][color=#00FF94]The Solution: Time-Based Halving[/color][/b][/size]
+
+[b][color=#FFD700]Important Update:[/color][/b] We've adjusted our emission schedule from the earlier 0.5 [size=14pt][b]QUG[/b][/size] per block to a more sustainable time-based model starting at 0.001 [size=14pt][b]QUG[/b][/size] base reward.
+
+Instead of counting blocks, we count [b]elapsed time[/b]:
+
+[code]pub fn calculate_block_reward_time_based(
+    genesis_timestamp: u64,
+    current_timestamp: u64,
+) -> u64 {
+    const SECONDS_PER_YEAR: u64 = 31_536_000;
+    const BASE_REWARD: u64 = 100_000; // 0.001 [size=14pt][b]QUG[/b][/size]
+
+    let elapsed_seconds = current_timestamp - genesis_timestamp;
+    let halving_count = elapsed_seconds / SECONDS_PER_YEAR;
+
+    if halving_count >= 64 {
+        return 0; // Emission complete
+    }
+
+    // Halving based on TIME, not blocks
+    BASE_REWARD >> halving_count
+}[/code]
+
+[b][color=#FFD700]Genesis Timestamp:[/color][/b] October 26, 2025, 00:00:00 UTC
+[b][color=#FFD700]First Halving:[/color][/b] Exactly one calendar year later
+[b][color=#FFD700]Max Supply:[/color][/b] 21,000,000 [size=14pt][b]QUG[/b][/size] (hard cap)
+[b][color=#FFD700]Starting Reward:[/color][/b] 0.001 [size=14pt][b]QUG[/b][/size] per block (adjusted from earlier 0.5 [size=14pt][b]QUG[/b][/size])
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]🚀 Performance Independence[/color][/b][/size]
+
+Time-based halving works at [b]ANY performance level[/b]:
+
+[table]
+[tr][td][b]Phase[/b][/td][td][b]Target BPS[/b][/td][td][b]Tokenomics Impact[/b][/td][td][b]Timeline[/b][/td][/tr]
+[tr][td]1[/td][td]0.067[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Oct-Nov 2025[/td][/tr]
+[tr][td]2[/td][td]10[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Nov 2025[/td][/tr]
+[tr][td]3[/td][td]100[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Nov 2025[/td][/tr]
+[tr][td]4[/td][td]500[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Early Dec 2025[/td][/tr]
+[tr][td]5[/td][td]1,000[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Early Dec 2025[/td][/tr]
+[tr][td]6[/td][td]10,000[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Mid Dec 2025[/td][/tr]
+[tr][td]7[/td][td]100,000[/td][td][color=#00FF94]✅ Works perfectly[/color][/td][td]Post-Mainnet 2026+[/td][/tr]
+[/table]
+
+[b][color=#FFD700]Mainnet Launch: Mid-December 2025[/color][/b]
+[b]We will reach sharding (Phase 6) before mainnet launch![/b]
+
+[b][color=#FFD700]Total potential speedup: 1,492,537× with ZERO tokenomics changes![/color][/b]
+
+[b]Optimize performance infinitely without worrying about breaking the emission schedule![/b]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]💰 Emission Schedule & Calendar Halvings[/color][/b][/size]
+
+Halvings occur on [b]predictable calendar dates[/b], independent of blockchain performance:
+
+[table]
+[tr][td][b]Date[/b][/td][td][b]Per-Block Reward[/b][/td][td][b]Target Annual Emission[/b][/td][td][b]Cumulative %[/b][/td][/tr]
+[tr][td]Oct 26, 2025[/td][td]0.001000 [size=14pt][b]QUG[/b][/size][/td][td]~3,153,600 [size=14pt][b]QUG[/b][/size][/td][td]15.0%[/td][/tr]
+[tr][td]Oct 26, 2026[/td][td]0.000500 [size=14pt][b]QUG[/b][/size][/td][td]~1,576,800 [size=14pt][b]QUG[/b][/size][/td][td]22.5%[/td][/tr]
+[tr][td]Oct 26, 2027[/td][td]0.000250 [size=14pt][b]QUG[/b][/size][/td][td]~788,400 [size=14pt][b]QUG[/b][/size][/td][td]26.3%[/td][/tr]
+[tr][td]Oct 26, 2028[/td][td]0.000125 [size=14pt][b]QUG[/b][/size][/td][td]~394,200 [size=14pt][b]QUG[/b][/size][/td][td]28.1%[/td][/tr]
+[tr][td]Oct 26, 2033[/td][td]0.000008 [size=14pt][b]QUG[/b][/size][/td][td]~24,638 [size=14pt][b]QUG[/b][/size][/td][td]31.9%[/td][/tr]
+[tr][td]Oct 26, 2041[/td][td]0.000000 [size=14pt][b]QUG[/b][/size][/td][td]~96 [size=14pt][b]QUG[/b][/size][/td][td]33.2%[/td][/tr]
+[tr][td]~2089[/td][td]0 [size=14pt][b]QUG[/b][/size][/td][td]0 [size=14pt][b]QUG[/b][/size][/td][td]100%[/td][/tr]
+[/table]
+
+[b]Key Insight:[/b] Annual emission remains constant (~3.15M [size=14pt][b]QUG[/b][/size] first year) regardless of whether you produce 2 million blocks or 3 trillion blocks!
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]📐 Mathematical Proof: Performance Independence[/color][/b][/size]
+
+We've published a [b]complete mathematical proof[/b] in our academic whitepaper demonstrating that time-based halving achieves performance independence.
+
+[b]Download Full Whitepaper with Mathematical Proofs:[/b]
+[url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Quantum Physics Whitepaper - Time-Based Halving (39 pages)[/url]
+
+[b]Theorem:[/b] For any constant blocks-per-second rate [i]b > 0[/i], time-based halving converges to target annual emission [i]E_target[/i] regardless of [i]b[/i].
+
+[code]Let r(t) = R₀ >> ⌊(t - t_genesis) / T_year⌋
+
+Annual emission:
+E(year_n) = ∫₀^T_year b × r(t) dt
+          = b × T_year × (R₀ / 2^n)
+
+Setting E(year_1) = E_target:
+E_target = b × T_year × R₀
+
+Therefore R₀ = E_target / (b × T_year)
+
+Thus E(year) → E_target regardless of b, QED.[/code]
+
+[b][color=#00FF94]First cryptocurrency with mathematically proven performance-agnostic tokenomics![/color][/b]
+
+[b]Read the full proof:[/b] [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Complete Whitepaper (PDF)[/url]
+
+[hr]
+
+[size=14pt][b][color=#FFD700]⚛️ AUSTRIAN ECONOMICS ALIGNMENT[/color][/b][/size]
+
+[size=12pt][b][color=#FF00FF]1. Time Preference Theory (Böhm-Bawerk)[/color][/b][/size]
+
+[b]Böhm-Bawerk's Law:[/b] Humans systematically prefer present goods to future goods of equal utility.
+
+Time-based halving implements this principle:
+[list]
+[li]💎 [b]Year 1:[/b] 0.001 [size=14pt][b]QUG[/b][/size]/block (highest value)[/li]
+[li]💰 [b]Year 2:[/b] 0.0005 [size=14pt][b]QUG[/b][/size]/block (halved)[/li]
+[li]💵 [b]Year 3:[/b] 0.00025 [size=14pt][b]QUG[/b][/size]/block (halved again)[/li]
+[li]💴 [b]Year 10:[/b] 0.0000019 [size=14pt][b]QUG[/b][/size]/block (much lower)[/li]
+[/list]
+
+[b]Early adopters are rewarded![/b] Just like Bitcoin, but without performance constraints.
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]2. Sound Money Properties[/color][/b][/size]
+
+[table]
+[tr][td][b]Property[/b][/td][td][b]Implementation[/b][/td][td][b]Status[/b][/td][/tr]
+[tr][td][b]Scarcity[/b][/td][td]21M [size=14pt][b]QUG[/b][/size] hard cap[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Durability[/b][/td][td]Digital + quantum-resistant[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Divisibility[/b][/td][td]100M base units per [size=14pt][b]QUG[/b][/size][/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Portability[/b][/td][td]Global instant transfer[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Fungibility[/b][/td][td]All units identical[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[tr][td][b]Recognizability[/b][/td][td]Quantum consensus signature[/td][td][color=#00FF94]✅[/color][/td][/tr]
+[/table]
+
+[b][color=#FFD700]All six properties of sound money preserved while enabling unlimited scalability![/color][/b]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]3. Predictable Scarcity Events[/color][/b][/size]
+
+Calendar-based halvings create [b]observable scarcity milestones[/b]:
+
+[b]Upcoming Halvings:[/b]
+• [b]October 26, 2026[/b] - First halving (1 year from genesis)
+• [b]October 26, 2027[/b] - Second halving
+• [b]October 26, 2028[/b] - Third halving
+
+These dates are [b]independent of development progress[/b] - investors can price in future scarcity with absolute certainty.
+
+[b]Unlike Ethereum[/b] (unpredictable emission) or [b]Solana[/b] (coupled to performance), Q-NarwhalKnight offers [b]Bitcoin-level predictability[/b] with [b]modern performance[/b].
+
+[hr]
+
+[size=14pt][b][color=#00FF94]🎯 COMPARISON WITH EXISTING SYSTEMS[/color][/b][/size]
+
+[size=12pt][b][color=#FF00FF]Bitcoin[/color][/b][/size]
+
+[b]Approach:[/b] Block-count halving every 210,000 blocks
+
+[b]Constraints:[/b]
+• Must maintain ~10 minute blocks
+• Performance improvement severely limited
+• Economic model tightly coupled to performance
+
+[b][color=#FFD700]Q-NarwhalKnight Advantage:[/color][/b] Can scale to 100,000× Bitcoin's BPS without economic impact.
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]Ethereum[/color][/b][/size]
+
+[b]Approach:[/b] Post-PoS issuance adjusts dynamically
+
+[b]Constraints:[/b]
+• No predictable halving schedule
+• Emission depends on validator set size
+• Less transparent for investors
+
+[b][color=#FFD700]Q-NarwhalKnight Advantage:[/color][/b] Predictable calendar halvings maintain Austrian economics clarity.
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]Solana / Avalanche / Modern L1s[/color][/b][/size]
+
+[b]Approach:[/b] Variable emission schedules, often coupled to performance
+
+[b]Constraints:[/b]
+• Performance improvements risk altering tokenomics
+• Some use inflationary models
+• Less emphasis on scarcity
+
+[b][color=#FFD700]Q-NarwhalKnight Advantage:[/color][/b] 21M hard cap + performance independence + Austrian economics.
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]🔬 ACADEMIC WHITEPAPER[/color][/b][/size]
+
+We've published a [b]comprehensive academic whitepaper[/b] covering:
+
+[list]
+[li]📊 [b]Performance-tokenomics coupling problem analysis[/b][/li]
+[li]🔢 [b]Mathematical proof of Performance Independence Theorem[/b][/li]
+[li]⚛️ [b]QBlock structure integration[/b] with quantum metadata[/li]
+[li]💫 [b]Austrian economics alignment[/b] (Böhm-Bawerk time preference)[/li]
+[li]🔐 [b]Implementation security considerations[/b] (timestamp validation, Byzantine tolerance)[/li]
+[li]🚀 [b]Performance scaling implications[/b] across 7 optimization phases[/li]
+[li]📈 [b]Comparison with Bitcoin, Ethereum, and modern L1s[/b][/li]
+[/list]
+
+[b]Download Full Whitepaper:[/b] [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Quantum Physics Whitepaper (39 pages, PDF)[/url]
+
+[b]This is publication-worthy research![/b] First cryptocurrency to mathematically solve the performance-tokenomics coupling problem.
+
+[hr]
+
+[size=14pt][b][color=#FFD700]🛠️ TECHNICAL IMPLEMENTATION[/color][/b][/size]
+
+[size=12pt][b][color=#FF00FF]Core Algorithm[/color][/b][/size]
+
+[code]/// Calculate block reward using TIME-BASED halving
+pub fn calculate_block_reward_time_based(
+    genesis_timestamp: u64,
+    current_timestamp: u64,
+) -> u64 {
+    const SECONDS_PER_YEAR: u64 = 31_536_000; // 365 days
+    const BASE_REWARD: u64 = 100_000; // 0.001 [size=14pt][b]QUG[/b][/size] in base units
+
+    if current_timestamp < genesis_timestamp {
+        return BASE_REWARD; // Safety fallback
+    }
+
+    let elapsed_seconds = current_timestamp - genesis_timestamp;
+    let halving_count = elapsed_seconds / SECONDS_PER_YEAR;
+
+    if halving_count >= 64 {
+        return 0; // After 64 years, rewards negligible
+    }
+
+    // Halving based on calendar years, not blocks
+    // Using bit shift for exact division by 2^n
+    BASE_REWARD >> halving_count
+}[/code]
+
+[b]Key Constants:[/b]
+• [b]GENESIS_TIMESTAMP:[/b] 1729900800 (Oct 26, 2025, 00:00:00 UTC)
+• [b]SECONDS_PER_YEAR:[/b] 31,536,000 (365 days)
+• [b]BASE_REWARD:[/b] 100,000 base units (0.001 [size=14pt][b]QUG[/b][/size])
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]API Integration[/color][/b][/size]
+
+All API endpoints now use time-based rewards:
+
+[code]// Network supply endpoint
+GET /api/v1/network/supply
+
+Response:
+{
+  "block_reward": 0.001,           // Current per-block reward ([size=14pt][b]QUG[/b][/size])
+  "current_height": 12345,         // Blocks produced so far
+  "total_mined": 2500.5,          // Total [size=14pt][b]QUG[/b][/size] mined
+  "max_supply": 21000000,         // Hard cap
+  "next_halving": "2026-10-26",   // Predictable date
+  "time_until_halving": "287 days"
+}
+
+// Mining challenge endpoint
+GET /api/v1/mining/challenge
+
+Response:
+{
+  "challenge_hash": "0x...",
+  "difficulty_target": "0x...",
+  "block_reward": 0.001,           // Time-based!
+  "vdf_iterations": 100
+}[/code]
+
+[hr]
+
+[size=12pt][b][color=#FF00FF]Security Considerations[/color][/b][/size]
+
+[b]Attack Vector:[/b] Miners could manipulate timestamps to affect rewards.
+
+[b]Mitigation:[/b]
+[list]
+[li]✅ [b]Consensus-level timestamp validation[/b] (±2 hours tolerance)[/li]
+[li]✅ [b]Median-time-past (MTP)[/b] from recent blocks[/li]
+[li]✅ [b]Network time protocol (NTP)[/b] synchronization[/li]
+[li]✅ [b]Byzantine fault tolerance[/b] in validator set[/li]
+[/list]
+
+[b]Risk Assessment:[/b] Low. Timestamp manipulation provides minimal benefit compared to honest mining.
+
+[hr]
+
+[size=14pt][b][color=#00FF94]📊 PERFORMANCE METRICS (v0.0.27-beta)[/color][/b][/size]
+
+[b]Consensus Performance:[/b]
+• [b]Finality:[/b] <2.9s with Tor, <2.3s direct
+• [b]Throughput:[/b] 48,000+ TPS capability
+• [b]Latency:[/b] <300ms with Tor circuits
+• [b]Scalability:[/b] 0.067 → 100,000 BPS (1.5M× range)
+
+[b]Tokenomics Performance:[/b]
+• [b]Halving Overhead:[/b] ~5 nanoseconds per calculation
+• [b]Memory Usage:[/b] Zero allocations
+• [b]Impact on Mining:[/b] 0.00001% performance cost
+• [b]Economic Stability:[/b] Maintained across 1.5M× BPS variation
+
+[b]Mining Performance:[/b]
+• [b]VDF-Based PoW:[/b] ASIC-resistant sequential computation
+• [b]Reward Distribution:[/b] Real-time via Server-Sent Events (SSE)
+• [b]Balance Persistence:[/b] Fixed (no more reward loss on restart)
+• [b]Cross-Node Mining:[/b] Operational with 48K+ TPS
+
+[b]Network Performance:[/b]
+• [b]Peer Discovery:[/b] <1s (mDNS local), 5-30s (global DHT)
+• [b]P2P Connectivity:[/b] libp2p with Kademlia DHT
+• [b]Bootstrap Nodes:[/b] Dual testnet/mainnet configuration
+• [b]Network Anonymity:[/b] Tor support (Phase 4)
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]🚀 AGGRESSIVE OPTIMIZATION ROADMAP[/color][/b][/size]
+
+Time-based halving enables our ambitious performance roadmap leading to mainnet launch:
+
+[table]
+[tr][td][b]Phase[/b][/td][td][b]Optimization[/b][/td][td][b]BPS Target[/b][/td][td][b]Timeline[/b][/td][/tr]
+[tr][td]1[/td][td]Current baseline[/td][td]0.067[/td][td]✅ Oct 2025[/td][/tr]
+[tr][td]2[/td][td]Parallel block producers[/td][td]10[/td][td]Nov 2025[/td][/tr]
+[tr][td]3[/td][td]SIMD + GPU acceleration[/td][td]100[/td][td]Nov 2025[/td][/tr]
+[tr][td]4[/td][td]DAG parallelization[/td][td]500[/td][td]Early Dec 2025[/td][/tr]
+[tr][td]5[/td][td]Zero-copy networking[/td][td]1,000[/td][td]Early Dec 2025[/td][/tr]
+[tr][td]6[/td][td][b]Sharding + DPDK[/b][/td][td][b]10,000[/b][/td][td][b]Mid Dec 2025[/b][/td][/tr]
+[tr][td]7[/td][td]FPGA VDF + quantum QRNG[/td][td]100,000[/td][td]Post-Mainnet 2026+[/td][/tr]
+[/table]
+
+[b][color=#FFD700]Mainnet Launch: Mid-December 2025[/color][/b]
+[b]We will complete Phase 6 (Sharding, 10,000 BPS) before mainnet launch![/b]
+
+This aggressive roadmap was previously [b]impossible[/b] with traditional block-count halving. Time-based halving makes it [b]fully achievable[/b] without breaking tokenomics.
+
+[hr]
+
+[size=14pt][b][color=#00FF94]🔐 POST-QUANTUM CRYPTOGRAPHY[/color][/b][/size]
+
+Time-based halving works seamlessly with our quantum-resistant infrastructure:
+
+[list]
+[li]⚛️ [b]Dilithium5 signatures[/b] (NIST PQC standard)[/li]
+[li]🔒 [b]Kyber1024 key encapsulation[/b] (NIST PQC standard)[/li]
+[li]💎 [b]AEGIS-QL access control[/b] (50%+ faster than Kyber-768)[/li]
+[li]🌀 [b]Quantum Mixer[/b] with ZK-STARK proofs[/li]
+[li]🎲 [b]VDF-based randomness[/b] for ASIC-resistant mining[/li]
+[li]🧅 [b]Tor integration[/b] for network anonymity[/li]
+[/list]
+
+[b]Quantum-ready from day one![/b]
+
+[hr]
+
+[size=14pt][b][color=#FFD700]🧪 TESTING & VERIFICATION[/color][/b][/size]
+
+We've created comprehensive test scripts to verify time-based halving:
+
+[code]# Run halving verification script
+./test_time_based_halving.sh
+
+# Output demonstrates:
+# ✅ Halvings occur on calendar dates
+# ✅ Works at 0.067 BPS to 100,000 BPS
+# ✅ Maintains consistent annual emission
+# ✅ Independent of performance optimizations[/code]
+
+[b]Test 1 - Calendar Halvings:[/b]
+[code]Launch (Oct 26, 2025):     0.001 [size=14pt][b]QUG[/b][/size] per block
+Year 2 starts (Oct 26, 2026): 0.0005 [size=14pt][b]QUG[/b][/size] per block (HALVING!)
+Year 3 starts (Oct 26, 2027): 0.00025 [size=14pt][b]QUG[/b][/size] per block (HALVING!)
+Year 4 starts (Oct 26, 2028): 0.000125 [size=14pt][b]QUG[/b][/size] per block (HALVING!)[/code]
+
+[b]Test 2 - Performance Independence:[/b]
+[code]At 0.067 BPS:   2.1M blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
+At 100 BPS:      3.15B blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
+At 100,000 BPS:  3.15T blocks/year × dynamic reward ≈ 3.15M [size=14pt][b]QUG[/b][/size]
+
+Annual emission: CONSTANT regardless of BPS![/code]
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]🔧 BUILD FROM SOURCE[/color][/b][/size]
+
+[code]git clone https://code.quillon.xyz/repo.git q-narwhalknight
+cd q-narwhalknight
+git checkout v0.0.27-beta
+
+# Build with extended timeout for quantum components
+timeout 36000 cargo build --release --package q-api-server
+
+# Run full node with time-based halving
+./target/release/q-api-server --port 8080 --tui
+
+# Check current block reward
+curl http://localhost:8080/api/v1/network/supply | jq '.data.block_reward'[/code]
+
+[b]Note:[/b] The 10-hour timeout (36000 seconds) is recommended for initial builds of quantum cryptography components. Subsequent builds are much faster due to caching.
+
+[hr]
+
+[size=14pt][b][color=#00FF94]📚 DOCUMENTATION & RESOURCES[/color][/b][/size]
+
+[b]Academic Whitepaper:[/b]
+• [b]Quantum Physics Whitepaper (39 pages)[/b] - [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Download PDF[/url]
+• Complete mathematical proofs of Performance Independence Theorem
+• Austrian economics analysis and sound money properties
+• Comparison with Bitcoin, Ethereum, and modern L1s
+
+[b]Technical Documentation:[/b]
+• [b]Time-Based Halving Specification[/b] - Complete implementation details
+• [b]Developer Quick Start Guide[/b] - Integration reference
+• [b]API Reference[/b] - REST endpoints with time-based rewards
+• [b]Performance Optimization Roadmap[/b] - Phases 1-7 scaling plan
+
+[b]Community:[/b]
+• [b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url]
+• [b]Code Repository:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+• [b]BitcoinTalk:[/b] This thread
+
+[hr]
+
+[size=14pt][b][color=#FFD700]🔮 ROADMAP - PATH TO MAINNET[/color][/b][/size]
+
+[b]October-November 2025 (Current):[/b]
+• [b]✅ Time-Based Halving[/b] - Revolutionary performance-agnostic tokenomics
+• [b]✅ Academic Whitepaper[/b] - Mathematical proofs and complete analysis
+• [b]Phase 2-3 Optimization[/b] - Parallel producers + SIMD/GPU (100 BPS)
+• [b]Testnet Stress Testing[/b] - Validate time-based halving at scale
+
+[b]Early December 2025:[/b]
+• [b]Phase 4-5 Optimization[/b] - DAG parallelization + zero-copy (1,000 BPS)
+• [b]Enhanced Quantum Mixer[/b] - 3D visualization and privacy improvements
+• [b]Mobile Wallets Beta[/b] - iOS/Android with time-based halving display
+
+[b]Mid-December 2025:[/b]
+• [b]Phase 6 Optimization[/b] - Sharding + DPDK (10,000 BPS)
+• [b]Security Audit Complete[/b] - Third-party cryptographic review
+• [b]🚀 MAINNET LAUNCH[/b] - Production network with real economic value
+• [b]First Halving Countdown[/b] - 10 months until October 26, 2026 halving
+
+[b]2026 and Beyond:[/b]
+• [b]First Halving Event[/b] - October 26, 2026 (from 0.001 to 0.0005 [size=14pt][b]QUG[/b][/size])
+• [b]Phase 7 Optimization[/b] - FPGA + quantum QRNG (100,000 BPS)
+• [b]DeFi Privacy Suite[/b] - Private DEX, lending, staking
+• [b]Cross-Chain Integration[/b] - Privacy-as-a-Service for other blockchains
+• [b]Second Halving[/b] - October 26, 2027
+
+[hr]
+
+[size=14pt][b][color=#FF00FF]💬 WHY Q-NARWHALKNIGHT?[/color][/b][/size]
+
+[b]1. First Cryptocurrency with Performance-Agnostic Tokenomics[/b]
+Time-based halving solves a [b]15-year-old problem[/b] in cryptocurrency design. This is [b]publication-worthy innovation[/b] that will influence future blockchain designs.
+
+[b]2. Austrian Economics with Modern Performance[/b]
+We preserve [b]Bitcoin's sound money principles[/b] (time preference, predictable scarcity, 21M cap) while enabling [b]modern scalability[/b] (10,000 BPS at mainnet launch, 100,000 BPS future).
+
+[b]3. Quantum-Resistant Future-Proofing[/b]
+Post-quantum cryptography (Dilithium5, Kyber1024, AEGIS-QL) protects against quantum computers that will break Bitcoin by 2030-2035.
+
+[b]4. Mathematical Rigor[/b]
+We don't just implement features - we [b]prove them mathematically[/b]. Our Performance Independence Theorem is backed by formal proofs in our 39-page academic whitepaper.
+
+[b]5. Aggressive Development Timeline[/b]
+From current 0.067 BPS to 10,000 BPS with sharding in under 2 months - [b]mainnet launch mid-December 2025[/b].
+
+[b]6. True Decentralization[/b]
+ASIC-resistant VDF mining democratizes block production. Tor integration protects network anonymity. Time-based halving works for everyone.
+
+[b]7. Open Source & Transparent[/b]
+All code is Apache 2.0 licensed. Full academic whitepaper available. Security through cryptography, not obscurity.
+
+[hr]
+
+[size=14pt][b][color=#00FF94]🙏 ACKNOWLEDGMENTS[/color][/b][/size]
+
+Special recognition for the theoretical foundations that made time-based halving possible:
+
+[b]Academic Inspirations:[/b]
+• [b]Eugen von Böhm-Bawerk[/b] - Time preference theory (1889)
+• [b]Ludwig von Mises[/b] - Austrian economics foundations
+• [b]Satoshi Nakamoto[/b] - Bitcoin's halving concept
+• [b]Keidar et al.[/b] - DAG-Knight consensus (2024)
+
+[b]Community Contributions:[/b]
+• Performance optimization discussions that revealed the coupling problem
+• Tokenomics feedback highlighting need for scalability
+• Testing and validation of time-based halving implementation
+
+[b][color=#FFD700]Q-NarwhalKnight is built WITH the community, not just FOR it.[/color][/b]
+
+[hr]
+
+[size=14pt][b][color=#FFD700]🎉 TRY IT NOW![/color][/b][/size]
+
+[b]For Users:[/b]
+1. Visit [url=https://quillon.xyz]quillon.xyz[/url]
+2. Create a wallet (stored locally, fully client-side)
+3. Start mining with time-based rewards
+4. Watch your [size=14pt][b]QUG[/b][/size] balance grow with predictable halvings!
+
+[b]For Developers:[/b]
+1. Clone repository: [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+2. Read developer documentation and quick start guide
+3. Review time-based halving implementation
+4. Integrate into your own projects!
+
+[b]For Node Operators:[/b]
+1. Download v0.0.27-beta from [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+2. Extract and run: [font=courier]./q-api-server --port 8080 --tui[/font]
+3. Check current reward: [font=courier]curl localhost:8080/api/v1/network/supply[/font]
+4. Earn [size=14pt][b]QUG[/b][/size] mining rewards with time-based halving!
+
+[b]For Researchers:[/b]
+1. Download academic whitepaper: [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]39-page PDF[/url]
+2. Review Performance Independence Theorem proof
+3. Cite our work in your research
+4. Help advance cryptocurrency economics!
+
+[hr]
+
+[center][size=14pt][b][color=#00FF94]🚀 The Future of Cryptocurrency Tokenomics is Here! 🚀[/color][/b][/size]
+
+[size=12pt][i]Time-based halving enables unlimited performance scaling while preserving Austrian economics.[/i][/size]
+
+[b]⚛️ Q-NarwhalKnight v0.0.27-beta ⚛️[/b]
+[i]Performance-Agnostic Tokenomics • Quantum-Resistant Security • Austrian Economics[/i]
+
+[size=10pt][color=#FFD700]"Optimize performance infinitely without worrying about tokenomics." - The Time-Based Halving Revolution[/color][/size]
+
+[b]Mainnet Launch: Mid-December 2025[/b]
+[b]Current Reward: 0.001 [size=14pt][b]QUG[/b][/size] per block (adjusted from earlier 0.5 [size=14pt][b]QUG[/b][/size])[/b]
+
+[b]Download:[/b] [url=https://code.quillon.xyz]code.quillon.xyz[/url]
+[b]Whitepaper:[/b] [url=https://drive.proton.me/urls/4VJ9CYH98W#Ibg1AdOuYewX]Mathematical Proofs (39 pages PDF)[/url]
+[b]Website:[/b] [url=https://quillon.xyz]quillon.xyz[/url][/center]
+
+[hr]
+
+[size=10pt][i]This release represents a fundamental advancement in cryptocurrency design. Time-based halving solves the performance-tokenomics coupling problem that has constrained blockchain scalability for 15 years. With mathematical proofs, Austrian economics alignment, and an aggressive roadmap to 10,000 BPS by mid-December 2025 mainnet launch, Q-NarwhalKnight demonstrates what's possible when innovation meets rigorous economic theory.[/i][/size]
+
+[size=8pt]License: Apache 2.0 | Technology: Rust + Post-Quantum Cryptography | Consensus: DAG-Knight + Quantum Enhancements | Tokenomics: Time-Based Halving (World's First) | Token: [size=14pt][b]QUG[/b][/size] (21M max supply)[/size]

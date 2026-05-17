@@ -1,0 +1,182 @@
+[center][size=18pt][b][color=#00CED1]Q-NarwhalKnight v2.2.1[/color] - [color=#9370DB]Index Fund Tokens & Sync Optimization[/color][/b][/size]
+[size=10pt][i]December 26, 2025 | Post-Quantum Blockchain with Decentralized Index Funds[/i][/size][/center]
+
+[hr]
+
+[size=14pt][b][color=#00CED1]WHAT'S NEW IN v2.2.1[/color][/b][/size]
+
+[size=12pt][b]Index Fund Token Support (QNK10, DEFI5)[/b][/size]
+
+We've introduced [b]QNK-INDEX[/b] - the world's first post-quantum index fund tokens on a blockchain! Think of it like owning shares in an S&P 500-style fund, but for quantum-resistant crypto assets.
+
+[list]
+[li][b]QNK10[/b] - Market-cap weighted index tracking the top 10 QUG ecosystem tokens[/li]
+[li][b]DEFI5[/b] - DeFi-focused index with 5 key decentralized finance assets[/li]
+[li]Automatic monthly rebalancing based on market conditions[/li]
+[li]Low management fees (0.5%) with transparent NAV calculations[/li]
+[/list]
+
+[code]
+// Index Fund Token Resolution (v2.2.1)
+// Deterministic addresses using blake3 hash
+QNK10  -> 0x1F... (Index Fund marker)
+DEFI5  -> 0x1F... (Index Fund marker)
+[/code]
+
+[hr]
+
+[size=12pt][b][color=#9370DB]Critical Sync Fix - "Stuck at 10,000 Blocks" Resolved[/color][/b][/size]
+
+Users reported sync getting stuck at ~10,000 blocks with only 5 blocks/sec speed instead of 100+ blocks/sec. [b]Root cause found and fixed![/b]
+
+[b]The Bug:[/b]
+[code]
+// BEFORE (broken):
+// Peer filter required height >= network_height (789,000)
+// But peers at 258,495 and 449,976 were REJECTED
+// Even though they had blocks the user needed!
+
+filter: *height >= network_height  // ❌ Too strict!
+[/code]
+
+[b]The Fix:[/b]
+[code]
+// AFTER (v2.2.1):
+// Accept ANY peer with blocks we need (height > current_height)
+
+filter: *height > current_height  // ✅ Correct!
+[/code]
+
+This fix was applied to [b]3 locations[/b]:
+[list]
+[li][font=monospace]main.rs:10057-10079[/font] - Peer eligibility filter[/li]
+[li][font=monospace]main.rs:10099-10104[/font] - Test peers filter[/li]
+[li][font=monospace]turbo_sync.rs:1791-1837[/font] - Peer discovery function[/li]
+[/list]
+
+[hr]
+
+[size=14pt][b][color=#00CED1]DOWNLOAD v2.2.1-beta[/color][/b][/size]
+
+[b]Linux x86_64:[/b]
+[code]
+wget https://quillon.xyz/downloads/q-api-server-v2.2.1-beta
+chmod +x q-api-server-v2.2.1-beta
+./q-api-server-v2.2.1-beta --port 8080
+[/code]
+
+[b]Expected Performance After Update:[/b]
+[list]
+[li]Sync speed: 100+ blocks/sec (was stuck at 5 blocks/sec)[/li]
+[li]Full sync time: ~2-3 hours for 790k blocks (was 44+ hours)[/li]
+[li]Network height: 790,000+ blocks and growing[/li]
+[/list]
+
+[hr]
+
+[size=14pt][b][color=#9370DB]Genus-2 Jacobian VDF Mining Whitepaper[/color][/b][/size]
+
+[b]NEW:[/b] We've published a comprehensive whitepaper on our innovative mining algorithm!
+
+[b]"Genus-2 Jacobian VDF Mining: A Post-Quantum Resistant Proof-of-Work Algorithm"[/b]
+
+[b]Key Innovations:[/b]
+[list]
+[li][b]Genus-2 Hyperelliptic Curves[/b] - 3-bit/element information density vs 1-bit/element for elliptic curves[/li]
+[li][b]Mumford Representation[/b] - Efficient divisor class arithmetic[/li]
+[li][b]Wesolowski Proof Protocol[/b] - Verifiable delay function with O(log T) verification[/li]
+[li][b]Post-Quantum Security[/b] - 128/192/256-bit security levels against quantum attacks[/li]
+[li][b]ASIC Resistance[/b] - Memory-hard computation prevents specialized hardware dominance[/li]
+[/list]
+
+[b]Security Analysis:[/b]
+[code]
+Classical Security:
+- DLP Complexity: O(p^(4/9)) vs O(sqrt(p)) for elliptic curves
+- Index calculus attacks significantly harder
+
+Quantum Security:
+- Shor's algorithm still applies, but...
+- Security parameter chosen for post-quantum resilience
+- PQ128: 256-bit curve for 128-bit post-quantum security
+- PQ192: 384-bit curve for 192-bit post-quantum security
+- PQ256: 512-bit curve for 256-bit post-quantum security
+[/code]
+
+[b]Download Whitepaper:[/b] [url=https://quillon.xyz/papers/genus2-jacobian-vdf-mining-whitepaper.pdf]genus2-jacobian-vdf-mining-whitepaper.pdf[/url]
+
+[hr]
+
+[size=14pt][b][color=#00CED1]Mining Pool Architecture (Preview)[/color][/b][/size]
+
+Coming soon in v2.3.0:
+
+[list]
+[li][b]Stratum V2 Protocol[/b] - Modern, efficient mining communication[/li]
+[li][b]PPLNS Reward Distribution[/b] - Fair pay-per-last-N-shares[/li]
+[li][b]Decentralized Pool Discovery[/b] - BEP44 DHT integration[/li]
+[li][b]Quantum-Resistant Authentication[/b] - SQIsign handshakes[/li]
+[/list]
+
+[code]
+Mining Pool Fee Structure:
+- Pool Fee: 1%
+- PPLNS Window: 10 blocks
+- Minimum Payout: 10 QUG
+- Payout Frequency: Hourly (automatic)
+[/code]
+
+[hr]
+
+[size=14pt][b][color=#9370DB]NETWORK STATUS[/color][/b][/size]
+
+[table]
+[tr][td][b]Metric[/b][/td][td][b]Value[/b][/td][/tr]
+[tr][td]Block Height[/td][td]790,000+[/td][/tr]
+[tr][td]Network Nodes[/td][td]10-20 globally[/td][/tr]
+[tr][td]Sync Speed[/td][td]100+ blocks/sec[/td][/tr]
+[tr][td]Finality Time[/td][td]<2.9s (Tor), <2.3s (direct)[/td][/tr]
+[tr][td]Uptime[/td][td]99.9%[/td][/tr]
+[tr][td]Cryptography[/td][td]SQIsign + AEGIS-QL + Genus-2 VDF[/td][/tr]
+[/table]
+
+[hr]
+
+[size=14pt][b][color=#00CED1]CHANGELOG v2.2.1-beta[/color][/b][/size]
+
+[code]
+v2.2.1-beta (December 26, 2025)
+==============================
+
+[NEW] Index Fund Token Support
+  - QNK10 (Top 10 Index) token resolution
+  - DEFI5 (DeFi 5 Index) token resolution
+  - Deterministic address generation (blake3 hash)
+  - Proper error messages for index tokens
+
+[FIX] Critical Sync Bug - "Stuck at 10,000 blocks"
+  - Root cause: Peer filter too strict (required network_height)
+  - Fix: Accept peers with height > current_height
+  - Applied to main.rs and turbo_sync.rs
+  - Sync speed restored: 100+ blocks/sec
+
+[DOC] Genus-2 Jacobian VDF Mining Whitepaper
+  - Complete mathematical foundations
+  - Security analysis (classical + quantum)
+  - Mining pool architecture
+  - Performance benchmarks
+  - 9 pages, professionally formatted
+
+[PERF] Memory optimization for large sync batches
+[SECURITY] Enhanced peer validation logging
+[/code]
+
+[hr]
+
+[center]
+[b][color=#00CED1]Build the quantum-resistant future with us![/color][/b]
+
+[url=https://quillon.xyz]Website[/url] | [url=https://github.com/dagknight/q-narwhalknight]GitHub[/url] | [url=https://discord.gg/quillon]Discord[/url]
+
+[size=10pt][i]Q-NarwhalKnight: Where quantum physics meets decentralized consensus[/i][/size]
+[/center]

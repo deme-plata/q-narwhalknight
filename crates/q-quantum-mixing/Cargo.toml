@@ -1,0 +1,104 @@
+[package]
+name = "q-quantum-mixing"
+version = "1.0.0"
+edition = "2021"
+description = "Production-grade Quantum Mixing Protocol with Chaumian Mixing, Ring Signatures, and ZK Proofs"
+authors = ["Server Alpha <server-alpha@q-narwhalknight.dev>", "Server Beta <server-beta@q-narwhalknight.dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/deme-plata/q-narwhalknight"
+
+[dependencies]
+# Core Q-NarwhalKnight dependencies
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-zk-stark = { path = "../q-zk-stark" }
+q-storage = { path = "../q-storage" }
+
+# Core Rust ecosystem
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+humantime = "2.1"
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Cryptographic libraries
+ring = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+getrandom = "0.2"
+
+# Real elliptic curve cryptography for ring signatures (v2.5.1-beta: Production ZK Privacy)
+curve25519-dalek = { version = "4.1", features = ["serde", "rand_core", "alloc"] }
+x25519-dalek = { version = "2.0", features = ["serde", "static_secrets"] }
+# For CtOption handling in curve25519-dalek 4.x
+subtle = "2.5"
+
+# Bulletproofs++ (v3.9.0: 39% smaller range proofs, 5x faster)
+merlin = "3.0"  # Fiat-Shamir transcripts for bulletproofs
+
+# FROST threshold signatures (v3.9.0: MPC-based trustless mixing pool)
+frost-ristretto255 = { version = "2.0", optional = true }
+
+# Post-quantum cryptography
+pqcrypto-dilithium = { workspace = true, optional = true }
+pqcrypto-kyber = { workspace = true, optional = true }
+
+# Lattice-based cryptography (v3.9.0: Post-quantum ring signatures)
+pqcrypto-traits = { version = "0.3", optional = true }
+
+# Zero-knowledge proofs
+risc0-zkvm = { workspace = true }
+
+# Collections and utilities
+dashmap = { workspace = true }
+num_cpus = "1.16"
+parking_lot = "0.12"
+crossbeam = { workspace = true }
+
+# Serialization
+bincode = { workspace = true }
+hex = { workspace = true }
+
+# Math libraries
+num-bigint = { workspace = true }
+num-traits = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[features]
+default = ["ring-signatures", "stealth-addresses", "zk-proofs"]
+ring-signatures = []
+stealth-addresses = []
+zk-proofs = []
+quantum-resistant = ["pqcrypto-dilithium", "pqcrypto-kyber", "pqcrypto-traits"]
+performance-optimized = []
+
+# v3.9.0 Cryptographic Enhancements
+bulletproofs-pp = []  # Bulletproofs++ range proofs (39% smaller, 5x faster)
+clsag = []  # CLSAG ring signatures (25% bandwidth reduction)
+lattice-ring-sigs = ["pqcrypto-dilithium", "pqcrypto-traits"]  # Post-quantum ring signatures
+threshold-pool = ["frost-ristretto255"]  # MPC-based trustless mixing pool
+aggregated-sigs = []  # Aggregated ring signatures (O(log mn) space)
+recursive-stark = []  # Recursive STARK proof composition
+
+# Full v3.9.0 cryptographic upgrade
+crypto-v39 = ["bulletproofs-pp", "clsag", "lattice-ring-sigs", "threshold-pool", "aggregated-sigs", "recursive-stark"]
+
+[[bench]]
+name = "mixing_benchmarks"
+harness = false

@@ -1,0 +1,25 @@
+🚀 Major update to the K-Parameter Quantum Frontiers whitepaper!
+
+We've resolved critical technical issues and added the operational definition that reviewers need:
+
+✨ NEW: Complete measurement recipe showing how to extract K̂ from experimental data
+• Step-by-step estimator pipeline (ΔH → ΔS → τ → K̂)
+• Uncertainty propagation & systematic validation
+• Real example: 10⁶ Cs atoms → K̂ = (1.53±0.03)×10⁻¹⁵ J^(1/2) K^(1/2) s^(-1/2)
+
+🔧 FIXED: α₀ vs α̂_G notation
+• α₀ ≈ 5.9×10⁻³⁹ (nominal Planck-suppressed coupling)
+• α̂_G = (6.96±0.15)×10⁻¹⁰ (measured effective QG coupling)
+• Explained the 10²⁹ enhancement: collective effects in multi-particle quantum sensors
+
+📐 FIXED: Dimensional hygiene in dark matter coupling
+• Proper decoherence rate: Γ_DM = n_DM σ_DM v_DM [s⁻¹]
+• Explicit model dependencies for WIMP vs axion scenarios
+
+📊 NEW: Comprehensive symbols & units table covering all parameters
+
+78 pages of quantum gravity detection, dark sector coupling, biological quantum coherence, and topological quantum matter.
+
+First empirical constraints on quantum-gravitational coupling at accessible energy scales. 🌌⚛️
+
+#QuantumPhysics #BeyondStandardModel #QuantumGravity #DarkMatter #QuantumBiology

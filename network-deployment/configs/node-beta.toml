@@ -1,0 +1,38 @@
+# Q-NarwhalKnight Node Beta Configuration
+[node]
+id = "bob"
+type = "validator"
+listen_port = 8334
+api_port = 8080
+
+[consensus]
+byzantine_threshold = 3
+epoch_duration_ms = 5000
+anchor_election_vdf_difficulty = 1000
+
+[networking]
+bootstrap_peers = ["node-alpha:8334"]
+discovery_enabled = true
+mdns_enabled = true
+kademlia_enabled = true
+
+[tor]
+enabled = true
+socks_port = 9050
+control_port = 9051
+data_dir = "/app/data/tor"
+auto_onion_service = true
+
+[storage]
+data_dir = "/app/data/node"
+rocksdb_path = "/app/data/node/db"
+cache_size_mb = 256
+
+[api]
+cors_enabled = true
+websocket_enabled = true
+streaming_enabled = true
+
+[logging]
+level = "info"
+file = "/app/logs/node-beta.log"

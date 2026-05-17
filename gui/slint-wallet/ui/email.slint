@@ -1,0 +1,534 @@
+// ═══════════════════════════════════════════════════════════════
+// NOT READY — Feature incomplete, do not import in app.slint
+// This screen is excluded from navigation until implementation
+// is complete and approved. Icons: icons/mail.svg / calendar.svg / bot.svg
+// ═══════════════════════════════════════════════════════════════
+
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+
+export struct EmailItem {
+    id: string,
+    from-addr: string,
+    subject: string,
+    preview: string,
+    timestamp: string,
+    read: bool,
+    folder: string,
+    has-crypto: bool,
+    crypto-amount: string,
+}
+
+export component EmailScreen inherits Rectangle {
+    in property <[EmailItem]> emails: [];
+    in property <bool> loading: false;
+    in property <int> unread-count: 0;
+    in property <string> email-address: "";
+
+    // Compose state
+    in-out property <bool> composing: false;
+    in-out property <string> compose-to: "";
+    in-out property <string> compose-subject: "";
+    in-out property <string> compose-body: "";
+    in property <bool> sending: false;
+    in property <string> send-status: "";
+
+    // Detail view state
+    in-out property <bool> show-detail: false;
+    in-out property <string> detail-id: "";
+    in-out property <string> detail-from: "";
+    in-out property <string> detail-subject: "";
+    in-out property <string> detail-body: "";
+    in-out property <string> detail-timestamp: "";
+    in-out property <string> detail-crypto: "";
+
+    // Folder tabs
+    in-out property <int> active-folder: 0;  // 0=inbox 1=sent
+
+    callback go-back();
+    callback refresh-inbox();
+    callback load-sent();
+    callback compose-send();
+    callback open-email(string);
+    callback delete-email(string);
+    callback copy-text(string);
+
+    background: Theme.bg-primary;
+
+    if !composing && !show-detail : VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: back-touch.has-hover ? Theme.bg-hover : transparent;
+                back-touch := TouchArea { clicked => { root.go-back(); } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/arrow-left.svg"); icon-color: Theme.text-primary; }
+                }
+            }
+
+            Text {
+                text: "Quillon Mail";
+                font-size: Theme.font-lg;
+                font-weight: 700;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            // Unread badge
+            if root.unread-count > 0 : Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: Theme.accent-blue;
+                y: (40px - 28px) / 2;
+                HorizontalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.unread-count > 99 ? "99+" : root.unread-count;
+                        font-size: Theme.font-xs;
+                        font-weight: 700;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            // Compose button
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: compose-touch.has-hover ? Theme.accent-blue.with-alpha(0.15) : transparent;
+                compose-touch := TouchArea { clicked => { root.composing = true; } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/send.svg"); icon-color: Theme.accent-blue; }
+                }
+            }
+        }
+
+        // Email address
+        if root.email-address != "" : Text {
+            text: root.email-address;
+            font-size: Theme.font-xs;
+            color: Theme.text-muted;
+            horizontal-alignment: left;
+        }
+
+        // Folder tabs
+        HorizontalLayout {
+            height: 36px;
+            spacing: 0px;
+
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: Theme.radius-sm;
+                background: root.active-folder == 0 ? Theme.accent-blue.with-alpha(0.15) : (inbox-touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+                border-width: 1px;
+                border-color: root.active-folder == 0 ? Theme.accent-blue : Theme.border;
+                inbox-touch := TouchArea {
+                    clicked => {
+                        root.active-folder = 0;
+                        root.refresh-inbox();
+                    }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: Theme.spacing-xs;
+                    Icon {
+                        source: @image-url("icons/arrow-down-to-line.svg");
+                        icon-color: root.active-folder == 0 ? Theme.accent-blue : Theme.text-muted;
+                        width: 14px; height: 14px;
+                    }
+                    Text {
+                        text: "Inbox";
+                        font-size: Theme.font-sm;
+                        font-weight: root.active-folder == 0 ? 600 : 400;
+                        color: root.active-folder == 0 ? Theme.accent-blue : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+                border-radius: Theme.radius-sm;
+                background: root.active-folder == 1 ? Theme.accent-blue.with-alpha(0.15) : (sent-touch.has-hover ? Theme.bg-hover : Theme.bg-secondary);
+                border-width: 1px;
+                border-color: root.active-folder == 1 ? Theme.accent-blue : Theme.border;
+                sent-touch := TouchArea {
+                    clicked => {
+                        root.active-folder = 1;
+                        root.load-sent();
+                    }
+                }
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: Theme.spacing-xs;
+                    Icon {
+                        source: @image-url("icons/arrow-up-from-line.svg");
+                        icon-color: root.active-folder == 1 ? Theme.accent-blue : Theme.text-muted;
+                        width: 14px; height: 14px;
+                    }
+                    Text {
+                        text: "Sent";
+                        font-size: Theme.font-sm;
+                        font-weight: root.active-folder == 1 ? 600 : 400;
+                        color: root.active-folder == 1 ? Theme.accent-blue : Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+
+        // Loading indicator
+        if root.loading : HorizontalLayout {
+            alignment: center;
+            height: 40px;
+            Text { text: "Loading..."; color: Theme.text-muted; font-size: Theme.font-sm; }
+        }
+
+        // Email list
+        if !root.loading : Flickable {
+            vertical-stretch: 1;
+            viewport-height: root.emails.length * 80px + 80px;
+            VerticalLayout {
+                spacing: Theme.spacing-xs;
+
+                if root.emails.length == 0 : Rectangle {
+                    height: 80px;
+                    HorizontalLayout {
+                        alignment: center;
+                        Text {
+                            text: root.active-folder == 0 ? "No emails in inbox" : "No sent emails";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-sm;
+                        }
+                    }
+                }
+
+                for email[i] in root.emails : Rectangle {
+                    height: 72px;
+                    border-radius: Theme.radius-sm;
+                    background: row-touch.has-hover ? Theme.bg-hover : Theme.bg-card;
+                    border-width: email.read ? 0 : 2px;
+                    border-color: Theme.accent-blue.with-alpha(0.4);
+
+                    row-touch := TouchArea {
+                        clicked => { root.open-email(email.id); }
+                    }
+
+                    HorizontalLayout {
+                        padding: Theme.spacing-sm;
+                        spacing: Theme.spacing-sm;
+
+                        // Unread dot
+                        if !email.read : Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.accent-blue;
+                            y: (72px - 8px) / 2;
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 3px;
+                            alignment: center;
+
+                            HorizontalLayout {
+                                spacing: Theme.spacing-xs;
+                                Text {
+                                    text: email.from-addr;
+                                    font-size: Theme.font-sm;
+                                    font-weight: email.read ? 400 : 700;
+                                    color: Theme.text-primary;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                if email.has-crypto : Rectangle {
+                                    width: 40px;
+                                    height: 18px;
+                                    border-radius: 9px;
+                                    background: Theme.accent-green.with-alpha(0.2);
+                                    HorizontalLayout {
+                                        alignment: center;
+                                        Text {
+                                            text: "QUG";
+                                            font-size: 9px;
+                                            color: Theme.accent-green;
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text {
+                                text: email.subject;
+                                font-size: Theme.font-sm;
+                                font-weight: email.read ? 400 : 600;
+                                color: email.read ? Theme.text-secondary : Theme.text-primary;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: email.preview;
+                                font-size: Theme.font-xs;
+                                color: Theme.text-muted;
+                                overflow: elide;
+                            }
+                        }
+
+                        VerticalLayout {
+                            alignment: start;
+                            Text {
+                                text: email.timestamp;
+                                font-size: Theme.font-xs;
+                                color: Theme.text-muted;
+                                horizontal-alignment: right;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Email detail view
+    if root.show-detail : VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-sm;
+
+        // Header
+        HorizontalLayout {
+            height: 40px;
+            spacing: Theme.spacing-sm;
+
+            Rectangle {
+                width: 40px;
+                border-radius: Theme.radius-sm;
+                background: det-back.has-hover ? Theme.bg-hover : transparent;
+                det-back := TouchArea { clicked => { root.show-detail = false; } }
+                HorizontalLayout {
+                    alignment: center;
+                    Icon { source: @image-url("icons/arrow-left.svg"); icon-color: Theme.text-primary; }
+                }
+            }
+
+            Text {
+                text: root.detail-subject;
+                font-size: Theme.font-md;
+                font-weight: 700;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+
+        // From/Date
+        Rectangle {
+            height: 44px;
+            background: Theme.bg-card;
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.border;
+            HorizontalLayout {
+                padding-left: Theme.spacing-sm;
+                padding-right: Theme.spacing-sm;
+                spacing: Theme.spacing-sm;
+                alignment: center;
+
+                Text {
+                    text: "From:";
+                    font-size: Theme.font-xs;
+                    color: Theme.text-muted;
+                    width: 40px;
+                }
+                Text {
+                    text: root.detail-from;
+                    font-size: Theme.font-sm;
+                    color: Theme.accent-blue;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.detail-timestamp;
+                    font-size: Theme.font-xs;
+                    color: Theme.text-muted;
+                }
+            }
+        }
+
+        if root.detail-crypto != "" : Rectangle {
+            height: 40px;
+            background: Theme.accent-green.with-alpha(0.1);
+            border-radius: Theme.radius-sm;
+            border-width: 1px;
+            border-color: Theme.accent-green.with-alpha(0.3);
+            HorizontalLayout {
+                padding-left: Theme.spacing-sm;
+                alignment: center;
+                spacing: Theme.spacing-sm;
+                Icon {
+                    source: @image-url("icons/token-qug.svg");
+                    icon-color: Theme.accent-green;
+                    width: 16px; height: 16px;
+                }
+                Text {
+                    text: root.detail-crypto;
+                    font-size: Theme.font-sm;
+                    color: Theme.accent-green;
+                    font-weight: 600;
+                }
+            }
+        }
+
+        // Body
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: 400px;
+            Rectangle {
+                background: Theme.bg-card;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border;
+                VerticalLayout {
+                    padding: Theme.spacing-md;
+                    Text {
+                        text: root.detail-body;
+                        font-size: Theme.font-sm;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                    }
+                }
+            }
+        }
+
+        // Reply button
+        QButton {
+            label: "Reply";
+            button-color: Theme.accent-blue;
+            clicked => {
+                root.compose-to = root.detail-from;
+                root.compose-subject = "Re: " + root.detail-subject;
+                root.show-detail = false;
+                root.composing = true;
+            }
+        }
+    }
+
+    // Compose modal
+    if root.composing : Rectangle {
+        background: #00000080;
+
+        TouchArea { clicked => { root.composing = false; } }
+
+        Rectangle {
+            width: root.width - 32px;
+            height: 480px;
+            x: 16px;
+            y: (root.height - 480px) / 2;
+            background: Theme.bg-secondary;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            VerticalLayout {
+                padding: Theme.spacing-md;
+                spacing: Theme.spacing-sm;
+
+                // Title
+                HorizontalLayout {
+                    height: 32px;
+                    Text {
+                        text: "New Message";
+                        font-size: Theme.font-md;
+                        font-weight: 700;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: 32px;
+                        border-radius: Theme.radius-sm;
+                        background: close-touch.has-hover ? Theme.bg-hover : transparent;
+                        close-touch := TouchArea { clicked => { root.composing = false; } }
+                        HorizontalLayout {
+                            alignment: center;
+                            Icon { source: @image-url("icons/x.svg"); icon-color: Theme.text-secondary; width: 16px; height: 16px; }
+                        }
+                    }
+                }
+
+                // To field
+                QInput {
+                    placeholder: "To (wallet address or alias@quillon.xyz)";
+                    text <=> root.compose-to;
+                }
+
+                // Subject field
+                QInput {
+                    placeholder: "Subject";
+                    text <=> root.compose-subject;
+                }
+
+                // Body
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 200px;
+                    background: Theme.bg-input;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: body-input.has-focus ? Theme.border-focus : Theme.border;
+
+                    body-input := TextInput {
+                        x: 12px;
+                        y: 8px;
+                        width: parent.width - 24px;
+                        height: parent.height - 16px;
+                        text <=> root.compose-body;
+                        font-size: Theme.font-sm;
+                        color: Theme.text-primary;
+                        wrap: word-wrap;
+                        vertical-alignment: top;
+                    }
+
+                    if body-input.text == "" : Text {
+                        x: 12px;
+                        y: 8px;
+                        text: "Write your message...";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: top;
+                    }
+                }
+
+                // Status message
+                if root.send-status != "" : Text {
+                    text: root.send-status;
+                    font-size: Theme.font-xs;
+                    color: root.send-status == "Sent!" ? Theme.accent-green : Theme.accent-red;
+                    horizontal-alignment: center;
+                }
+
+                QButton {
+                    label: "Send";
+                    loading: root.sending;
+                    enabled: root.compose-to != "" && root.compose-subject != "" && root.compose-body != "" && !root.sending;
+                    button-color: Theme.accent-blue;
+                    clicked => { root.compose-send(); }
+                }
+            }
+        }
+    }
+}

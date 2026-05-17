@@ -1,0 +1,80 @@
+Starting Narwhal-Bullshark VM benchmark
+----------------------------------------
+Transactions: 1000
+Batch size: 100
+Nodes: 16
+Mode: stress
+Loaded configuration from config/vm_config.toml
+Updated batch size
+
+Running stress benchmark for 60 seconds...
+Starting stress benchmark for 60 seconds...
+Starting NarwhalBullshark VM...
+[ 0.0s] Transactions: 100 (+100), TPS: 100.00 (current: 100.00)
+[ 1.0s] Transactions: 8400 (+8300), TPS: 8384.12 (current: 8300.00)
+[ 2.0s] Transactions: 16900 (+8500), TPS: 8442.33 (current: 8500.00)
+[ 3.0s] Transactions: 25500 (+8600), TPS: 8484.03 (current: 8600.00)
+[ 4.0s] Transactions: 34200 (+8700), TPS: 8546.74 (current: 8700.00)
+[ 5.0s] Transactions: 42800 (+8600), TPS: 8556.37 (current: 8600.00)
+[ 6.0s] Transactions: 51400 (+8600), TPS: 8564.59 (current: 8600.00)
+[ 7.0s] Transactions: 60200 (+8800), TPS: 8598.03 (current: 8800.00)
+[ 8.0s] Transactions: 68900 (+8700), TPS: 8601.76 (current: 8700.00)
+[ 9.0s] Transactions: 77600 (+8700), TPS: 8620.98 (current: 8700.00)
+[10.0s] Transactions: 86500 (+8900), TPS: 8648.82 (current: 8900.00)
+[11.0s] Transactions: 95300 (+8800), TPS: 8662.20 (current: 8800.00)
+[12.0s] Transactions: 104100 (+8800), TPS: 8673.78 (current: 8800.00)
+[13.0s] Transactions: 112900 (+8800), TPS: 8683.15 (current: 8800.00)
+[14.0s] Transactions: 121700 (+8800), TPS: 8691.97 (current: 8800.00)
+[15.0s] Transactions: 130400 (+8700), TPS: 8692.59 (current: 8700.00)
+[16.0s] Transactions: 139300 (+8900), TPS: 8705.21 (current: 8900.00)
+[17.0s] Transactions: 148100 (+8800), TPS: 8711.02 (current: 8800.00)
+[18.0s] Transactions: 156900 (+8800), TPS: 8716.08 (current: 8800.00)
+[19.0s] Transactions: 165600 (+8700), TPS: 8715.00 (current: 8700.00)
+[20.0s] Transactions: 174400 (+8800), TPS: 8719.18 (current: 8800.00)
+[21.0s] Transactions: 183200 (+8800), TPS: 8723.22 (current: 8800.00)
+[22.0s] Transactions: 192000 (+8800), TPS: 8726.58 (current: 8800.00)
+[23.0s] Transactions: 200700 (+8700), TPS: 8725.29 (current: 8700.00)
+[24.0s] Transactions: 209300 (+8600), TPS: 8720.10 (current: 8600.00)
+[25.0s] Transactions: 218000 (+8700), TPS: 8718.31 (current: 8700.00)
+[26.0s] Transactions: 226600 (+8600), TPS: 8714.73 (current: 8600.00)
+[27.0s] Transactions: 235400 (+8800), TPS: 8717.90 (current: 8800.00)
+[28.0s] Transactions: 244300 (+8900), TPS: 8724.40 (current: 8900.00)
+[29.0s] Transactions: 253200 (+8900), TPS: 8730.63 (current: 8900.00)
+[30.0s] Transactions: 262000 (+8800), TPS: 8732.82 (current: 8800.00)
+[31.0s] Transactions: 270800 (+8800), TPS: 8735.01 (current: 8800.00)
+[32.0s] Transactions: 279600 (+8800), TPS: 8736.10 (current: 8800.00)
+[33.0s] Transactions: 288400 (+8800), TPS: 8739.13 (current: 8800.00)
+[34.0s] Transactions: 297300 (+8900), TPS: 8743.71 (current: 8900.00)
+[35.0s] Transactions: 306100 (+8800), TPS: 8745.25 (current: 8800.00)
+[36.0s] Transactions: 314900 (+8800), TPS: 8746.91 (current: 8800.00)
+[37.0s] Transactions: 323800 (+8900), TPS: 8750.95 (current: 8900.00)
+[38.0s] Transactions: 332600 (+8800), TPS: 8752.19 (current: 8800.00)
+[39.0s] Transactions: 341500 (+8900), TPS: 8756.15 (current: 8900.00)
+[40.0s] Transactions: 350300 (+8800), TPS: 8757.14 (current: 8800.00)
+[41.0s] Transactions: 359200 (+8900), TPS: 8760.68 (current: 8900.00)
+[42.0s] Transactions: 368000 (+8800), TPS: 8761.52 (current: 8800.00)
+[43.0s] Transactions: 376800 (+8800), TPS: 8762.55 (current: 8800.00)
+[44.0s] Transactions: 385600 (+8800), TPS: 8763.43 (current: 8800.00)
+[45.0s] Transactions: 394500 (+8900), TPS: 8766.45 (current: 8900.00)
+[46.0s] Transactions: 403300 (+8800), TPS: 8767.12 (current: 8800.00)
+[47.0s] Transactions: 412200 (+8900), TPS: 8769.85 (current: 8900.00)
+[48.0s] Transactions: 420700 (+8500), TPS: 8764.21 (current: 8500.00)
+[49.0s] Transactions: 429500 (+8800), TPS: 8765.11 (current: 8800.00)
+[50.0s] Transactions: 438400 (+8900), TPS: 8767.77 (current: 8900.00)
+[51.0s] Transactions: 447300 (+8900), TPS: 8770.31 (current: 8900.00)
+[52.0s] Transactions: 455900 (+8600), TPS: 8767.00 (current: 8600.00)
+[53.0s] Transactions: 464700 (+8800), TPS: 8767.61 (current: 8800.00)
+[54.0s] Transactions: 473400 (+8700), TPS: 8766.41 (current: 8700.00)
+[55.0s] Transactions: 482300 (+8900), TPS: 8768.83 (current: 8900.00)
+[56.0s] Transactions: 491200 (+8900), TPS: 8771.15 (current: 8900.00)
+[57.0s] Transactions: 500000 (+8800), TPS: 8771.62 (current: 8800.00)
+[58.0s] Transactions: 508900 (+8900), TPS: 8773.97 (current: 8900.00)
+[59.0s] Transactions: 517700 (+8800), TPS: 8774.26 (current: 8800.00)
+[60.0s] Transactions: 526400 (+8700), TPS: 8772.06 (current: 8700.00)
+
+Stress Benchmark Results:
+  Total duration: 60 seconds
+  Total transactions: 526500
+  Overall throughput: 8775.00 TPS
+  VM reported TPS: 100.00
+Stopping NarwhalBullshark VM...

@@ -1,0 +1,41 @@
+FROM rust:latest
+
+# Install Windows cross-compilation toolchain
+RUN dpkg --add-architecture i386 && \
+    apt-get update && \
+    apt-get install -y \
+    mingw-w64 \
+    gcc-mingw-w64-x86-64 \
+    gfortran-mingw-w64-x86-64 \
+    wine \
+    wine64 \
+    llvm-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Windows Rust target
+RUN rustup target add x86_64-pc-windows-gnu
+
+# Configure cargo for Windows cross-compilation
+RUN mkdir -p ~/.cargo && \
+    echo '[target.x86_64-pc-windows-gnu]' >> ~/.cargo/config.toml && \
+    echo 'linker = "x86_64-w64-mingw32-gcc"' >> ~/.cargo/config.toml && \
+    echo 'ar = "x86_64-w64-mingw32-ar"' >> ~/.cargo/config.toml
+
+# Set environment variables for cross-compilation
+ENV CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+ENV CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++
+ENV AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+ENV OPENBLAS_TARGET=CORE2
+ENV OPENBLAS_CC=x86_64-w64-mingw32-gcc
+ENV OPENBLAS_FC=x86_64-w64-mingw32-gfortran
+ENV OPENBLAS_HOSTCC=gcc
+ENV OPENBLAS_RANLIB=x86_64-w64-mingw32-ranlib
+
+WORKDIR /workspace
+
+# Build command will be provided at runtime
+CMD ["sh", "-c", "timeout 36000 cargo build --release --target x86_64-pc-windows-gnu --package q-api-server"]

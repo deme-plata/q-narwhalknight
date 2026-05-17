@@ -1,0 +1,173 @@
+[package]
+name = "q-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+ureq = "2.9"  # v10.3.5: HTTP probe for checkpoint sync (one-time startup)
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+
+# Storage engines
+bincode = { workspace = true }
+postcard = { workspace = true }
+lz4 = { workspace = true }
+zstd = "0.13"
+rmp-serde = "1.1"  # v0.9.65: MessagePack fallback for cross-version compatibility
+
+# Cryptography for hashing and signatures
+blake3 = "1.5"
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+hex = "0.4"
+q-log-privacy = { path = "../q-log-privacy" }  # Privacy-preserving log redaction
+ed25519-dalek = { workspace = true }  # v1.0.95-beta: Block signature verification
+
+# Encryption-at-rest (v1.0.39-beta)
+argon2 = { version = "0.5", features = ["std"] }
+aes-gcm = "0.10"
+aes = "0.8"
+ctr = "0.9"
+hkdf = "0.12"
+getrandom = "0.2"
+zeroize = { version = "1.7", features = ["derive"] }
+rand = "0.8"
+serde_json = "1.0"
+chrono = "0.4"
+bigdecimal = { version = "0.4", features = ["serde"] }
+
+# ZK-STARK for untrusted setup (v1.0.43-beta)
+winterfell = "0.9"
+winter-math = "0.9"
+winter-crypto = "0.9"
+
+# LRU cache for bounded memory (v0.8.0-beta security fix)
+lru = "0.12"
+
+# CPU detection for auto-scaling RocksDB threads (v5.1.0)
+num_cpus = "1.16"
+
+# DashMap for concurrent peer trust tracking (v0.9.15-beta)
+dashmap = "5.5"
+
+# lazy_static for global compute power map (v9.1.0)
+lazy_static = { workspace = true }
+
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks (10-20% speedup in hot paths)
+parking_lot = "0.12"
+
+# Rayon for parallel processing (v0.9.41-beta: parallel decompression)
+rayon = "1.8"
+
+# v8.4.4: once_cell for lazy static sync rayon pool
+once_cell = { workspace = true }
+
+# System information for memory management (v1.0.15.1-beta)
+sysinfo = "0.30"
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-zk-p2p = { path = "../q-zk-p2p" }
+q-aegis-ql = { path = "../q-aegis-ql" }  # v0.9.15-beta: Post-quantum signed sync
+q-crypto-simd = { path = "../q-crypto-simd" }  # v10.9.20: rayon-parallel batch signature verification
+
+# Networking for sync protocol
+libp2p = { workspace = true, features = ["request-response", "cbor"] }
+
+# Metrics
+prometheus = { workspace = true }
+
+# Platform-specific storage backends
+# RocksDB has Windows cross-compilation issues with MinGW
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+libc = "0.2"
+memmap2 = "0.9"  # v2.1.0-DELTA-V: Memory-mapped files for zero-copy block access
+
+# Sled works on all platforms including Windows
+[target.'cfg(target_os = "windows")'.dependencies]
+sled = "0.34"
+
+[[bin]]
+name = "repair-database"
+path = "src/bin/repair_database.rs"
+
+[[bin]]
+name = "reset-balances"
+path = "src/bin/reset_balances.rs"
+
+[[bin]]
+name = "recover-database"
+path = "src/bin/recover_database.rs"
+
+[[bin]]
+name = "fix-corrupted-pointer"
+path = "src/bin/fix_corrupted_pointer.rs"
+
+[[bin]]
+name = "migrate_to_phase2"
+path = "src/bin/migrate_to_phase2.rs"
+
+[[bin]]
+name = "cleanup-gaps"
+path = "src/bin/cleanup_gaps.rs"
+
+[[bin]]
+name = "fix-corrupt-tip"
+path = "src/bin/fix_corrupt_tip.rs"
+
+[[bin]]
+name = "diagnose-block"
+path = "src/bin/diagnose_block.rs"
+
+[[bin]]
+name = "restore-from-backup"
+path = "src/bin/restore_from_backup.rs"
+
+[[bin]]
+name = "reset-collateral-vault"
+path = "src/bin/reset_collateral_vault.rs"
+
+[[bin]]
+name = "add-missing-column-families"
+path = "src/bin/add_missing_column_families.rs"
+
+[[bin]]
+name = "check-wallet-balance"
+path = "src/bin/check_wallet_balance.rs"
+
+[[bin]]
+name = "recover-wallet-balance"
+path = "src/bin/recover_wallet_balance.rs"
+
+[[bin]]
+name = "scan-blocks"
+path = "src/bin/scan_blocks.rs"
+
+[[bin]]
+name = "test-multiformat-reader"
+path = "src/bin/test_multiformat_reader.rs"
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+proptest = { workspace = true }
+q-consensus-guard = { path = "../q-consensus-guard" }
+# criterion temporarily disabled due to font-kit issues - benchmarks moved to separate crate

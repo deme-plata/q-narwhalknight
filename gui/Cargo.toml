@@ -1,0 +1,86 @@
+[package]
+name = "qnk-gui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "qnk-gui"
+path = "src/main.rs"
+
+# Windows GUI with embedded full node (temporarily disabled - needs module refactoring)
+# [[bin]]
+# name = "qnk-windows-node"
+# path = "src/windows_node.rs"
+
+[dependencies]
+# Slint GUI framework with advanced features
+slint = "1.7"
+
+# HTTP client for API communication
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# BIP39 mnemonic generation
+bip39 = "2.0"
+rand = "0.8"
+
+# WebSocket support for real-time updates
+tokio-tungstenite = "0.23"
+url = "2.5"
+
+# Q-NarwhalKnight types for data structures
+q-types = { path = "../crates/q-types" }
+
+# Embedded full node dependencies (Windows GUI)
+q-dag-knight = { path = "../crates/q-dag-knight", optional = true }
+q-narwhal-core = { path = "../crates/q-narwhal-core", optional = true }
+q-network = { path = "../crates/q-network", optional = true }
+q-api-server = { path = "../crates/q-api-server", optional = true }
+q-wallet = { path = "../crates/q-wallet", optional = true }
+q-storage = { path = "../crates/q-storage", optional = true }
+q-mining = { path = "../crates/q-mining", optional = true }
+q-tor-client = { path = "../crates/q-tor-client", optional = true }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[build-dependencies]
+slint-build = "1.7"
+
+[features]
+default = ["quantum-visualization"]
+quantum-visualization = []
+advanced-animations = []
+embedded-node = [
+    "q-dag-knight",
+    "q-narwhal-core",
+    "q-network",
+    "q-api-server",
+    "q-wallet",
+    "q-storage",
+    "q-mining",
+    "q-tor-client"
+]
+windows-full = ["embedded-node"]
+full-node = ["embedded-node"]  # User-selectable full node mode
+
+# Target-specific configurations
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "winbase"] }
+tokio = { version = "1.0", features = ["full", "rt-multi-thread"] }

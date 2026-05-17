@@ -1,0 +1,71 @@
+services:
+  node-alpha:
+    image: qnk-node-minimal
+    container_name: qnk-node-alpha
+    ports:
+      - "8080:8080"
+    environment:
+      - Q_NODE_ID=alice
+      - Q_NODE_TYPE=validator
+      - Q_IS_VALIDATOR=true
+      - RUST_LOG=info
+      - Q_TOR_ENABLED=false
+      - Q_ENABLE_METRICS=true
+    networks:
+      - qnk-network
+    restart: unless-stopped
+    
+  node-beta:
+    image: qnk-node-minimal
+    container_name: qnk-node-beta
+    ports:
+      - "8081:8080"
+    environment:
+      - Q_NODE_ID=bob
+      - Q_NODE_TYPE=validator
+      - Q_IS_VALIDATOR=true
+      - RUST_LOG=info
+      - Q_TOR_ENABLED=false
+      - Q_ENABLE_METRICS=true
+    networks:
+      - qnk-network
+    restart: unless-stopped
+
+  node-charlie:
+    image: qnk-node-minimal
+    container_name: qnk-node-charlie
+    ports:
+      - "8082:8080"
+    environment:
+      - Q_NODE_ID=charlie
+      - Q_NODE_TYPE=validator
+      - Q_IS_VALIDATOR=true
+      - RUST_LOG=info
+      - Q_TOR_ENABLED=false
+      - Q_ENABLE_METRICS=true
+    networks:
+      - qnk-network
+    restart: unless-stopped
+
+  node-diana:
+    image: qnk-node-minimal
+    container_name: qnk-node-diana
+    ports:
+      - "8083:8080"
+    environment:
+      - Q_NODE_ID=diana
+      - Q_NODE_TYPE=validator
+      - Q_IS_VALIDATOR=true
+      - RUST_LOG=info
+      - Q_TOR_ENABLED=false
+      - Q_ENABLE_METRICS=true
+    networks:
+      - qnk-network
+    restart: unless-stopped
+
+networks:
+  qnk-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

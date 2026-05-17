@@ -1,0 +1,94 @@
+\documentclass[12pt,letterpaper]{book}
+
+% Essential packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+
+% Cyberpunk noir color scheme
+\definecolor{neonblue}{RGB}{0,255,255}
+\definecolor{neongreen}{RGB}{57,255,20}
+\definecolor{neonpink}{RGB}{255,16,240}
+\definecolor{darkbg}{RGB}{10,10,15}
+
+% Custom styling
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{neonblue}}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{neongreen}}
+  {\thesection}{1em}{}
+
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{neonpink}}
+  {\thesubsection}{1em}{}
+
+% Hyperlink styling
+\hypersetup{
+    colorlinks=true,
+    linkcolor=neonblue,
+    filecolor=neonpink,
+    urlcolor=neongreen,
+    pdftitle={Shadows in the Chain - Complete Manuscript},
+    pdfauthor={AI-Generated Fiction},
+    pdfsubject={Cyberpunk Thriller},
+    pdfkeywords={quantum computing, cryptography, thriller, cyberpunk}
+}
+
+% Header/footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[LO]{\textit{Shadows in the Chain}}
+\fancyhead[RE]{\textit{\leftmark}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\begin{document}
+
+% Title Page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge\bfseries\color{neonblue} SHADOWS IN THE CHAIN\par}
+    \vspace{1cm}
+    {\Large\itshape A Quantum Conspiracy Thriller\par}
+    \vspace{2cm}
+
+    {\large\color{neongreen}
+    A Novel of Post-Quantum Cryptography,\\
+    Algorithmic Governance,\\
+    and the Price of Freedom\\
+    \par}
+
+    \vfill
+
+    {\large\color{neonpink} Chapters 1--5\par}
+    {\large Expert-Improved Edition\par}
+    \vspace{0.5cm}
+    {\large Word Count: ~23,923 words\par}
+
+    \vfill
+
+    {\large \today\par}
+\end{titlepage}
+
+% Table of Contents
+\tableofcontents
+\newpage
+
+% Chapters
+\input{chapter1_content_improved.tex}
+\input{chapter2_content_improved.tex}
+\input{chapter3_content_improved.tex}
+\input{chapter4_content_improved.tex}
+\input{chapter5_content_improved.tex}
+
+\end{document}

@@ -1,0 +1,44 @@
+# Q-NarwhalKnight Node Configuration: local-beta
+# Server Beta Node - Connecting to remote peer
+
+[network]
+node_name = "local-beta"
+listen_address = "0.0.0.0:8002"
+public_address = "0.0.0.0:8002"
+bootstrap_peers = [
+    "185.182.185.227:8001"
+]
+tor_enabled = false
+enable_discovery = true
+
+[consensus]
+validator_id = "local-beta"
+byzantine_threshold = 3
+max_validators = 10
+voting_timeout = "10s"
+finalization_timeout = "5s"
+enable_slashing = true
+min_voting_stake = 1000
+
+[mempool]
+max_transactions = 10000
+transaction_timeout = "60s"
+fee_per_byte = 10
+max_transaction_size = 1048576
+
+[dag]
+max_vertex_age = "300s"
+vertex_cache_size = 1000
+vdf_difficulty = 1024
+quantum_enhancement = 0.8
+
+[api]
+rest_enabled = true
+rest_address = "0.0.0.0:8080"
+websocket_enabled = true
+metrics_enabled = true
+
+[logging]
+level = "debug"
+file = "logs/local-beta.log"
+structured = true
