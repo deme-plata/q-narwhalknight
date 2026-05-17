@@ -954,8 +954,20 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       }
     } catch (error) {
       console.error('Quantum seed generation failed:', error);
-      setGenerationError(error instanceof Error ? error.message : 'Unknown error');
-      setSeedPhrase('abandon ability able about above absent absorb abstract absurd abuse access accident');
+      // 2026-05-17 SECURITY FIX: do NOT auto-fill the seed-phrase field on
+      // generation error. The previous fallback (`setSeedPhrase('abandon
+      // ability able about ...')`) was the first 12 words of the BIP39 wordlist
+      // — a valid checksum phrase that deterministically derives to ONE shared
+      // address. Every user who ever hit a generate-error and then clicked
+      // Login landed in that same shared brain wallet. Reported via Discord
+      // (Daniel BC2 landed at qnk1e556bfe4cb6b82b... after generate failure).
+      // Clear the field instead so the user is forced to retry or type their
+      // own phrase. Never write a hardcoded mnemonic into a wallet input.
+      setGenerationError(
+        (error instanceof Error ? error.message : 'Unknown error') +
+        ' — please try the "Generate New" button again or import an existing recovery phrase.'
+      );
+      setSeedPhrase('');
     } finally {
       setShowQuantumGenerator(false);
       setIsGenerating(false);
