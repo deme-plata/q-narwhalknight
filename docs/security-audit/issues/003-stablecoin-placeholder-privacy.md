@@ -15,6 +15,15 @@ The stablecoin privacy layer returns fixed placeholder proof and signature bytes
 - `crates/q-stablecoin/src/privacy.rs::generate_burn_proof` returns the same fixed proof bytes.
 - `crates/q-stablecoin/src/privacy.rs::generate_quantum_signature` returns the same fixed byte vector.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-stablecoin/src/privacy.rs:24-32` returns `proof_data: vec![1, 2, 3, 4]` for mint proofs.
+- `crates/q-stablecoin/src/privacy.rs:35-43` returns the same fixed bytes for burn proofs.
+- `crates/q-stablecoin/src/privacy.rs:46-47` returns `vec![1, 2, 3, 4]` for the quantum signature.
+
 ## Impact
 
 Stablecoin operations can appear to carry cryptographic privacy/authenticity artifacts even though the artifacts are static placeholders. This creates a false privacy guarantee for a private cryptocurrency system.

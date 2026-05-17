@@ -15,6 +15,16 @@ The API exposes `/api/v1/mnemonic` as a GET endpoint that generates seed materia
 - `crates/q-api-server/src/handlers.rs::generate_mnemonic` returns JSON fields including `mnemonic`, `words`, and `entropy`.
 - The displayed wallet address is derived by `SHA3-256(mnemonic_phrase)` rather than a standard BIP39 seed/key derivation path.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-api-server/src/main.rs:24679` registers `GET /api/v1/mnemonic`.
+- `crates/q-api-server/src/handlers.rs:7109-7136` generates entropy and a BIP39 mnemonic server-side.
+- `crates/q-api-server/src/handlers.rs:7149-7155` derives a displayed wallet address by hashing the mnemonic phrase.
+- `crates/q-api-server/src/handlers.rs:7157-7165` returns `mnemonic`, `words`, and raw hex `entropy` in the API response.
+
 ## Impact
 
 A private cryptocurrency wallet should not rely on server-generated and server-transmitted seed material in production. Logs, proxies, browser history, TLS termination, or a compromised API host could expose wallet recovery material.

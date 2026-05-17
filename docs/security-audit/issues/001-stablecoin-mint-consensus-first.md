@@ -17,6 +17,18 @@
 - `crates/q-api-server/src/transaction_utils.rs::create_stable_mint_transaction` creates `TransactionType::StableMint` with `.fee(0)` and no signing step.
 - `crates/q-types/src/lib.rs::Transaction::verify_signature` requires signatures for non-coinbase transactions, so the generated local transaction is not equivalent to a valid user-signed spend.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-api-server/src/stablecoin_api.rs:624-628` parses QUG with `f64` and casts to `u128`.
+- `crates/q-api-server/src/stablecoin_api.rs:631-638` mutates `state.collateral_vault` with `vault_write.mint_qugusd(...)`.
+- `crates/q-api-server/src/stablecoin_api.rs:654-665` persists the cloned vault before submitting the generated transaction.
+- `crates/q-api-server/src/stablecoin_api.rs:671-685` constructs the `StableMint` transaction and assigns `submit_transaction(...)` to `_result`.
+- `crates/q-api-server/src/transaction_utils.rs:144` initializes builder-created transactions with an empty signature.
+- `crates/q-api-server/src/transaction_utils.rs:405-414` creates `StableMint` with zero fee and no signing step.
+
 ## Impact
 
 A node can persist local QUGUSD debt/collateral state before the source-of-truth ledger has proven the user owns and locked QUG. Nodes may diverge on vault state, and failed/rejected transactions can still leave local minted state behind.

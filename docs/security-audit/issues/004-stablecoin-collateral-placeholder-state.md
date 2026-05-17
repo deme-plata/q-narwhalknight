@@ -14,6 +14,14 @@
 - `crates/q-stablecoin/src/collateral.rs::calculate_quantum_collateral_value` ignores its request and returns `BigDecimal::from(1000)`.
 - `crates/q-stablecoin/src/collateral.rs::get_quantum_position` ignores `user_id` and returns a position for `"test"` with fixed collateral amount and ratio.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-stablecoin/src/collateral.rs:21-25` ignores the mint request and returns fixed placeholder collateral value `1000`.
+- `crates/q-stablecoin/src/collateral.rs:28-34` ignores `user_id` and returns a fixed `"test"` position.
+
 ## Impact
 
 Mint/burn authorization can be based on fake collateral values. A caller may mint or release collateral using default placeholder state rather than authenticated positions.

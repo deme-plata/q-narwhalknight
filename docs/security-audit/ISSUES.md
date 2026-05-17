@@ -5,6 +5,11 @@
 
 This tracker records high-impact findings raised for follow-up PRs. Each item is intentionally scoped so it can be fixed independently.
 
+## Verification
+
+These findings were re-checked against the current workspace after review feedback noted that the previous PR artifact was not visible outside the sandbox. See [VERIFICATION.md](VERIFICATION.md) for source anchors, commands, and repository transport notes.
+
+
 | Issue | Priority | Area | Summary |
 | --- | --- | --- | --- |
 | [#001](issues/001-stablecoin-mint-consensus-first.md) | CRITICAL | Stablecoin / consensus | QUGUSD minting mutates and persists vault state before signed consensus acceptance. |

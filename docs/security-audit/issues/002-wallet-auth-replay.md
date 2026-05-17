@@ -15,6 +15,15 @@ Wallet authentication signs `SHA3-256(address + timestamp + request_path)` and a
 - The signed message hash only includes address, timestamp, and path.
 - The timestamp check is window-based; no used-nonce cache was found in the wallet-auth path.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-api-server/src/wallet_auth.rs:209` documents the signed format as `SHA3-256(address + timestamp + request_path)`.
+- `crates/q-api-server/src/wallet_auth.rs:213-217` derives `backend_path` from `.path()`, which omits query parameters.
+- `crates/q-api-server/src/wallet_auth.rs:218-222` hashes address, timestamp, and path only; method, body hash, and nonce are absent from the signed message.
+
 ## Impact
 
 Any captured `X-Wallet-Auth` header can be replayed against the same path while the timestamp is valid. For POST/PUT-style APIs, a body-changing request is not cryptographically tied to the wallet signature.

@@ -16,6 +16,15 @@ Emergency pause and resume endpoints are registered as public POST routes, while
 - `crates/q-api-server/src/handlers.rs::resume_from_pause` validates timestamp and reason, then clears the pause flag.
 - `crates/q-api-server/src/handlers.rs` explicitly notes `TODO: Verify founder signature` / `TODO: Verify founder signature using AEGIS-QL auth`.
 
+
+## Verification Status
+
+Verified against the current workspace on 2026-05-17. Source anchors checked with `nl -ba`:
+
+- `crates/q-api-server/src/main.rs:24795-24797` registers emergency status, pause, and resume on the main router.
+- `crates/q-api-server/src/handlers.rs:17228-17258` validates timestamp/reason, leaves founder verification as TODO, and sets `state.emergency_paused` to true.
+- `crates/q-api-server/src/handlers.rs:17278-17314` validates timestamp/reason, leaves founder verification as TODO, and clears the pause flag.
+
 ## Impact
 
 Any network caller who can reach the API can halt block production and transaction acceptance, then resume it, by supplying a fresh timestamp and reason. This is a direct availability and governance-control risk.

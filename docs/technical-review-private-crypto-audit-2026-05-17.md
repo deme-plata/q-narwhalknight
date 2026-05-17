@@ -8,6 +8,10 @@
 
 This pass raised seven actionable issues in `docs/security-audit/issues/`. The most urgent risks are an unauthenticated emergency pause/resume control plane and stablecoin minting that updates local vault state before a signed consensus-accepted transaction is proven. Several privacy and collateral modules still expose placeholder behavior that should not be shipped as production privacy or solvency logic.
 
+## Review-Comment Follow-up
+
+After feedback that the previous commit/PR artifact was not visible outside this environment, I re-verified each finding against the checked-out source and added line-level verification notes to the issue documents plus `docs/security-audit/VERIFICATION.md`.
+
 ## Issues Raised
 
 1. [Issue #001: Make QUGUSD minting consensus-first and balance-safe](security-audit/issues/001-stablecoin-mint-consensus-first.md)
@@ -41,4 +45,4 @@ The stablecoin privacy layer returns fixed bytes for proofs and signatures. The 
 
 ## Validation Performed
 
-Static review only. I did not run the full Rust test suite because this PR only adds issue documentation and does not change executable code.
+Static review only. I did not run the full Rust test suite because this PR only adds issue documentation and does not change executable code. I did run link-resolution and whitespace checks for the Markdown issue set.
