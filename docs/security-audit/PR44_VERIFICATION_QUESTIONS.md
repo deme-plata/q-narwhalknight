@@ -3,6 +3,36 @@
 **Date**: 2026-05-17
 **Scope**: Follow-up verification for the GitHub collaboration questions covering issues #54–#58 and related ingestion paths.
 
+
+## External GitHub Coordination Entry Point
+
+For the next Codex session, start from **PR #44's latest comment thread** or the individual GitHub issue threads. The external discussion is cross-linked there and should be treated as the live coordination source for implementation work.
+
+### Posted issue set
+
+The GitHub tracker currently has 16 discoverable issues (#45–#60): the 12 findings mirrored in this audit folder plus four additional second-pass findings called out in the collaboration thread:
+
+- #46 — admin-auth hardening
+- #53 — CORS exposure
+- #54 — `save_wallet_balance` regression
+- #55 — missing block-apply signature verification
+
+### Concrete fix-proposal comments to review first
+
+Review these issue comments before editing production code, because they contain proposed diffs/tests that may supersede the documentation-only guidance here:
+
+- #45 — emergency pause: new `FounderAuth` extractor design
+- #46 — admin endpoints: same `FounderAuth` plus `Q_GENESIS_NODE` lockout
+- #54 — `save_wallet_balance` regression: 3-line `return Ok(())` patch
+- #55 — block-apply signature verification: `verify_all_tx_signatures` batch helper and three height-gated call sites
+- #56 — signer/from binding: remove unsafe `data[..32]` signer-key extraction, but preserve/replace the production HTTP send dependency noted below
+- #57 — payment header auth: replace `extract_wallet_from_headers` with `AuthenticatedWallet`
+- #58 — AEGIS bypass: `.unwrap_or(false)` plus opt-in environment flag
+
+### Local-access limitation
+
+This container has no configured git remote and no GitHub CLI output, and public web search did not surface PR #44. The notes below are therefore based on the checked-out workspace plus the issue/PR mapping provided in the prompt. If a future session has GitHub access, it should re-open PR #44 and the issue comments directly before applying patches.
+
 ## Summary Answers
 
 | Question | Short answer |

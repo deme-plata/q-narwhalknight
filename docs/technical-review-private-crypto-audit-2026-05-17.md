@@ -29,7 +29,7 @@ After feedback that the previous commit/PR artifact was not visible outside this
 
 ## PR #44 Coordination Follow-up
 
-I added `docs/security-audit/PR44_VERIFICATION_QUESTIONS.md` with direct answers to the five requested verification questions: `data[..32]` signer-key dependency, `save_wallet_balance` caller classes, q-storage block-apply entry points, ingestion paths that may bypass signature checks, and `AuthenticatedWallet` body-hash coverage.
+I added `docs/security-audit/PR44_VERIFICATION_QUESTIONS.md` with the instruction to start future Codex sessions from PR #44 latest comment thread or the individual issue threads, plus direct answers to the five requested verification questions: `data[..32]` signer-key dependency, `save_wallet_balance` caller classes, q-storage block-apply entry points, ingestion paths that may bypass signature checks, and `AuthenticatedWallet` body-hash coverage.
 
 ## Second Pass Additions
 
