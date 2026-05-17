@@ -7,7 +7,7 @@ This tracker records high-impact findings raised for follow-up PRs. Each item is
 
 ## Verification
 
-These findings were re-checked against the current workspace after review feedback noted that the previous PR artifact was not visible outside the sandbox. See [VERIFICATION.md](VERIFICATION.md) for source anchors, commands, and repository transport notes.
+These findings were re-checked against the current workspace after review feedback noted that the previous PR artifact was not visible outside the sandbox. See [VERIFICATION.md](VERIFICATION.md) for source anchors, commands, and repository transport notes. See [PR44_VERIFICATION_QUESTIONS.md](PR44_VERIFICATION_QUESTIONS.md) for the follow-up answers to the five GitHub coordination questions.
 
 | Issue | Priority | Area | Summary |
 | --- | --- | --- | --- |

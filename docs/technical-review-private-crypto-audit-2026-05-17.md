@@ -27,6 +27,10 @@ After feedback that the previous commit/PR artifact was not visible outside this
 11. [Issue #011: Make wBTC withdrawals burn through consensus and persist an atomic bridge record](security-audit/issues/011-wbtc-withdrawal-consensus-burn.md)
 12. [Issue #012: Replace payment API header-string auth with cryptographic wallet auth](security-audit/issues/012-payment-api-header-auth.md)
 
+## PR #44 Coordination Follow-up
+
+I added `docs/security-audit/PR44_VERIFICATION_QUESTIONS.md` with direct answers to the five requested verification questions: `data[..32]` signer-key dependency, `save_wallet_balance` caller classes, q-storage block-apply entry points, ingestion paths that may bypass signature checks, and `AuthenticatedWallet` body-hash coverage.
+
 ## Second Pass Additions
 
 The continued audit added five more findings: AEGIS local admin bypass fail-open behavior, transaction signatures not being bound to the debited `from` address, placeholder transaction privacy proofs, wBTC withdrawals mutating local balances outside consensus, and payment APIs trusting raw header strings as wallet authorization.
