@@ -53,6 +53,7 @@
 
 pub mod circuits;
 pub mod gadgets;
+pub mod ivc_adapter;
 pub mod light_client;
 pub mod protocol;
 
@@ -62,6 +63,7 @@ pub use circuits::{
     StateTransitionCircuit,
 };
 pub use gadgets::{DilithiumVerifierGadget, MerkleTreeGadget, PoseidonGadget};
+pub use ivc_adapter::{decode_public_inputs, encode_public_inputs};
 pub use light_client::LightClient;
 pub use protocol::{EpochProofSubmission, EpochProofTask, ProverNode};
 

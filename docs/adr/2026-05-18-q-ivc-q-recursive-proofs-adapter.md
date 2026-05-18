@@ -58,11 +58,17 @@ The canonical epoch public inputs are the semantic fields already represented by
 | 4 | `height_range.1` | one `Scalar` |
 | 5 | `validator_set_hash` | 8 little-endian `u32` limbs widened to `Scalar` |
 | 6 | `signature_count` | one `Scalar` |
-| 7 | `epoch_end_timestamp` | one `Scalar` |
+| 7 | `epoch_end_timestamp` | omitted from the fixed 28-scalar adapter vector |
 
-The resulting vector length is 28 scalars. Any code path that proves, verifies,
-serializes, deserializes, or serves a light-client proof must obtain this vector
-through the adapter rather than hand-rolling conversions.
+The resulting vector length is 28 scalars. Three 32-byte roots/hashes occupy
+24 scalars, and `epoch`, `height_range.0`, `height_range.1`, and
+`signature_count` occupy the remaining 4 scalars. Including
+`epoch_end_timestamp` in addition to `signature_count` would require 29 scalars,
+so the 28-scalar adapter keeps `signature_count` and leaves timestamp transport
+to the typed `EpochPublicInputs` serialization rather than the LatticeGuard
+public-input vector. Any code path that proves, verifies, serializes,
+deserializes, or serves a light-client proof must obtain this vector through the
+adapter rather than hand-rolling conversions.
 
 ## Adapter responsibilities
 
@@ -122,8 +128,9 @@ epoch and checks that the public inputs match across all production paths:
 3. Light-client path: `EpochProof` encoded by the adapter.
 
 The test must assert exact equality of the 28-scalar vector and must fail if any
-path omits `validator_set_hash`, `signature_count`, or `epoch_end_timestamp`, or
-uses 64-bit hash limbs instead of the canonical 32-bit limbs.
+path omits `validator_set_hash` or `signature_count`, includes a 29th
+`epoch_end_timestamp` scalar, or uses 64-bit hash limbs instead of the canonical
+32-bit limbs.
 
 ## Consequences
 
