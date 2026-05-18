@@ -25434,28 +25434,53 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/binary/stream",
             get(q_api_server::binary_protocol::websocket_binary_handler),
         )
-        // v7.2.0: Bitcoin Atomic Swap Bridge (QNK ↔ BTC via HTLC)
-        .route("/api/v1/bitcoin/swap", post(q_api_server::bitcoin_bridge_api::create_atomic_swap))
-        .route("/api/v1/bitcoin/swap/:id", get(q_api_server::bitcoin_bridge_api::get_swap_status))
-        .route("/api/v1/bitcoin/swap/:id/claim", post(q_api_server::bitcoin_bridge_api::claim_swap))
-        .route("/api/v1/bitcoin/swap/:id/refund", post(q_api_server::bitcoin_bridge_api::refund_swap))
-        .route("/api/v1/bitcoin/swaps", get(q_api_server::bitcoin_bridge_api::list_swaps))
-        .route("/api/v1/bitcoin/balance", get(q_api_server::bitcoin_bridge_api::get_btc_balance))
-        // v9.6.5: Bitcoin wallet operations — TODO: implement get_btc_address, send_btc, get_btc_transactions
-        .route("/api/v1/bitcoin/bridge/status", get(q_api_server::bitcoin_bridge_api::get_bridge_status))
-        // v10.2.11: Bitcoin Deposit Bridge — receive BTC on-chain, mint wBTC
-        .route("/api/v1/bitcoin/deposit/address", post(q_api_server::bitcoin_deposit_api::create_deposit_address))
-        .route("/api/v1/bitcoin/deposit/bridge-status", get(q_api_server::bitcoin_deposit_api::get_deposit_bridge_status))
-        .route("/api/v1/bitcoin/deposit/:id", get(q_api_server::bitcoin_deposit_api::get_deposit_status))
-        .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
-        // v10.9.3: wBTC withdrawal — redeem wBTC for real on-chain BTC
-        .route("/api/v1/bitcoin/withdraw", post(q_api_server::bitcoin_deposit_api::withdraw_wbtc))
-        // v10.9.21: One-click "deposit BTC → become bridge LP" flow
-        .route("/api/v1/bitcoin/lp/intent", post(q_api_server::bitcoin_lp_api::create_lp_intent))
-        .route("/api/v1/bitcoin/lp/intents", get(q_api_server::bitcoin_lp_api::list_lp_intents))
-        .route("/api/v1/bitcoin/lp/intent/:id", get(q_api_server::bitcoin_lp_api::get_lp_intent))
-        .route("/api/v1/bitcoin/lp/intent/:id/cancel", post(q_api_server::bitcoin_lp_api::cancel_lp_intent))
-        .route("/api/v1/bitcoin/lp/intent/:id/finalize", post(q_api_server::bitcoin_lp_api::finalize_lp_intent))
+        // v10.9.55 (Codex audit 2026-05-18): Bitcoin bridge endpoints gated behind
+        // Q_BRIDGE_PRODUCTION_READY=1 environment variable. Until v10.9.56 ships:
+        //   - WireGuard mesh (closes cred-on-wire exposure)
+        //   - Concurrency lock + idempotent state machine in finalize_lp_intent
+        //   - DepositBridge state persistence across restart
+        //   - Atomic swap signing (currently bank_btc_privkey: None)
+        // ... these endpoints are DISABLED by default. Codex flagged 6 CRITICAL
+        // issues preventing safe production use. To re-enable for testing on
+        // non-mainnet, set Q_BRIDGE_PRODUCTION_READY=1.
+        //
+        // See docs/v10.9.55-bridge-disable-rationale.md for the full reasoning.
+        .merge(if std::env::var("Q_BRIDGE_PRODUCTION_READY").map(|v| v == "1").unwrap_or(false) {
+            // v7.2.0: Bitcoin Atomic Swap Bridge (QNK ↔ BTC via HTLC)
+            axum::Router::new()
+                .route("/api/v1/bitcoin/swap", post(q_api_server::bitcoin_bridge_api::create_atomic_swap))
+                .route("/api/v1/bitcoin/swap/:id", get(q_api_server::bitcoin_bridge_api::get_swap_status))
+                .route("/api/v1/bitcoin/swap/:id/claim", post(q_api_server::bitcoin_bridge_api::claim_swap))
+                .route("/api/v1/bitcoin/swap/:id/refund", post(q_api_server::bitcoin_bridge_api::refund_swap))
+                .route("/api/v1/bitcoin/swaps", get(q_api_server::bitcoin_bridge_api::list_swaps))
+                .route("/api/v1/bitcoin/balance", get(q_api_server::bitcoin_bridge_api::get_btc_balance))
+                // v9.6.5: Bitcoin wallet operations
+                .route("/api/v1/bitcoin/bridge/status", get(q_api_server::bitcoin_bridge_api::get_bridge_status))
+                // v10.2.11: Bitcoin Deposit Bridge — receive BTC on-chain, mint wBTC
+                .route("/api/v1/bitcoin/deposit/address", post(q_api_server::bitcoin_deposit_api::create_deposit_address))
+                .route("/api/v1/bitcoin/deposit/bridge-status", get(q_api_server::bitcoin_deposit_api::get_deposit_bridge_status))
+                .route("/api/v1/bitcoin/deposit/:id", get(q_api_server::bitcoin_deposit_api::get_deposit_status))
+                .route("/api/v1/bitcoin/deposits", get(q_api_server::bitcoin_deposit_api::list_deposits))
+                // v10.9.3: wBTC withdrawal — redeem wBTC for real on-chain BTC
+                .route("/api/v1/bitcoin/withdraw", post(q_api_server::bitcoin_deposit_api::withdraw_wbtc))
+                // v10.9.21: One-click "deposit BTC → become bridge LP" flow
+                .route("/api/v1/bitcoin/lp/intent", post(q_api_server::bitcoin_lp_api::create_lp_intent))
+                .route("/api/v1/bitcoin/lp/intents", get(q_api_server::bitcoin_lp_api::list_lp_intents))
+                .route("/api/v1/bitcoin/lp/intent/:id", get(q_api_server::bitcoin_lp_api::get_lp_intent))
+                .route("/api/v1/bitcoin/lp/intent/:id/cancel", post(q_api_server::bitcoin_lp_api::cancel_lp_intent))
+                .route("/api/v1/bitcoin/lp/intent/:id/finalize", post(q_api_server::bitcoin_lp_api::finalize_lp_intent))
+        } else {
+            // Bridge gated off. Single status endpoint reports why so the frontend
+            // doesn't get bare 404s.
+            axum::Router::new()
+                .route("/api/v1/bitcoin/bridge/status", axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "success": false,
+                        "error": "Bitcoin bridge endpoints are disabled in v10.9.55. Re-enable with Q_BRIDGE_PRODUCTION_READY=1 after v10.9.56 ships (WireGuard mesh + cred rotation + concurrency lock + idempotent state machine). See docs/v10.9.55-bridge-disable-rationale.md.",
+                        "code": "BRIDGE_DISABLED_V10_9_55"
+                    }))
+                }))
+        })
         // v10.5.4: HiBT listing donation campaign — public, no auth
         .route("/api/v1/donation/hibt-status", get(hibt_donation_status))
         // ═══ Zcash Shielded Bridge (v7.2.2) ═══
