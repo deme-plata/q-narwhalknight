@@ -19,7 +19,16 @@
 //! Integration with existing crates:
 //!   q-lattice-guard  — native (non-circuit) NTT, used as reference for gadget
 //!   q-zk-snark       — Groth16/PLONK backends this circuit will target
-//!   q-recursive-proofs — higher-level recursive proof chain orchestration
+//!   q-recursive-proofs — production LatticeGuard recursive proof chain orchestration
+//!
+//! Production boundary:
+//!   `crates/q-recursive-proofs` owns the PR #79 epoch proof wire format,
+//!   canonical `EpochPublicInputs` scalar encoding, LatticeGuard circuit
+//!   construction, and light-client verification path. This crate remains the
+//!   arkworks/Nova research and future-backend track until a later ADR migrates
+//!   production proving. See
+//!   `docs/adr/2026-05-18-q-ivc-q-recursive-proofs-adapter.md` before wiring
+//!   these circuits into epoch proving.
 
 pub mod circuits;
 pub mod gadgets;
