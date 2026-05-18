@@ -63,7 +63,7 @@ Q-NarwhalKnight implements a four-tier quantum threat model with seamless crypto
 
 ## 🚀 Quick Start
 
-**Current release:** `v10.9.55` · **Network:** `mainnet-genesis` · **Live frontend:** [quillon.xyz](https://quillon.xyz)
+**Current release line:** `v10.9.x` · **Network:** `mainnet-genesis` · **Live frontend:** [quillon.xyz](https://quillon.xyz)
 
 You don't have to build the source to use Quillon Graph. Most users only need the wallet (in the browser) or the miner (one binary download).
 
@@ -76,12 +76,12 @@ Open **[quillon.xyz](https://quillon.xyz)** in any modern browser. You can creat
 ### Option 2 — Run the miner against the live network
 
 ```bash
-# Download the v10.9.55 miner (linux x86_64)
-wget https://quillon.xyz/downloads/q-miner-v10.9.55
-chmod +x q-miner-v10.9.55
+# Download the latest miner (linux x86_64)
+wget https://quillon.xyz/downloads/q-miner-linux-x64
+chmod +x q-miner-linux-x64
 
 # Solo-mine against quillon.xyz (TLS, load-balanced)
-./q-miner-v10.9.55 \
+./q-miner-linux-x64 \
   --mode solo \
   --wallet qnk<your-64-char-hex-address> \
   --threads 8 \
@@ -89,7 +89,7 @@ chmod +x q-miner-v10.9.55
   --server https://quillon.xyz
 
 # Benchmark your hardware first
-./q-miner-v10.9.55 --benchmark --threads 16 --duration 60
+./q-miner-linux-x64 --benchmark --threads 16 --duration 60
 ```
 
 `--server https://quillon.xyz` routes through the production nginx load balancer (Beta primary, Gamma backup) so you don't need to pin to any single node.
@@ -97,12 +97,12 @@ chmod +x q-miner-v10.9.55
 ### Option 3 — Run a full node
 
 ```bash
-# Download the v10.9.55 node binary (linux x86_64, glibc 2.36+)
-wget https://quillon.xyz/downloads/q-api-server-v10.9.55
-chmod +x q-api-server-v10.9.55
+# Download the latest node binary (linux x86_64, glibc 2.36+)
+wget https://quillon.xyz/downloads/q-api-server-linux-x86_64
+chmod +x q-api-server-linux-x86_64
 
 # Start (auto-creates ./data-mainnet-genesis/)
-./q-api-server-v10.9.55 --port 8080
+./q-api-server-linux-x86_64 --port 8080
 ```
 
 The node auto-discovers bootstrap peers (Epsilon supernode at `89.149.241.126:9001`, plus Beta/Gamma/Delta) and syncs from genesis. First sync takes ~5.5 hours on a 10 Gbit/s line. The REST API + SSE stream listen on `:8080`.
