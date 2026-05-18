@@ -153,10 +153,16 @@ impl ProverNode {
 
         // Calculate max constraints needed
         // Use 100 blocks for light mode, which gives ~200K constraints instead of ~3M
-        let blocks_for_estimation = config.circuit_config.state_config.max_blocks_per_epoch.min(100);
+        let blocks_for_estimation = config
+            .circuit_config
+            .state_config
+            .max_blocks_per_epoch
+            .min(100);
         let max_constraints = circuit.estimate_constraints(blocks_for_estimation);
-        info!("  Estimated constraints for {} blocks: {} (light mode)",
-              blocks_for_estimation, max_constraints);
+        info!(
+            "  Estimated constraints for {} blocks: {} (light mode)",
+            blocks_for_estimation, max_constraints
+        );
 
         // Use SRS caching to avoid regenerating on every startup
         // Cache location: use Q_DB_PATH environment or fall back to /tmp
@@ -299,16 +305,15 @@ impl ProverNode {
         let public_inputs = self.extract_public_inputs(&task);
 
         // Generate the proof
-        info!("Starting LatticeGuard proving ({} constraints)...", circuit.num_constraints);
+        info!(
+            "Starting LatticeGuard proving ({} constraints)...",
+            circuit.num_constraints
+        );
 
         let mut rng = rand::thread_rng();
-        let proof = self.lattice_guard.prove(
-            &circuit,
-            &witness,
-            &public_inputs,
-            &self.srs,
-            &mut rng,
-        )?;
+        let proof =
+            self.lattice_guard
+                .prove(&circuit, &witness, &public_inputs, &self.srs, &mut rng)?;
 
         let proving_time = start.elapsed();
         info!(
@@ -455,28 +460,58 @@ impl ProverNode {
         )
     }
 
+    /// Decode a submitted proof and validate metadata that controls verification.
+    fn decode_and_validate_submission(
+        submission: &EpochProofSubmission,
+    ) -> anyhow::Result<(LatticeGuardProof, EpochPublicInputs, usize)> {
+        let (proof, public_inputs) = submission.to_proof()?;
+
+        anyhow::ensure!(
+            submission.epoch == public_inputs.epoch,
+            "submission epoch {} does not match public inputs epoch {}",
+            submission.epoch,
+            public_inputs.epoch
+        );
+
+        let (height_start, height_end) = public_inputs.height_range;
+        let num_blocks = height_end.checked_sub(height_start).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid height range {}..{}: end height must be greater than or equal to start height",
+                height_start,
+                height_end
+            )
+        })?;
+        let num_blocks = usize::try_from(num_blocks).map_err(|_| {
+            anyhow::anyhow!(
+                "height range {}..{} spans too many blocks for this platform",
+                height_start,
+                height_end
+            )
+        })?;
+
+        Ok((proof, public_inputs, num_blocks))
+    }
+
     /// Verify an incoming proof
     pub async fn verify_proof(&self, submission: &EpochProofSubmission) -> anyhow::Result<bool> {
         let start = Instant::now();
 
-        let (proof, public_inputs) = submission.to_proof()?;
+        let (proof, public_inputs, num_blocks) = Self::decode_and_validate_submission(submission)?;
 
-        // Build verification circuit
-        let num_blocks = 100; // Estimate
+        // Build verification circuit for the decoded proof range.
         let circuit = self.circuit.build_circuit(num_blocks);
 
         // Verify
-        let is_valid = self.lattice_guard.verify(
-            &circuit,
-            &public_inputs.to_scalars(),
-            &proof,
-            &self.srs,
-        )?;
+        let is_valid =
+            self.lattice_guard
+                .verify(&circuit, &public_inputs.to_scalars(), &proof, &self.srs)?;
 
         let verification_time = start.elapsed();
         info!(
             "Proof verification for epoch {} completed in {:?}: {}",
-            submission.epoch, verification_time, if is_valid { "VALID" } else { "INVALID" }
+            submission.epoch,
+            verification_time,
+            if is_valid { "VALID" } else { "INVALID" }
         );
 
         Ok(is_valid)
@@ -543,6 +578,107 @@ mod tests {
         let node = ProverNode::new(config);
 
         assert!(node.is_ok());
+    }
+
+    fn dummy_proof_submission(
+        submission_epoch: u64,
+        public_epoch: u64,
+        height_range: (u64, u64),
+    ) -> EpochProofSubmission {
+        let proof = LatticeGuardProof {
+            commitments: Vec::new(),
+            evaluations: (0, 0, 0),
+            product_proofs: Vec::new(),
+            transcript_state: [0; 32],
+            metadata: q_lattice_guard::prover::ProofMetadata {
+                num_constraints: 0,
+                num_public_inputs: 0,
+                security_level: SecurityLevel::PQ128,
+                generation_time_ms: 0,
+            },
+        };
+        let public_inputs = EpochPublicInputs {
+            previous_state_root: [1; 32],
+            current_state_root: [2; 32],
+            epoch: public_epoch,
+            height_range,
+            validator_set_hash: [3; 32],
+            signature_count: 0,
+            epoch_end_timestamp: 0,
+        };
+
+        EpochProofSubmission {
+            epoch: submission_epoch,
+            proof_data: bincode::serialize(&proof).unwrap(),
+            public_inputs_data: bincode::serialize(&public_inputs).unwrap(),
+            prover_peer_id: "test-prover".to_string(),
+            prover_signature: Vec::new(),
+            proving_time_ms: 0,
+            hardware_info: None,
+            protocol_version: 1,
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_verify_proof_accepts_zero_block_genesis_range() {
+        let submission = dummy_proof_submission(0, 0, (0, 0));
+
+        let (_proof, public_inputs, num_blocks) =
+            ProverNode::decode_and_validate_submission(&submission).unwrap();
+
+        assert_eq!(public_inputs.epoch, 0);
+        assert_eq!(public_inputs.height_range, (0, 0));
+        assert_eq!(num_blocks, 0);
+    }
+
+    #[test]
+    fn test_verify_proof_derives_one_block_epoch_range() {
+        let submission = dummy_proof_submission(1, 1, (100, 101));
+
+        let (_proof, public_inputs, num_blocks) =
+            ProverNode::decode_and_validate_submission(&submission).unwrap();
+
+        assert_eq!(public_inputs.epoch, 1);
+        assert_eq!(public_inputs.height_range, (100, 101));
+        assert_eq!(num_blocks, 1);
+    }
+
+    #[test]
+    fn test_verify_proof_derives_multi_block_epoch_range() {
+        let submission = dummy_proof_submission(7, 7, (250, 375));
+
+        let (_proof, public_inputs, num_blocks) =
+            ProverNode::decode_and_validate_submission(&submission).unwrap();
+
+        assert_eq!(public_inputs.epoch, 7);
+        assert_eq!(public_inputs.height_range, (250, 375));
+        assert_eq!(num_blocks, 125);
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_malformed_height_range() {
+        let submission = dummy_proof_submission(2, 2, (10, 9));
+
+        let err = ProverNode::decode_and_validate_submission(&submission).unwrap_err();
+
+        assert!(
+            err.to_string().contains("invalid height range 10..9"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_submission_epoch_mismatch() {
+        let submission = dummy_proof_submission(3, 4, (20, 21));
+
+        let err = ProverNode::decode_and_validate_submission(&submission).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("submission epoch 3 does not match public inputs epoch 4"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
