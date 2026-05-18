@@ -84,6 +84,7 @@ q-quantum-rng = { path = "../q-quantum-rng" }
 q-zk-p2p = { path = "../q-zk-p2p" }
 q-aegis-ql = { path = "../q-aegis-ql" }  # v0.9.15-beta: Post-quantum signed sync
 q-crypto-simd = { path = "../q-crypto-simd" }  # v10.9.20: rayon-parallel batch signature verification
+q-sync-optimizers = { path = "../q-sync-optimizers" }  # v10.9.44: Kalman BDP / Beta scores / chunk-floor / Markov / EWMV / peer-fail
 
 # Networking for sync protocol
 libp2p = { workspace = true, features = ["request-response", "cbor"] }
