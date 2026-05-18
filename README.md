@@ -63,57 +63,80 @@ Q-NarwhalKnight implements a four-tier quantum threat model with seamless crypto
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Rust 1.70+ with Cargo
-- libp2p networking stack
-- Optional: PostgreSQL for persistent storage
+**Current release:** `v10.9.55` · **Network:** `mainnet-genesis` · **Live frontend:** [quillon.xyz](https://quillon.xyz)
 
-### Build & Run
+You don't have to build the source to use Quillon Graph. Most users only need the wallet (in the browser) or the miner (one binary download).
+
+### Option 1 — Use the web wallet (no install)
+
+Open **[quillon.xyz](https://quillon.xyz)** in any modern browser. You can create or import a wallet, send QUG, swap on the DEX, and watch the live chain. Everything is in-browser — keys never leave your machine.
+
+> The web wallet validates BIP39 mnemonics with checksum. Don't use weak phrases like `test test test ...` — they collide to shared addresses (see [`docs/brainwallet_bip39_incident.md`](docs/brainwallet_bip39_incident.md)).
+
+### Option 2 — Run the miner against the live network
+
 ```bash
-# Clone the repository
-git clone https://github.com/deme-plata/q-narwhalknight.git
-cd q-narwhalknight
+# Download the v10.9.55 miner (linux x86_64)
+wget https://quillon.xyz/downloads/q-miner-v10.9.55
+chmod +x q-miner-v10.9.55
 
-# Build the workspace (use 10-hour timeout for quantum components)
-timeout 36000 cargo build --release
-
-# Run the API server with Tor anonymity
-./target/release/q-api-server
-
-# Run the high-performance miner (local node)
-./target/release/q-miner \
-  --mode solo \
-  --wallet qnk<your-64-char-hex-address> \
-  --threads 4 \
-  --intensity 7
-
-# Run miner connected to remote node
-./target/release/q-miner \
+# Solo-mine against quillon.xyz (TLS, load-balanced)
+./q-miner-v10.9.55 \
   --mode solo \
   --wallet qnk<your-64-char-hex-address> \
   --threads 8 \
   --intensity 9 \
-  --server http://185.182.185.227:8080
+  --server https://quillon.xyz
 
-# Benchmark your hardware
-./target/release/q-miner --benchmark --threads 16 --duration 60
+# Benchmark your hardware first
+./q-miner-v10.9.55 --benchmark --threads 16 --duration 60
+```
+
+`--server https://quillon.xyz` routes through the production nginx load balancer (Beta primary, Gamma backup) so you don't need to pin to any single node.
+
+### Option 3 — Run a full node
+
+```bash
+# Download the v10.9.55 node binary (linux x86_64, glibc 2.36+)
+wget https://quillon.xyz/downloads/q-api-server-v10.9.55
+chmod +x q-api-server-v10.9.55
+
+# Start (auto-creates ./data-mainnet-genesis/)
+./q-api-server-v10.9.55 --port 8080
+```
+
+The node auto-discovers bootstrap peers (Epsilon supernode at `89.149.241.126:9001`, plus Beta/Gamma/Delta) and syncs from genesis. First sync takes ~5.5 hours on a 10 Gbit/s line. The REST API + SSE stream listen on `:8080`.
+
+> ⚠️ Verify the binary path matches your distro: Debian 12 / Ubuntu 22.04+ work. Older glibc (< 2.36) will fail with `GLIBC_2.38 not found`.
+
+### Option 4 — Build from source
+
+```bash
+# Prerequisites: Rust 1.70+, build-essential, libssl-dev, pkg-config, cmake, clang, libudev-dev
+git clone https://github.com/deme-plata/q-narwhalknight.git
+cd q-narwhalknight
+
+# Build (use a 10-hour timeout; post-quantum crates take ~30 min on first build)
+timeout 36000 cargo build --release --package q-api-server
+timeout 36000 cargo build --release --package q-miner
+
+# Binaries land in target/release/
+./target/release/q-api-server --port 8080
 ```
 
 ### Configuration
-```toml
-[network]
-listen_addr = "/ip4/0.0.0.0/tcp/7000"
-bootstrap_peers = []
 
-[consensus]
-node_id = "auto" # Or specify 32-byte hex
-byzantine_tolerance = 1 # f parameter (supports up to 3f+1 total nodes)
-delta_rounds = 4 # Commit latency parameter
+The node reads `./.env` and CLI args. Minimal `.env`:
 
-[crypto]
-phase = "Phase0" # "Phase0" | "Phase1" 
-auto_upgrade = true
+```env
+Q_NETWORK_ID=mainnet-genesis
+Q_DB_PATH=./data-mainnet-genesis
+Q_P2P_PORT=9001
+RUST_LOG=warn
+ROCKSDB_BLOCK_CACHE_MB=2048
 ```
+
+For the consensus / crypto parameters see [`docs/spec-10ms-verification-2026-05-16.tex`](docs/spec-10ms-verification-2026-05-16.tex) and [`docs/phase1-pq-pure-kravspesifikasjon.md`](docs/phase1-pq-pure-kravspesifikasjon.md).
 
 ## 🏗️ Project Structure
 
