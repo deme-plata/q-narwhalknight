@@ -634,11 +634,34 @@ pub async fn finalize_lp_intent(
             (txid.clone(), *vout, *confirmations, deposit.amount_sats)
         }
         q_bitcoin_bridge::deposit_bridge::DepositStatus::Minted { txid, vout, .. } => {
-            // Should not happen — Minted is only set after we mint, but we mint inside
-            // *this* finalize call. If the bridge thinks it's already Minted then we
-            // raced something. Treat as Completed without further side effects.
-            warn!("[LP-INTENT] Deposit already marked Minted in bridge but intent {} not Completed. Skipping LP add to avoid double-credit.", &intent.intent_id[..12]);
-            (txid.clone(), *vout, q_bitcoin_bridge::deposit_bridge::BTC_MIN_CONFIRMATIONS, deposit.amount_sats)
+            // v10.9.55 (G1 fix, audit 2026-05-18): the bridge has the deposit marked
+            // as Minted but our intent.status is still pre-Completed. This is the
+            // crash-between-mark_minted-and-intent-write race. The comment used to say
+            // "Skipping LP add to avoid double-credit" — but the code did NOT actually
+            // skip, it fell through to lines 681+ and re-executed the Step 1-2-3
+            // sequence (refund QUG, mint wBTC, add liquidity) → double-credit on every
+            // retry. Real bug, real money.
+            //
+            // Fix: return EARLY, marking intent Completed using the bridge's record as
+            // the source of truth. The user already got their LP tokens from the prior
+            // run; we just update our intent status to reflect that.
+            warn!(
+                "🛡️ [LP-INTENT G1] Deposit {}.{} already marked Minted in bridge. \
+                 Intent {} status was {:?} — reconciling to Completed without re-executing \
+                 LP add (prevents double-credit retry attack).",
+                &txid[..16.min(txid.len())], vout, &intent.intent_id[..12], intent.status
+            );
+            // Note: lp_tokens_minted is unknown here because we don't have access to
+            // the prior run's return value. Use a sentinel string and let the audit
+            // log carry the txid + bridge dedup record as the ground truth.
+            intent.status = LpIntentStatus::Completed {
+                txid: txid.clone(),
+                lp_tokens_minted: "unknown-reconciled-from-bridge-dedup".to_string(),
+            };
+            intent.qug_amount_escrowed = 0;
+            intent.updated_at = now_unix();
+            let _ = save_intent(&state, &intent).await;
+            return Ok(Json(ApiResponse::success((&intent).into())));
         }
         q_bitcoin_bridge::deposit_bridge::DepositStatus::Expired => {
             intent.status = LpIntentStatus::Expired;
