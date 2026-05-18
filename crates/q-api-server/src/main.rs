@@ -4189,12 +4189,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     }
 
-    // Q_RESET_CONVERGENCE_MIGRATION=1 — delete the v103 flag so the migration re-runs this boot.
-    // Use this to force a balance rebuild when the node's balance state has diverged from peers.
-    if std::env::var("Q_RESET_CONVERGENCE_MIGRATION").map(|v| v == "1").unwrap_or(false) {
-        warn!("⚠️  [Q_RESET_CONVERGENCE_MIGRATION] Deleting convergence migration flag — will re-run this boot");
-        let _ = state.storage_engine.delete_migration_flag(b"migration_safe_convergence_v103_done").await;
-    }
+    // v10.9.55 (2026-05-18): Q_RESET_CONVERGENCE_MIGRATION env var REMOVED.
+    // It deleted the `migration_safe_convergence_v103_done` flag and the migration
+    // would then run on the next boot — wiping all `wallet_balance_*` keys and
+    // replaying the (sparse) chain. On Epsilon that would destroy 3 months of
+    // 100K-VPS-at-8-GH/s mining rewards. Function tombstoned in
+    // crates/q-storage/src/lib.rs near the original line 7910. CLAUDE.md
+    // "BALANCE INTEGRITY — NON-NEGOTIABLE RULES" 1 + 3.
 
     // Q_PURGE_WALLET_BALANCES=1 — wipe ALL wallet_balance_ keys from RocksDB and clear in-memory
     // state BEFORE any authority sync or chain-rebuild migration runs. Use with Q_BALANCE_AUTHORITY_PEER
@@ -4216,82 +4217,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         warn!("🚨 [Q_PURGE_WALLET_BALANCES] Purged {} wallet entries. Balances will import from Q_BALANCE_AUTHORITY_PEER.", deleted);
     }
 
-    // v1.0.3: Full state convergence migration — deterministic replay of QUG + vault state.
-    // Replays entire chain to rebuild wallet balances AND CollateralVault from block data.
-    // Runs ONCE per node (flag: migration_safe_convergence_v103_done).
-    if chain_rebuild_enabled && !checkpoint_applied {
-        match state.storage_engine.safe_batched_convergence_v103().await {
-            Ok(true) => {
-                let qug = 1_000_000_000_000_000_000_000_000u128;
-
-                // Refresh in-memory wallet balances from RocksDB
-                match state.storage_engine.load_wallet_balances().await {
-                    Ok(new_balances) => {
-                        let wallet_total: u128 = new_balances.values().sum();
-                        let wallet_count = new_balances.len();
-
-                        // Update in-memory wallet_balances HashMap
-                        {
-                            let mut wb = state.wallet_balances.write().await;
-                            wb.clear();
-                            for (addr, amount) in &new_balances {
-                                wb.insert(*addr, *amount);
-                            }
-                            info!("✅ [v1.0.3] Loaded {} wallets into memory ({} QUG)",
-                                  wallet_count, wallet_total / qug);
-                            any_balance_rebuild_this_boot = true;
-                        }
-
-                        // Sync emission controller to match wallet total
-                        {
-                            let mut ec = balance_engine.emission_controller_write().await;
-                            ec.set_total_cumulative_emission(wallet_total);
-                            ec.clear_rate_windows();
-                        }
-
-                        // Update total_minted_supply
-                        {
-                            let mut supply = state.total_minted_supply.write().await;
-                            *supply = wallet_total;
-                        }
-
-                        // Persist emission state
-                        if let Ok(bytes) = balance_engine.serialize_emission_state().await {
-                            let _ = state.storage_engine.save_emission_state(&bytes).await;
-                        }
-                    }
-                    Err(e) => warn!("⚠️ [v1.0.3] Failed to reload wallet balances: {}", e),
-                }
-
-                // Refresh in-memory CollateralVault from RocksDB
-                match state.storage_engine.load_collateral_vault_data().await {
-                    Ok(Some(vault_bytes)) => {
-                        match bincode::deserialize::<q_vm::contracts::CollateralVault>(&vault_bytes) {
-                            Ok(new_vault) => {
-                                let mut vault = state.collateral_vault.write().await;
-                                info!("✅ [v1.0.3] Vault loaded: {} QUG locked, {} QUGUSD minted, {} positions",
-                                      new_vault.total_qug_locked / qug, new_vault.total_qugusd_minted / qug,
-                                      new_vault.locked_qug.len());
-                                *vault = new_vault;
-                            }
-                            Err(e) => warn!("⚠️ [v1.0.3] Failed to deserialize vault: {}", e),
-                        }
-                    }
-                    Ok(None) => info!("[v1.0.3] No vault data after migration (no vault operations in chain)"),
-                    Err(e) => warn!("⚠️ [v1.0.3] Failed to load vault data: {}", e),
-                }
-
-                // Set balance watermark
-                {
-                    let tip = state.storage_engine.get_highest_contiguous_block().await.unwrap_or(0);
-                    balance_engine.set_balance_watermark(tip);
-                    info!("✅ [v1.0.3] Balance watermark set to height {}", tip);
-                }
-            }
-            Ok(false) => debug!("[v1.0.3] Convergence migration already done"),
-            Err(e) => warn!("⚠️ [v1.0.3] Convergence migration failed: {}", e),
-        }
-    }
+    // v10.9.55 (2026-05-18): startup `safe_batched_convergence_v103` call REMOVED.
+    //
+    // This block invoked the convergence migration when chain_rebuild_enabled
+    // was set AND no checkpoint had been applied — i.e. on Epsilon-class
+    // genesis-bootstrapped nodes. The migration deleted all `wallet_balance_*`
+    // keys and replayed the chain to rebuild them. On a sparse chain (proven by
+    // ldb scan 2026-05-18) that destroys real PoW-backed balances. See
+    // docs/v10.9.55-balance-replay-removal-2026-05-18.md for the full story.
+    //
+    // Post-migration refresh side-effects (loading wallets, syncing emission
+    // controller, refreshing vault, setting watermark) are normally performed by
+    // the standard startup load path. No replacement code needed here.
 
     // v9.3.3: DEX QUG adjustment tracking — rebuild-safe swap balance accounting.
     //

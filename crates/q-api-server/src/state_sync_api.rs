@@ -1055,7 +1055,18 @@ async fn merge_p2p_response(
                 error!("   Our height: {}, peer height: {}", our_height, response.block_height);
                 error!("   Our hash:  {}", &our_hash[..24]);
                 error!("   Peer hash: {}", &peer_hash[..24]);
-                error!("   Run convergence migration to fix: delete RocksDB flag 'migration_safe_convergence_v103_done' and restart");
+                // v10.9.55 (2026-05-18): the previous advice to "delete the
+                // convergence migration flag and restart" has been REMOVED.
+                // The migration replayed the chain to rebuild wallet balances;
+                // on a sparse chain that destroys real mining rewards. See
+                // CLAUDE.md "BALANCE INTEGRITY" rules + the v10.9.55 removal
+                // tombstones in crates/q-storage/src/lib.rs around line 7910
+                // and crates/q-api-server/src/main.rs around line 4220.
+                error!("   DO NOT replay-rebuild balances on this node. Recovery procedure:");
+                error!("     1. Identify which side is correct via independent audit (block-replay arithmetic on a known wallet)");
+                error!("     2. If THIS node is wrong: stop, clean-resync from a known-good peer with empty DB");
+                error!("     3. If PEER is wrong: continue serving; peer should clean-resync");
+                error!("     Never run any migration that bulk-deletes wallet_balance_* keys.");
             }
         }
     }
