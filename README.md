@@ -66,7 +66,7 @@ Q-NarwhalKnight implements a four-tier quantum threat model with seamless crypto
 ### Prerequisites
 - Rust 1.70+ with Cargo
 - libp2p networking stack
-- Optional: PostgreSQL for persistent storage
+- RocksDB (bundled — no separate install needed)
 
 ### Build & Run
 ```bash
@@ -93,7 +93,7 @@ timeout 36000 cargo build --release
   --wallet qnk<your-64-char-hex-address> \
   --threads 8 \
   --intensity 9 \
-  --server http://185.182.185.227:8080
+  --server https://quillon.xyz
 
 # Benchmark your hardware
 ./target/release/q-miner --benchmark --threads 16 --duration 60
