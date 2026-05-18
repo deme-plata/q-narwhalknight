@@ -40,6 +40,16 @@
 //! - `circuits`: High-level circuits (BFT signatures, state transitions, epoch transitions)
 //! - `protocol`: libp2p protocol for decentralized proof generation
 //! - `light_client`: Light client implementation for trustless bootstrap
+//!
+//! ## q-ivc boundary
+//!
+//! The production epoch transition proof system is the LatticeGuard
+//! `ArithmeticCircuit` path in this crate. `EpochPublicInputs` and its canonical
+//! scalar encoding are the shared wire format for prover nodes, peer verifiers,
+//! and light clients. Do not add another recursive-proof public-input encoding in
+//! this crate or in `q-ivc`; future bridges from `q-ivc` must pass through the
+//! adapter boundary specified in
+//! `docs/adr/2026-05-18-q-ivc-q-recursive-proofs-adapter.md`.
 
 pub mod circuits;
 pub mod gadgets;
