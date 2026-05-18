@@ -1,8 +1,43 @@
-# Q-NarwhalKnight v0.2.0-beta
+# Quillon Graph
+
+![Quillon Graph — quantum-resistant DAG-BFT blockchain](docs/images/architecture-hero.png)
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Rust](https://img.shields.io/badge/built_with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
+[![Network](https://img.shields.io/badge/network-mainnet--genesis-green)](https://quillon.xyz)
+[![Signed commits](https://img.shields.io/badge/commits-GPG_signed-success)](https://github.com/deme-plata/q-narwhalknight/commits/main)
+
+> Quantum-resistant DAG-BFT blockchain — DAG-Knight consensus over a Narwhal mempool, post-quantum signatures (Dilithium-5, Kyber-1024), BLAKE3-keyed commitments, and a Sparse Merkle Tree balance commitment. Production network running on mainnet-genesis with multi-server HA.
+
+Live at **[quillon.xyz](https://quillon.xyz)**. Repository tag: `v10.9.55` and counting.
+
+---
+
+## At a glance
+
+| | |
+|---|---|
+| **Consensus** | DAG-Knight with VDF-based anchor election |
+| **Mempool** | Narwhal with reliable broadcast (Bracha RB) |
+| **Signatures** | Dilithium-5 + Ed25519 hybrid |
+| **KEM** | Kyber-1024 |
+| **Hash** | BLAKE3-keyed |
+| **Block time** | ~1 second |
+| **Network** | mainnet-genesis (live), 4 production bootstrap nodes |
+
+---
+
+## System architecture
+
+![System architecture diagram](docs/images/architecture-diagram.png)
+
+The original phased description is preserved below for historical context. See `docs/technical-review-sparse-chain-truth-v1.md` for the empirical chain-state truth and `docs/v10.9.55-balance-replay-removal-2026-05-18.md` for the most recent operational lesson.
+
+---
 
 🌟 **Quantum-Enhanced DAG-BFT Consensus with Distributed AI & Triple-Layer Anonymity**
 
-Q-NarwhalKnight is a revolutionary blockchain consensus system that combines the efficiency of DAG-Knight consensus with Narwhal mempool, quantum-ready cryptographic primitives, and production-grade Tor integration for complete network anonymity. This implementation provides a phased approach to quantum-resistance, starting with classical cryptography (Phase 0) and progressively upgrading to full quantum protocols (Phase 4).
+Q-NarwhalKnight is a blockchain consensus system that combines the efficiency of DAG-Knight consensus with Narwhal mempool, quantum-ready cryptographic primitives, and production-grade Tor integration for complete network anonymity. This implementation provides a phased approach to quantum-resistance, starting with classical cryptography (Phase 0) and progressively upgrading to full quantum protocols (Phase 4).
 
 ## 🔬 Architecture Overview
 
