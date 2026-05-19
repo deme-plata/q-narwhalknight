@@ -4263,6 +4263,11 @@ async fn run_decentralized_pool_mining(
 
         tokio::spawn(async move {
             let mut local_nonce = (thread_id as u64) << 56; // Thread-unique nonce range
+            #[cfg(unix)]
+            let simd_batch = q_miner::cpu::optimal_mining_batch_size();
+            #[cfg(not(unix))]
+            let simd_batch: usize = 4;
+            let mut batch_results: [(u64, [u8; 32]); 16] = [(0u64, [0u8; 32]); 16];
 
             // v1.0.2: Only thread 0 does periodic refresh (50s). Other threads rely on
             // SSE new-block signal, with a 5-min fallback. This slashes API calls by ~95%.
@@ -4363,26 +4368,38 @@ async fn run_decentralized_pool_mining(
                     last_known_block_signal = current_block_signal;
                 }
 
-                // Mine a batch of nonces
+                // Mine a batch of nonces (SIMD-interleaved VDF path, like solo mode)
                 let batch_size = 50_000u64;
                 let mut local_count: u64 = 0;
-
-                // PERF: Pre-build hash input once per batch and only update nonce bytes in-loop.
-                // Avoids re-copying 32-byte challenge for every nonce.
-                let mut hash_input = [0u8; 40];
-                hash_input[..32].copy_from_slice(&challenge_bytes);
-
-                for i in 0..batch_size {
-                    // PERF: Check stop flag every 256 hashes instead of every iteration.
+                let mut i: u64 = 0;
+                while i < batch_size {
+                    // Check stop flag every 256 hashes (not every iteration)
                     if i & 255 == 0 && !is_running.load(Ordering::Relaxed) {
                         break;
                     }
 
-                    local_nonce = local_nonce.wrapping_add(1);
+                    #[cfg(unix)]
+                    let count = q_miner::cpu::compute_dag_knight_hash_batch(
+                        &challenge_bytes,
+                        local_nonce.wrapping_add(1),
+                        simd_batch,
+                        &mut batch_results,
+                    );
+                    #[cfg(not(unix))]
+                    let count = {
+                        let bs = simd_batch.min(16).min(batch_results.len());
+                        for bi in 0..bs {
+                            let n = local_nonce.wrapping_add(1 + bi as u64);
+                            let mut hash_input = [0u8; 40];
+                            hash_input[..32].copy_from_slice(&challenge_bytes);
+                            hash_input[32..].copy_from_slice(&n.to_le_bytes());
+                            batch_results[bi] = (n, compute_dag_knight_hash_optimized(&hash_input));
+                        }
+                        bs
+                    };
 
-                    hash_input[32..].copy_from_slice(&local_nonce.to_le_bytes());
-                    let hash_result = compute_dag_knight_hash_optimized(&hash_input);
-                    local_count += 1;
+                    local_count += count as u64;
+                    local_nonce = local_nonce.wrapping_add(count as u64);
 
                     // Flush every 1024 hashes
                     if local_count & 1023 == 0 {
@@ -4397,19 +4414,24 @@ async fn run_decentralized_pool_mining(
                         }
                     }
 
-                    // Check if solution meets target
-                    if hash_result[..] < target_bytes[..] {
-                        let share = DecentralizedShare {
-                            share_id: hash_result,
-                            difficulty: challenge.block_reward,
-                            block_height: challenge.block_height,
-                            nonce: local_nonce,
-                            timestamp: chrono::Utc::now().timestamp_millis() as u64,
-                        };
+                    // Check solutions in the SIMD batch
+                    for r in 0..count {
+                        let (result_nonce, hash_result) = batch_results[r];
+                        if hash_result[..] < target_bytes[..] {
+                            let share = DecentralizedShare {
+                                share_id: hash_result,
+                                difficulty: challenge.block_reward,
+                                block_height: challenge.block_height,
+                                nonce: result_nonce,
+                                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                            };
 
-                        let _ = share_tx.send(share).await;
-                        info!("💎 Share found! nonce={}, height={}", local_nonce, challenge.block_height);
+                            let _ = share_tx.send(share).await;
+                            info!("💎 Share found! nonce={}, height={}", result_nonce, challenge.block_height);
+                        }
                     }
+
+                    i = i.wrapping_add(count as u64);
                 }
 
                 // Flush remaining local hashes
