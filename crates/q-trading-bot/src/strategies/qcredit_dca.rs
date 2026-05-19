@@ -118,7 +118,15 @@ pub struct QcreditDcaBot {
 }
 
 impl QcreditDcaBot {
-    pub fn new(config: QcreditDcaConfig) -> Result<Self> {
+    pub fn new(mut config: QcreditDcaConfig) -> Result<Self> {
+        // Auto dry-run when invoked under Claude Code plan mode — no chain side effects.
+        // Detected via either CLAUDE_CODE_PLAN_MODE=1 or CLAUDE_PLAN_MODE=1 env vars.
+        let plan_mode = std::env::var("CLAUDE_CODE_PLAN_MODE").map(|v| v == "1").unwrap_or(false)
+                     || std::env::var("CLAUDE_PLAN_MODE").map(|v| v == "1").unwrap_or(false);
+        if plan_mode && !config.dry_run {
+            info!("[qcredit-dca] CLAUDE_*_PLAN_MODE detected — forcing dry_run=true (read-only).");
+            config.dry_run = true;
+        }
         let client = QuillonClient::new(config.api_url.clone());
         let wallet = AgentWallet::from_env_or_default()
             .map_err(|e| anyhow!("qcredit-dca needs a signing wallet (TRADING_SEED env or ~/.claude/quillon-agent-seed file): {}", e))?;
