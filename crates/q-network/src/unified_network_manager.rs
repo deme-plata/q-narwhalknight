@@ -4621,6 +4621,28 @@ impl UnifiedNetworkManager {
         peer_infos
     }
 
+    /// Snapshot known peer multiaddrs keyed by peer ID.
+    pub async fn get_known_peer_multiaddrs(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let addresses = self.peer_addresses.read().await;
+        let mut out = std::collections::HashMap::new();
+        for (peer_id, multiaddrs) in addresses.iter() {
+            out.insert(
+                peer_id.to_string(),
+                multiaddrs.iter().map(|m| m.to_string()).collect(),
+            );
+        }
+        out
+    }
+
+    /// Snapshot last-seen times (unix seconds) keyed by peer ID.
+    pub fn get_peer_last_seen_unix(&self) -> std::collections::HashMap<String, u64> {
+        self.metrics
+            .peer_last_seen_secs
+            .iter()
+            .map(|entry| (entry.key().to_string(), *entry.value()))
+            .collect()
+    }
+
     /// Convert libp2p Multiaddr to SocketAddr for TCP connection
     /// Parses /ip4/X.X.X.X/tcp/PORT or /ip6/.../tcp/PORT formats
     fn multiaddr_to_socket_addr(addr: &Multiaddr) -> Option<SocketAddr> {

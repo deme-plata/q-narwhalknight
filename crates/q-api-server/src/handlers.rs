@@ -2135,6 +2135,64 @@ pub async fn get_peer_id(
     )))
 }
 
+#[derive(Debug, Serialize)]
+pub struct KnownPeerMetadata {
+    pub peer_id: String,
+    pub multiaddrs: Vec<String>,
+    pub last_seen: DateTime<Utc>,
+    pub connected: bool,
+}
+
+/// Get currently known libp2p peers for mesh bootstrap/self-heal.
+/// Public endpoint (no auth) because peer addresses are public network metadata.
+pub async fn known_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<(HeaderMap, Json<ApiResponse<Vec<KnownPeerMetadata>>>), StatusCode> {
+    let peers = if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let known_multiaddrs = manager.get_known_peer_multiaddrs().await;
+        let connected_peers = manager.get_discovered_peers().await;
+        let last_seen_unix = manager.get_peer_last_seen_unix();
+
+        let connected_set: std::collections::HashSet<String> =
+            connected_peers.into_iter().map(|p| p.to_string()).collect();
+
+        let now = Utc::now();
+        let mut peers = known_multiaddrs
+            .into_iter()
+            .map(|(peer_id, mut multiaddrs)| {
+                multiaddrs.sort();
+                multiaddrs.dedup();
+
+                let last_seen = last_seen_unix
+                    .get(&peer_id)
+                    .and_then(|secs| DateTime::<Utc>::from_timestamp(*secs as i64, 0))
+                    .unwrap_or(now);
+
+                KnownPeerMetadata {
+                    connected: connected_set.contains(&peer_id),
+                    peer_id,
+                    multiaddrs,
+                    last_seen,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        peers
+    } else {
+        Vec::new()
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("max-age=60"),
+    );
+
+    Ok((headers, Json(ApiResponse::success(peers))))
+}
+
 /// v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
 /// Returns comparison data between DAG-Knight and Quillon Resonance consensus
 pub async fn get_resonance_metrics(
