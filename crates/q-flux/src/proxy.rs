@@ -362,6 +362,7 @@ async fn handle_connection_inner<S>(
                     Some(Err(err2)) => {
                         let latency = req_start.elapsed();
                         tracing::warn!(client = %client_addr, "Retry also failed: {}", err2);
+                        record_http_upstream_failure_for_peer(client_addr, peer_tracker);
                         metrics.response_status(502);
                         metrics.record_latency(latency);
                         log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
@@ -373,6 +374,7 @@ async fn handle_connection_inner<S>(
                         // No alternative backend available — return original error
                         let latency = req_start.elapsed();
                         tracing::warn!(client = %client_addr, "No alternative backend for retry: {}", err);
+                        record_http_upstream_failure_for_peer(client_addr, peer_tracker);
                         metrics.response_status(502);
                         metrics.record_latency(latency);
                         log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
@@ -385,6 +387,7 @@ async fn handle_connection_inner<S>(
             Err((err, _)) => {
                 let latency = req_start.elapsed();
                 tracing::warn!(client = %client_addr, "Upstream error: {}", err);
+                record_http_upstream_failure_for_peer(client_addr, peer_tracker);
                 metrics.response_status(502);
                 metrics.record_latency(latency);
                 log_access(access_logger, client_addr, req_method, &req_path, 502, content_length as u64, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
@@ -774,6 +777,17 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 // log_access is imported from access_log module (shared with h2_proxy)
+
+fn peer_key_from_client_ip(client_addr: SocketAddr) -> String {
+    format!("ip-{}", client_addr.ip())
+}
+
+fn record_http_upstream_failure_for_peer(client_addr: SocketAddr, peer_tracker: &Arc<PeerTracker>) {
+    let key = peer_key_from_client_ip(client_addr);
+    if let Some(peer) = peer_tracker.peer_map().get(&key) {
+        peer.circuit_breaker.write().record_failure();
+    }
+}
 
 /// Copy bytes from `reader` to `writer` with per-peer bandwidth limiting.
 ///
