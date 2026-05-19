@@ -2150,31 +2150,36 @@ pub async fn known_peers(
 ) -> Result<(HeaderMap, Json<ApiResponse<Vec<KnownPeerMetadata>>>), StatusCode> {
     let peers = if let Some(libp2p_manager) = &state.libp2p_discovery {
         let manager = libp2p_manager.lock().await;
-        let discovered = manager.get_discovered_peer_addresses().await;
+        let known_multiaddrs = manager.get_known_peer_multiaddrs().await;
+        let connected_peers = manager.get_discovered_peers().await;
+        let last_seen_unix = manager.get_peer_last_seen_unix();
 
-        use std::collections::BTreeMap;
-        let mut by_peer: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for peer in discovered {
-            by_peer
-                .entry(peer.node_id)
-                .or_default()
-                .push(format!("/ip4/{}/tcp/{}", peer.address.ip(), peer.address.port()));
-        }
+        let connected_set: std::collections::HashSet<String> =
+            connected_peers.into_iter().map(|p| p.to_string()).collect();
 
         let now = Utc::now();
-        by_peer
+        let mut peers = known_multiaddrs
             .into_iter()
             .map(|(peer_id, mut multiaddrs)| {
                 multiaddrs.sort();
                 multiaddrs.dedup();
+
+                let last_seen = last_seen_unix
+                    .get(&peer_id)
+                    .and_then(|secs| DateTime::<Utc>::from_timestamp(*secs as i64, 0))
+                    .unwrap_or(now);
+
                 KnownPeerMetadata {
+                    connected: connected_set.contains(&peer_id),
                     peer_id,
                     multiaddrs,
-                    last_seen: now,
-                    connected: true,
+                    last_seen,
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+
+        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        peers
     } else {
         Vec::new()
     };
