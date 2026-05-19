@@ -161,37 +161,6 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// QSHARE-1 Phase 1 — DCA QUG into QCREDIT yield vault (Bronze/Silver/Gold/Platinum)
-    QcreditDca {
-        /// Your qnk wallet address (must hold QUG balance + match TRADING_SEED)
-        #[arg(long, env = "QCREDIT_DCA_WALLET")]
-        wallet: String,
-
-        /// QUG amount per DCA cycle (display units)
-        #[arg(long, default_value = "0.01")]
-        amount: f64,
-
-        /// QCREDIT tier to lock into: bronze, silver, gold, platinum
-        #[arg(long, default_value = "platinum")]
-        tier: String,
-
-        /// Interval between cycles in seconds
-        #[arg(long, default_value = "3600")]
-        interval: u64,
-
-        /// Min balance to keep as floor (display units, default 0.1 QUG)
-        #[arg(long, default_value = "0.1")]
-        min_balance_floor: f64,
-
-        /// Max cycles to run (omit = run forever)
-        #[arg(long)]
-        max_cycles: Option<u32>,
-
-        /// Dry run — log decisions without calling /qcredit/lock
-        #[arg(long)]
-        dry_run: bool,
-    },
-
     /// Combined Dark Knight + Water Robot (Dagknight indicators + resonance + swarm + Kelly)
     DarkKnight {
         #[arg(long, env = "DARK_KNIGHT_WALLET")]
@@ -342,22 +311,6 @@ async fn main() -> Result<()> {
                 dry_run,
             };
             let mut bot = TunnelingOctopusBot::new(cfg);
-            bot.run().await?;
-        }
-        Some(Commands::QcreditDca { wallet, amount, tier, interval, min_balance_floor, max_cycles, dry_run }) => {
-            use crate::strategies::{QcreditDcaBot, QcreditDcaConfig};
-            let cfg = QcreditDcaConfig {
-                api_url: cli.api_endpoint.clone(),
-                wallet,
-                qug_per_cycle: amount,
-                tier,
-                cycle_interval: std::time::Duration::from_secs(interval),
-                min_balance_floor,
-                max_cycles,
-                dry_run,
-            };
-            let mut bot = QcreditDcaBot::new(cfg)?;
-            info!("[qcredit-dca] {}", bot.status_summary());
             bot.run().await?;
         }
         Some(Commands::DarkKnight {
