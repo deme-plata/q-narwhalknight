@@ -925,8 +925,10 @@ pub struct SwapResult {
     /// v10.10.1: optional quality-score breakdown rendered in SwapSuccessModal.
     /// Computed via agent_panel::scorers::SwapScorer. Additive — clients that
     /// don't render the field continue to work unchanged.
+    /// NOTE: dex_integration_api.rs is declared in main.rs (bin), so it references
+    /// the lib's agent_panel module via the crate name `q_api_server::`, not `crate::`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub score: Option<crate::agent_panel::scorers::ScoreReport>,
+    pub score: Option<q_api_server::agent_panel::scorers::ScoreReport>,
 }
 
 pub async fn execute_swap(
@@ -1111,8 +1113,8 @@ pub async fn execute_swap(
     ).await;
 
     let swap_score = {
-        use crate::agent_panel::scorers::{SwapContext, SwapRecord, SwapScorer};
-        let amount_in_qug = amount_in_raw as f64 / 1e24;
+        use q_api_server::agent_panel::scorers::{SwapContext, SwapRecord, SwapScorer};
+        let amount_in_qug = amount_in as f64 / 1e24;
         let amount_out_qug = amount_out as f64 / 1e24;
         let reserve_in_qug = reserve_in as f64 / 1e24;
         let reserve_out_qug = reserve_out as f64 / 1e24;
