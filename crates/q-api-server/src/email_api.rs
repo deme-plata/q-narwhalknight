@@ -926,12 +926,17 @@ async fn process_crypto_transfer(
             signature: Vec::new(),
             timestamp: chrono::Utc::now(),
             data: tx_data.into_bytes(),
-            token_type: q_types::TokenType::Qug,
-            fee_token_type: q_types::TokenType::Qug,
+            token_type: q_types::TokenType::QUG,
+            fee_token_type: q_types::TokenType::QUG,
             tx_type: q_types::TransactionType::Transfer,
             pqc_signature: None,
             signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: q_types::TransactionPrivacyLevel::default(),
+            bulletproof: None,
+            nullifier: None,
+            memo: Some(memo.clone()),
         };
 
         if let Err(e) = state.storage_engine.save_transaction(&email_tx).await {
@@ -1011,12 +1016,17 @@ async fn process_crypto_transfer(
             signature: Vec::new(),
             timestamp: chrono::Utc::now(),
             data: tx_data.into_bytes(),
-            token_type: q_types::TokenType::Qugusd,
-            fee_token_type: q_types::TokenType::Qug,
+            token_type: q_types::TokenType::QUGUSD,
+            fee_token_type: q_types::TokenType::QUG,
             tx_type: q_types::TransactionType::Transfer,
             pqc_signature: None,
             signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
             pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: q_types::TransactionPrivacyLevel::default(),
+            bulletproof: None,
+            nullifier: None,
+            memo: Some(memo.clone()),
         };
 
         if let Err(e) = state.storage_engine.save_transaction(&email_tx).await {
