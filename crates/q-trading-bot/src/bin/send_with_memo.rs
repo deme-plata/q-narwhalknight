@@ -170,9 +170,13 @@ async fn main() -> Result<()> {
     let pre_json = serde_json::to_string(&tx)?;
     tx = serde_json::from_str(&pre_json)?;
 
+    // v10.10.0: use signable_payload() which zeros signature+id before hashing.
+    // This matches the new canonical verifier in q-types::verify_ed25519_signature
+    // (no more chicken-and-egg between sign-time hash and verify-time hash).
+    let canonical = tx.signable_payload();
     let tx_hash = tx.hash();
     tx.id = tx_hash;
-    let signature = sk.sign(&tx_hash);
+    let signature = sk.sign(&canonical);
     tx.signature = signature.to_bytes().to_vec();
     tx.data = from.to_vec(); // store pub_key in data[..32] (production convention)
 
