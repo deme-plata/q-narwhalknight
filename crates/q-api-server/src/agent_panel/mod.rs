@@ -18,11 +18,11 @@
 //! - `handler`   — `GET /api/v1/agent/panel/{addr}` REST handler
 
 pub mod pipeline;
+pub mod scorers;
 
 // Sub-modules below are stubs — Codex implements per the spec roadmap layers L1-L5.
 // pub mod sources;
 // pub mod hydrators;
 // pub mod filters;
-// pub mod scorers;
 // pub mod selectors;
 // pub mod handler;

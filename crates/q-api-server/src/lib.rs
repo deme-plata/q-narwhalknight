@@ -267,6 +267,7 @@ pub mod calendar_api; // ✅ v7.3.3 - Blockchain Calendar: events, scheduled TXs
 pub mod email_mta; // ✅ v7.3.2 - Quillon Mail: Mail Transport Agent for SMTP delivery
 pub mod email_auth_verify; // ✅ v7.3.2 - Quillon Mail: SPF/DKIM/DMARC verification
 pub mod ai_intent; // ✅ v2.3.18-beta - Safe AI intent schema (AI parses, Rust executes)
+pub mod agent_panel;
 pub mod ai_intent_parser; // ✅ v2.3.18-beta - Mistral 7B intent parsing with validation
 pub mod ai_intent_executor; // ✅ v2.3.18-beta - Deterministic Rust intent execution
 pub mod ai_intent_manager; // ✅ v2.3.18-beta - Unified intent pipeline with confirmation flow
