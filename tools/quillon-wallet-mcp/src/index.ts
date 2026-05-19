@@ -20,6 +20,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import * as ed25519 from "@noble/ed25519";
+import { sha3_256 } from "@noble/hashes/sha3";
+import { sha512 } from "@noble/hashes/sha512";
+
+// @noble/ed25519 v2 requires explicit sha512 setup for sync ops; we use async.
+(ed25519 as any).etc.sha512Sync = (...m: Uint8Array[]) => sha512(Buffer.concat(m.map((x) => Buffer.from(x))));
 
 // ═══════════════════════════════════════════════════════════════
 // SECURITY FIX 5: API URL validation — prevent SSRF/phishing via env vars
@@ -51,17 +57,89 @@ function validateApiUrl(url: string): string {
 const API_BASE = validateApiUrl(process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1");
 const DOWNLOAD_BASE = validateApiUrl(process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads");
 
+// ═══════════════════════════════════════════════════════════════
+// v1.3.0: AGENT MODE — local Ed25519 signing key for autonomous flows
+// ═══════════════════════════════════════════════════════════════
+// When QUILLON_AGENT_SEED is set, the MCP holds an agent's own signing
+// key (NOT a user's wallet key). All reads sign X-Wallet-Auth headers
+// automatically. Distinct from user OAuth2 flow (browser device login).
+//
+// Use case: AI agents that own and transact crypto natively without
+// human-in-the-loop browser approval for every action.
+//
+// Derivation matches the server-side scheme documented in memory
+// [[wallet_seed_derivation]]: priv = SHA3-256(seed_str_utf8),
+// pub = ed25519(priv), addr = "qnk" + hex(pub).
+let agentPrivKey: Uint8Array | null = null;
+let agentAddrCache: string | null = null;
+
+(function initAgentMode() {
+  const seed = process.env.QUILLON_AGENT_SEED;
+  if (!seed) return;
+  const trimmed = seed.trim();
+  if (trimmed.length === 0) return;
+  agentPrivKey = sha3_256(new TextEncoder().encode(trimmed));
+  console.error(`[quillon-mcp] Agent mode enabled (Ed25519 priv-key derived from QUILLON_AGENT_SEED)`);
+})();
+
+async function getAgentAddress(): Promise<string | null> {
+  if (!agentPrivKey) return null;
+  if (agentAddrCache) return agentAddrCache;
+  const pub = await ed25519.getPublicKeyAsync(agentPrivKey);
+  agentAddrCache = "qnk" + Buffer.from(pub).toString("hex");
+  return agentAddrCache;
+}
+
+/**
+ * Build X-Wallet-Auth JSON header by signing the canonical message:
+ *   SHA3-256(address_bytes || timestamp_le_i64 || path_bytes)
+ * Returns null if agent mode is not enabled.
+ */
+async function buildAuthHeader(fullPath: string): Promise<string | null> {
+  if (!agentPrivKey) return null;
+  const addr = await getAgentAddress();
+  if (!addr) return null;
+  const ts = Math.floor(Date.now() / 1000);
+  const addrBytes = Buffer.from(addr.slice(3), "hex");
+  const tsBytes = Buffer.alloc(8);
+  tsBytes.writeBigInt64LE(BigInt(ts));
+  const pathBytes = Buffer.from(fullPath, "utf8");
+  const msg = sha3_256(Buffer.concat([addrBytes, tsBytes, pathBytes]));
+  const sig = await ed25519.signAsync(msg, agentPrivKey);
+  return JSON.stringify({
+    address: addr,
+    timestamp: ts,
+    scheme: "Ed25519",
+    signature: Buffer.from(sig).toString("hex"),
+  });
+}
+
 // --- HTTP helper ---
-async function api(path: string, method = "GET", body?: unknown): Promise<unknown> {
+// `withAuth` injects X-Wallet-Auth from agent key (agent mode only).
+// Reads against authenticated endpoints (balance, mining-status, etc.)
+// pass withAuth=true so they return real data instead of "unavailable".
+async function api(
+  path: string,
+  method = "GET",
+  body?: unknown,
+  opts?: { withAuth?: boolean },
+): Promise<unknown> {
   const url = `${API_BASE}${path}`;
-  const opts: RequestInit = {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts?.withAuth) {
+    // Server middleware reads X-Wallet-Auth and verifies against the request
+    // path as seen at axum router level — that's `/api/v1` + path here.
+    const authHdr = await buildAuthHeader(`/api/v1${path}`);
+    if (authHdr) headers["X-Wallet-Auth"] = authHdr;
+  }
+  const fetchOpts: RequestInit = {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
   };
-  if (body) opts.body = JSON.stringify(body);
+  if (body) fetchOpts.body = JSON.stringify(body);
 
-  const res = await fetch(url, opts);
+  const res = await fetch(url, fetchOpts);
   if (!res.ok) throw new Error(`API ${method} ${path} returned ${res.status}: ${await res.text()}`);
   return res.json();
 }
@@ -303,7 +381,8 @@ server.tool(
   "Check the balance of any Quillon wallet address (qnk...)",
   { address: z.string().describe("Wallet address starting with 'qnk'") },
   async ({ address }) => {
-    const res = await api(`/wallets/${address}/balance`) as any;
+    // v1.3.0: send X-Wallet-Auth so private blockchain balance endpoint actually returns data
+    const res = await api(`/wallets/${address}/balance`, "GET", undefined, { withAuth: true }) as any;
     if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
 
     const balance = res.data;
@@ -312,9 +391,10 @@ server.tool(
         type: "text",
         text: [
           `Wallet: ${address}`,
-          `Balance: ${balance.balance_qug || balance.balance || 0} QUG`,
+          `Balance: ${typeof balance.balance_qnk === "number" ? balance.balance_qnk.toFixed(6) : (balance.balance_qug || balance.balance || 0)} QUG`,
           balance.pending ? `Pending: ${balance.pending} QUG` : '',
           balance.staked ? `Staked: ${balance.staked} QUG` : '',
+          balance.auth_scheme ? `Auth scheme: ${balance.auth_scheme}` : '',
         ].filter(Boolean).join("\n"),
       }],
     };
@@ -775,20 +855,26 @@ server.tool(
   },
   async ({ wallet_address }) => {
     try {
+      // v1.3.0: balance endpoint requires X-Wallet-Auth — pass withAuth so
+      // the agent-mode signing key produces a valid header. /mining/challenge
+      // is unauthenticated.
       const [balRes, challengeRes] = await Promise.all([
-        api(`/wallets/${wallet_address}/balance`).catch(() => null),
+        api(`/wallets/${wallet_address}/balance`, "GET", undefined, { withAuth: true }).catch(() => null),
         api("/mining/challenge").catch(() => null),
       ]);
 
       const bal = (balRes as any)?.data;
       const challenge = (challengeRes as any)?.data;
+      const balanceStr = bal
+        ? `${typeof bal.balance_qnk === "number" ? bal.balance_qnk.toFixed(6) : bal.balance_qug || bal.balance || 0} QUG`
+        : "unavailable (set QUILLON_AGENT_SEED env var to enable authenticated reads)";
 
       return {
         content: [{
           type: "text",
           text: [
             `=== Mining Status for ${wallet_address.slice(0, 12)}... ===`,
-            bal ? `Balance: ${bal.balance_qug || bal.balance || 0} QUG` : 'Balance: unavailable',
+            `Balance: ${balanceStr}`,
             challenge ? `Current Height: ${challenge.block_height}` : '',
             challenge ? `Block Reward: ${challenge.block_reward} QUG` : '',
             challenge ? `Network Hashrate: ${challenge.network_hashrate_hs || 'unknown'} H/s` : '',
