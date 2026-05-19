@@ -66,6 +66,8 @@ mod ai_transaction_assistant;
 // mod attachment_api;
 // ✅ v1.0.3-beta - Block Production Loop v2 with Comprehensive Stall Protection
 mod block_production_v2;
+// v10.10.0: Agent Activity Panel pipeline traits (Codex extends per PR #90)
+mod agent_panel;
 // ✅ Chat/Voice/Video signaling server — routes SDP/ICE between browser peers
 use q_api_server::signaling_server::{signaling_diag_handler, ws_signal_handler, SignalingState};
 // ⛏️  Integrated mining removed v7.1.3 - use external q-miner binary instead

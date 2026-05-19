@@ -599,12 +599,16 @@ server.tool(
     if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
 
     const s = res.data;
+    // v10.10.0 fix: /api/v1/status nests current_height under `upgrades`, not top-level.
+    // The old top-level read returned "unknown" silently for the past several versions.
+    // Documented in AGENT.md §4 gotchas; fix here so MCP callers see the real chain height.
+    const height = s.upgrades?.current_height ?? s.current_height;
     return {
       content: [{
         type: "text",
         text: [
           `=== Quillon Network Status ===`,
-          `Height: ${s.current_height?.toLocaleString() || 'unknown'}`,
+          `Height: ${height?.toLocaleString?.() ?? height ?? 'unknown'}`,
           `Peers: ${s.connected_peers || 0}`,
           `Block Rate: ${s.blocks_per_second?.toFixed(2) || '?'} bps`,
           `Network Hashrate: ${s.network_hashrate || 'unknown'}`,
