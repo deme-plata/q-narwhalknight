@@ -871,7 +871,7 @@ export default function EmailScreen() {
       {/* Right Panel: Email Detail or Compose                                */}
       {/* ================================================================== */}
       <div
-        className="flex-1 flex flex-col min-w-0"
+        className="flex-1 flex flex-col min-w-0 min-h-0"
         style={{
           background: 'rgba(10, 14, 26, 0.5)',
           backdropFilter: 'blur(10px)',
@@ -1966,7 +1966,7 @@ function EmailDetailPanel({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: -20 }}
       transition={{ duration: 0.2 }}
-      className="flex-1 flex flex-col"
+      className="flex-1 flex flex-col min-h-0"
     >
       {/* Header */}
       <div

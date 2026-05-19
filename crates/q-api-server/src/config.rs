@@ -392,9 +392,9 @@ impl Config {
             // DNS fallback — bypasses per-IP HTTP verification (no timeout on firewalled port 8080)
             "/dns4/quillon.xyz/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM".to_string(),
             // Beta (production bootstrap) — updated peer ID
-            "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93".to_string(),
+            "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWRQtxSd6hzfnvMN8jfuMQM4tVTbLXkAr1f3rtfG3baqUv".to_string(),
             // Gamma (backup bootstrap)
-            "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
+            "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp".to_string(),
         ];
         info!("📡 Loaded {} hardcoded fallback bootstrap peers", peers.len());
         for peer in &peers {

@@ -329,6 +329,11 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
     fromAmount: number;
     toAmount: number;
     transactionHash?: string;
+    score?: {
+      total?: number;
+      components?: Array<{ name: string; value: number; explanation?: string; weight?: number }>;
+      weights?: Record<string, number>;
+    };
   } | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0); // Trigger for refetching tokens
   // v8.2.8: Swap processing state for loading animation
@@ -6846,6 +6851,7 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
           fromAmount={swapSuccessData.fromAmount}
           toAmount={swapSuccessData.toAmount}
           transactionHash={swapSuccessData.transactionHash}
+          score={swapSuccessData.score}
         />
       )}
 

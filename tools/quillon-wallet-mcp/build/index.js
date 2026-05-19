@@ -19,6 +19,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import * as ed25519 from "@noble/ed25519";
+import { sha3_256 } from "@noble/hashes/sha3";
+import { sha512 } from "@noble/hashes/sha512";
+// @noble/ed25519 v2 requires explicit sha512 setup for sync ops; we use async.
+ed25519.etc.sha512Sync = (...m) => sha512(Buffer.concat(m.map((x) => Buffer.from(x))));
 // ═══════════════════════════════════════════════════════════════
 // SECURITY FIX 5: API URL validation — prevent SSRF/phishing via env vars
 // ═══════════════════════════════════════════════════════════════
@@ -47,17 +52,87 @@ function validateApiUrl(url) {
 }
 const API_BASE = validateApiUrl(process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1");
 const DOWNLOAD_BASE = validateApiUrl(process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads");
+// ═══════════════════════════════════════════════════════════════
+// v1.3.0: AGENT MODE — local Ed25519 signing key for autonomous flows
+// ═══════════════════════════════════════════════════════════════
+// When QUILLON_AGENT_SEED is set, the MCP holds an agent's own signing
+// key (NOT a user's wallet key). All reads sign X-Wallet-Auth headers
+// automatically. Distinct from user OAuth2 flow (browser device login).
+//
+// Use case: AI agents that own and transact crypto natively without
+// human-in-the-loop browser approval for every action.
+//
+// Derivation matches the server-side scheme documented in memory
+// [[wallet_seed_derivation]]: priv = SHA3-256(seed_str_utf8),
+// pub = ed25519(priv), addr = "qnk" + hex(pub).
+let agentPrivKey = null;
+let agentAddrCache = null;
+(function initAgentMode() {
+    const seed = process.env.QUILLON_AGENT_SEED;
+    if (!seed)
+        return;
+    const trimmed = seed.trim();
+    if (trimmed.length === 0)
+        return;
+    agentPrivKey = sha3_256(new TextEncoder().encode(trimmed));
+    console.error(`[quillon-mcp] Agent mode enabled (Ed25519 priv-key derived from QUILLON_AGENT_SEED)`);
+})();
+async function getAgentAddress() {
+    if (!agentPrivKey)
+        return null;
+    if (agentAddrCache)
+        return agentAddrCache;
+    const pub = await ed25519.getPublicKeyAsync(agentPrivKey);
+    agentAddrCache = "qnk" + Buffer.from(pub).toString("hex");
+    return agentAddrCache;
+}
+/**
+ * Build X-Wallet-Auth JSON header by signing the canonical message:
+ *   SHA3-256(address_bytes || timestamp_le_i64 || path_bytes)
+ * Returns null if agent mode is not enabled.
+ */
+async function buildAuthHeader(fullPath) {
+    if (!agentPrivKey)
+        return null;
+    const addr = await getAgentAddress();
+    if (!addr)
+        return null;
+    const ts = Math.floor(Date.now() / 1000);
+    const addrBytes = Buffer.from(addr.slice(3), "hex");
+    const tsBytes = Buffer.alloc(8);
+    tsBytes.writeBigInt64LE(BigInt(ts));
+    const pathBytes = Buffer.from(fullPath, "utf8");
+    const msg = sha3_256(Buffer.concat([addrBytes, tsBytes, pathBytes]));
+    const sig = await ed25519.signAsync(msg, agentPrivKey);
+    return JSON.stringify({
+        address: addr,
+        timestamp: ts,
+        scheme: "Ed25519",
+        signature: Buffer.from(sig).toString("hex"),
+    });
+}
 // --- HTTP helper ---
-async function api(path, method = "GET", body) {
+// `withAuth` injects X-Wallet-Auth from agent key (agent mode only).
+// Reads against authenticated endpoints (balance, mining-status, etc.)
+// pass withAuth=true so they return real data instead of "unavailable".
+async function api(path, method = "GET", body, opts) {
     const url = `${API_BASE}${path}`;
-    const opts = {
+    const headers = { "Content-Type": "application/json" };
+    if (opts?.withAuth) {
+        // Server middleware reads X-Wallet-Auth and verifies against the request
+        // path as seen at axum router level — that's `/api/v1` + path here.
+        const authHdr = await buildAuthHeader(`/api/v1${path}`);
+        if (authHdr)
+            headers["X-Wallet-Auth"] = authHdr;
+    }
+    const fetchOpts = {
         method,
-        headers: { "Content-Type": "application/json" },
+        headers,
         redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
     };
     if (body)
-        opts.body = JSON.stringify(body);
-    const res = await fetch(url, opts);
+        fetchOpts.body = JSON.stringify(body);
+    const res = await fetch(url, fetchOpts);
     if (!res.ok)
         throw new Error(`API ${method} ${path} returned ${res.status}: ${await res.text()}`);
     return res.json();
@@ -65,7 +140,7 @@ async function api(path, method = "GET", body) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "1.0.0",
+    version: "1.2.0",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -90,8 +165,15 @@ server.resource("welcome", "quillon://welcome", async () => ({
                 `    "Start mining"                  — Begin mining immediately`,
                 `    "How's my mining going?"        — Hashrate, rewards, stats`,
                 ``,
+                `  DEX SWAP`,
+                `    "List tradeable tokens"         — QUG, QUGUSD, wBTC, wZEC, wIRON, wETH`,
+                `    "Quote 10 QUG to QUGUSD"        — See expected output, price impact`,
+                `    "Swap 10 QUG to QUGUSD"         — Two-step: shows quote → asks to confirm`,
+                `    "Send 25 QUGUSD to qnk..."      — Token transfers (any DEX-listed token)`,
+                ``,
                 `  NETWORK`,
                 `    "Network status"                — Height, peers, block rate`,
+                `    "Verify node consistency"       — Compare two nodes' balance state (proves decentralization)`,
                 ``,
                 `  NODE`,
                 `    "Set up a node on this machine" — Download binary + systemd service`,
@@ -261,7 +343,8 @@ server.tool("create_wallet", "Create a new Quillon wallet. Returns the address (
     };
 });
 server.tool("get_balance", "Check the balance of any Quillon wallet address (qnk...)", { address: z.string().describe("Wallet address starting with 'qnk'") }, async ({ address }) => {
-    const res = await api(`/wallets/${address}/balance`);
+    // v1.3.0: send X-Wallet-Auth so private blockchain balance endpoint actually returns data
+    const res = await api(`/wallets/${address}/balance`, "GET", undefined, { withAuth: true });
     if (!res.success)
         return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
     const balance = res.data;
@@ -270,9 +353,10 @@ server.tool("get_balance", "Check the balance of any Quillon wallet address (qnk
                 type: "text",
                 text: [
                     `Wallet: ${address}`,
-                    `Balance: ${balance.balance_qug || balance.balance || 0} QUG`,
+                    `Balance: ${typeof balance.balance_qnk === "number" ? balance.balance_qnk.toFixed(6) : (balance.balance_qug || balance.balance || 0)} QUG`,
                     balance.pending ? `Pending: ${balance.pending} QUG` : '',
                     balance.staked ? `Staked: ${balance.staked} QUG` : '',
+                    balance.auth_scheme ? `Auth scheme: ${balance.auth_scheme}` : '',
                 ].filter(Boolean).join("\n"),
             }],
     };
@@ -675,18 +759,24 @@ server.tool("mining_status", "Check current mining statistics — hashrate, solu
     wallet_address: z.string().describe("Your qnk... wallet address"),
 }, async ({ wallet_address }) => {
     try {
+        // v1.3.0: balance endpoint requires X-Wallet-Auth — pass withAuth so
+        // the agent-mode signing key produces a valid header. /mining/challenge
+        // is unauthenticated.
         const [balRes, challengeRes] = await Promise.all([
-            api(`/wallets/${wallet_address}/balance`).catch(() => null),
+            api(`/wallets/${wallet_address}/balance`, "GET", undefined, { withAuth: true }).catch(() => null),
             api("/mining/challenge").catch(() => null),
         ]);
         const bal = balRes?.data;
         const challenge = challengeRes?.data;
+        const balanceStr = bal
+            ? `${typeof bal.balance_qnk === "number" ? bal.balance_qnk.toFixed(6) : bal.balance_qug || bal.balance || 0} QUG`
+            : "unavailable (set QUILLON_AGENT_SEED env var to enable authenticated reads)";
         return {
             content: [{
                     type: "text",
                     text: [
                         `=== Mining Status for ${wallet_address.slice(0, 12)}... ===`,
-                        bal ? `Balance: ${bal.balance_qug || bal.balance || 0} QUG` : 'Balance: unavailable',
+                        `Balance: ${balanceStr}`,
                         challenge ? `Current Height: ${challenge.block_height}` : '',
                         challenge ? `Block Reward: ${challenge.block_reward} QUG` : '',
                         challenge ? `Network Hashrate: ${challenge.network_hashrate_hs || 'unknown'} H/s` : '',
@@ -954,6 +1044,458 @@ server.tool("setup_node", "Set up a full Quillon (QNK) blockchain node on this D
                 ].filter(Boolean).join("\n"),
             }],
     };
+});
+// Cached for the lifetime of the MCP session — refreshed on demand.
+let tokenCache = null;
+const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+async function fetchTokens(force = false) {
+    if (!force && tokenCache && (Date.now() - tokenCache.fetchedAt) < TOKEN_CACHE_TTL_MS) {
+        return tokenCache.tokens;
+    }
+    const res = await api("/dex/tokens");
+    if (!res.success && res.ok !== true) {
+        throw new Error(`Failed to fetch tokens: ${res.error || 'unknown error'}`);
+    }
+    // DEX API uses { ok: bool, data: ... } shape
+    const list = res.data || res.tokens || [];
+    tokenCache = { tokens: list, fetchedAt: Date.now() };
+    return list;
+}
+function findTokenBySymbol(tokens, symbol) {
+    const upper = symbol.trim().toUpperCase();
+    return tokens.find(t => t.symbol.toUpperCase() === upper);
+}
+// Multiply display amount × 10^decimals as a BigInt-precise string.
+// Avoids float precision loss for large decimal counts (24 for QUG).
+function toBaseUnits(displayAmount, decimals) {
+    if (!Number.isFinite(displayAmount) || displayAmount < 0) {
+        throw new Error(`Invalid amount: ${displayAmount}`);
+    }
+    // Split into integer and fractional, scale each with BigInt to avoid float drift.
+    const s = displayAmount.toFixed(decimals);
+    const [intPart, fracPart = ""] = s.split(".");
+    const padded = (fracPart + "0".repeat(decimals)).slice(0, decimals);
+    const combined = (intPart + padded).replace(/^0+/, "") || "0";
+    return combined;
+}
+// Inverse: base units (string) → display number with the given decimals.
+function fromBaseUnits(baseUnits, decimals) {
+    const b = BigInt(baseUnits);
+    const divisor = 10n ** BigInt(decimals);
+    const whole = b / divisor;
+    const rem = b % divisor;
+    // Use up to 6 fractional digits for display
+    const fracStr = rem.toString().padStart(decimals, "0").slice(0, 6);
+    return parseFloat(`${whole.toString()}.${fracStr}`);
+}
+// Pretty-print caveats for token safety. AI should relay these so users
+// understand what they're trading into.
+function tokenCaveat(t) {
+    switch (t.contract_type.toLowerCase()) {
+        case "native":
+            return "Native chain asset — backed by proof-of-work mining and consensus";
+        case "stablecoin":
+            return "Collateralized stablecoin — value tracks USD via on-chain CDP vault. Peg holds while QUG collateral exceeds liability";
+        case "wrapped":
+            return `Bridge-wrapped — represents the external asset held in custody by the ${t.symbol.replace(/^w/i, "")} bridge contract. Requires bridge withdrawal to redeem the underlying`;
+        case "lp":
+            return "Liquidity pool token — represents your share of a pool; redeemable for the underlying tokens";
+        default:
+            return `${t.contract_type} token — verify the audit report before trading large amounts`;
+    }
+}
+server.tool("dex_list_tokens", "List all tokens tradeable on the Quillon DEX with their decimals, type, and safety caveats. Says caveats so users understand what they're trading.", {}, async () => {
+    try {
+        const tokens = await fetchTokens(true); // force refresh
+        if (tokens.length === 0) {
+            return { content: [{ type: "text", text: `No tokens registered on this DEX yet.` }] };
+        }
+        const lines = [
+            `=== Quillon DEX — Tradeable Tokens (${tokens.length}) ===`,
+            ``,
+        ];
+        for (const t of tokens) {
+            const verified = t.verified ? "✓" : "?";
+            lines.push(`${verified} ${t.symbol}  (${t.name})`);
+            lines.push(`  type: ${t.contract_type}  ·  decimals: ${t.decimals}`);
+            lines.push(`  ${tokenCaveat(t)}`);
+            lines.push(``);
+        }
+        lines.push(`Caveats:`, `  • All swaps go through constant-product AMM pools with 0.3% pool fee`, `  • Default slippage tolerance is 0.5%; max is 10%`, `  • Swap amounts are non-reversible once submitted — confirm carefully`, `  • Bridge tokens (wBTC/wZEC/wIRON/wETH) require the corresponding bridge to be operational for redemption`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Failed to fetch tokens: ${e.message}` }] };
+    }
+});
+server.tool("dex_get_quote", "Get a swap quote — see how much you'd receive before committing. No auth needed; this is just pricing.", {
+    from_token: z.string().describe("Symbol of the token you want to sell (e.g., QUG)"),
+    to_token: z.string().describe("Symbol of the token you want to buy (e.g., QUGUSD)"),
+    amount: z.number().positive().describe("Amount of from_token in display units (e.g., 10 for 10 QUG)"),
+    slippage_percent: z.number().optional().describe("Slippage tolerance, 0.0-10.0 (default 0.5)"),
+}, async ({ from_token, to_token, amount, slippage_percent }) => {
+    try {
+        const tokens = await fetchTokens();
+        const tIn = findTokenBySymbol(tokens, from_token);
+        const tOut = findTokenBySymbol(tokens, to_token);
+        if (!tIn)
+            return { content: [{ type: "text", text: `Unknown from_token "${from_token}". Run dex_list_tokens to see what's available.` }] };
+        if (!tOut)
+            return { content: [{ type: "text", text: `Unknown to_token "${to_token}". Run dex_list_tokens to see what's available.` }] };
+        if (tIn.symbol.toUpperCase() === tOut.symbol.toUpperCase()) {
+            return { content: [{ type: "text", text: `Cannot swap a token for itself (${tIn.symbol}).` }] };
+        }
+        const slip = slippage_percent ?? 0.5;
+        if (slip < 0 || slip > 10) {
+            return { content: [{ type: "text", text: `Slippage tolerance must be between 0% and 10% (got ${slip}%).` }] };
+        }
+        const amountInBase = toBaseUnits(amount, tIn.decimals);
+        const res = await api("/dex/swap/quote", "POST", {
+            token_in: tIn.symbol,
+            token_out: tOut.symbol,
+            amount_in: amountInBase,
+            slippage_tolerance: slip,
+        });
+        // The dex_integration_api returns { ok: bool, data: SwapQuote | null, error?: string }
+        if (res.ok === false || res.success === false) {
+            return { content: [{ type: "text", text: `Quote failed: ${res.error || 'unknown error'}` }] };
+        }
+        const q = res.data;
+        if (!q)
+            return { content: [{ type: "text", text: `Quote response empty — no liquidity for ${tIn.symbol}/${tOut.symbol}?` }] };
+        const outDisplay = fromBaseUnits(q.amount_out, tOut.decimals);
+        const minOutDisplay = fromBaseUnits(q.minimum_amount_out, tOut.decimals);
+        const priceImpactPct = (q.price_impact * 100).toFixed(3);
+        const lines = [
+            `=== Swap Quote ===`,
+            ``,
+            `  Sell:        ${amount} ${tIn.symbol}`,
+            `  Receive:     ${outDisplay.toFixed(6)} ${tOut.symbol}  (estimated)`,
+            `  Min after ${slip}% slippage: ${minOutDisplay.toFixed(6)} ${tOut.symbol}`,
+            ``,
+            `  Price impact: ${priceImpactPct}%${q.price_impact > 0.01 ? "  ⚠️ HIGH" : ""}`,
+            `  Execution price: 1 ${tIn.symbol} ≈ ${(q.execution_price).toFixed(6)} ${tOut.symbol}`,
+            ``,
+            `Quote valid until block timestamp ${q.valid_until}. Run dex_swap with confirm=true to execute.`,
+        ];
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Quote error: ${e.message}` }] };
+    }
+});
+server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first (run authenticate_wallet). Call once to see a quote + confirmation prompt; call again with confirm=true to actually execute.", {
+    from_token: z.string().describe("Token to sell (e.g., QUG)"),
+    to_token: z.string().describe("Token to buy (e.g., QUGUSD)"),
+    amount: z.number().positive().describe("Amount of from_token in display units"),
+    slippage_percent: z.number().optional().describe("Slippage tolerance (default 0.5)"),
+    confirm: z.boolean().optional().describe("Set to true to execute; without it, returns the quote first"),
+}, async ({ from_token, to_token, amount, slippage_percent, confirm }) => {
+    // Step 1: auth check (same pattern as send_qug)
+    if (!isSessionValid()) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To execute a swap:`,
+                        ``,
+                        `  1. Say "authenticate wallet"`,
+                        `  2. Open the link in your browser and approve`,
+                        `  3. Say "check auth"`,
+                        `  4. Then retry the swap`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    refreshSession();
+    // Step 2: resolve tokens + decimals
+    let tokens;
+    try {
+        tokens = await fetchTokens();
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] };
+    }
+    const tIn = findTokenBySymbol(tokens, from_token);
+    const tOut = findTokenBySymbol(tokens, to_token);
+    if (!tIn)
+        return { content: [{ type: "text", text: `Unknown from_token "${from_token}".` }] };
+    if (!tOut)
+        return { content: [{ type: "text", text: `Unknown to_token "${to_token}".` }] };
+    if (tIn.symbol.toUpperCase() === tOut.symbol.toUpperCase()) {
+        return { content: [{ type: "text", text: `Cannot swap a token for itself.` }] };
+    }
+    const slip = slippage_percent ?? 0.5;
+    if (slip < 0 || slip > 10) {
+        return { content: [{ type: "text", text: `Slippage must be 0-10% (got ${slip}%).` }] };
+    }
+    if (amount <= 0) {
+        return { content: [{ type: "text", text: `Amount must be > 0.` }] };
+    }
+    // Step 3: get quote for confirmation display
+    const amountInBase = toBaseUnits(amount, tIn.decimals);
+    let quoteRes;
+    try {
+        quoteRes = await api("/dex/swap/quote", "POST", {
+            token_in: tIn.symbol,
+            token_out: tOut.symbol,
+            amount_in: amountInBase,
+            slippage_tolerance: slip,
+        });
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Quote fetch failed: ${e.message}` }] };
+    }
+    if (quoteRes.ok === false || quoteRes.success === false || !quoteRes.data) {
+        return { content: [{ type: "text", text: `Cannot price the swap: ${quoteRes.error || 'no liquidity for this pair?'}` }] };
+    }
+    const q = quoteRes.data;
+    const outDisplay = fromBaseUnits(q.amount_out, tOut.decimals);
+    const minOutDisplay = fromBaseUnits(q.minimum_amount_out, tOut.decimals);
+    const priceImpactPct = (q.price_impact * 100).toFixed(3);
+    const highImpact = q.price_impact > 0.05; // 5% impact threshold
+    // Step 4: if not confirmed, show quote and ask
+    if (!confirm) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `⚠️ SWAP CONFIRMATION REQUIRED`,
+                        ``,
+                        `  From wallet:  ${activeWalletAddress.slice(0, 20)}...`,
+                        `  Sell:         ${amount} ${tIn.symbol}`,
+                        `  Receive:      ≈${outDisplay.toFixed(6)} ${tOut.symbol}`,
+                        `  Min received: ${minOutDisplay.toFixed(6)} ${tOut.symbol}  (with ${slip}% slippage tolerance)`,
+                        `  Price impact: ${priceImpactPct}%${highImpact ? "  🚨 HIGH IMPACT — pool may be shallow" : ""}`,
+                        ``,
+                        `Reply with: dex_swap from=${tIn.symbol} to=${tOut.symbol} amount=${amount} confirm=true`,
+                        `(or rephrase: "yes, execute the ${tIn.symbol}→${tOut.symbol} swap")`,
+                        ``,
+                        `This is irreversible. Verify the amounts above.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    // Step 5: execute
+    try {
+        const res = await api("/dex/swap", "POST", {
+            from_token: tIn.symbol,
+            to_token: tOut.symbol,
+            amount_in: amountInBase,
+            min_amount_out: q.minimum_amount_out,
+            wallet_address: activeWalletAddress,
+            slippage_tolerance: slip,
+            ...(authToken ? { auth_token: authToken } : {}),
+        });
+        if (res.success === false || res.ok === false) {
+            return { content: [{ type: "text", text: `Swap failed: ${res.error || 'unknown error'}` }] };
+        }
+        const data = res.data || res;
+        const txHash = data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+        const filledOutBase = data.amount_out || q.amount_out;
+        const filledOutDisplay = fromBaseUnits(String(filledOutBase), tOut.decimals);
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `✅ Swap submitted!`,
+                        ``,
+                        `  Sold:     ${amount} ${tIn.symbol}`,
+                        `  Received: ${filledOutDisplay.toFixed(6)} ${tOut.symbol}`,
+                        `  Tx hash:  ${txHash}`,
+                        ``,
+                        `The swap will be reflected in your balance within ~1 second (next block).`,
+                        `Check balance with: get_balance address=${activeWalletAddress}`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Swap submission failed: ${e.message}\n\nThe wallet may need re-authentication or have insufficient balance.` }] };
+    }
+});
+// ============================================================
+// TOKEN TRANSFER TOOL — send any DEX-listed token
+// ============================================================
+server.tool("send_token", "Send a non-QUG token (e.g., QUGUSD, wBTC, wETH) from your authenticated wallet to another address. Same auth + confirmation pattern as send_qug. Use this for any token returned by dex_list_tokens.", {
+    token: z.string().describe("Token symbol (QUGUSD, wBTC, wZEC, wIRON, wETH, etc.) — see dex_list_tokens"),
+    to_address: z.string().describe("Recipient qnk... address"),
+    amount: z.number().positive().describe("Amount in display units (e.g., 25.5 for 25.5 QUGUSD)"),
+    confirm: z.boolean().optional().describe("Set true to execute; without it, returns confirmation prompt"),
+}, async ({ token, to_address, amount, confirm }) => {
+    // Auth gate (same as send_qug)
+    if (!isSessionValid()) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send tokens:`,
+                        ``,
+                        `  1. Say "authenticate wallet"`,
+                        `  2. Open the link in your browser and approve`,
+                        `  3. Say "check auth"`,
+                        `  4. Then retry sending`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    refreshSession();
+    // Validate address format
+    if (!to_address.startsWith("qnk") || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
+        return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex chars (67 total).` }] };
+    }
+    if (amount <= 0) {
+        return { content: [{ type: "text", text: `Amount must be > 0.` }] };
+    }
+    // Look up token decimals + verify it's tradeable
+    let tokens;
+    try {
+        tokens = await fetchTokens();
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] };
+    }
+    const t = findTokenBySymbol(tokens, token);
+    if (!t) {
+        return { content: [{ type: "text", text: `Unknown token "${token}". Run dex_list_tokens to see what's available.` }] };
+    }
+    // Don't allow sending QUG through this — use send_qug for native to keep audit trails clean
+    if (t.symbol.toUpperCase() === "QUG") {
+        return { content: [{ type: "text", text: `For native QUG, use send_qug instead (separate code path, separate per-session limits).` }] };
+    }
+    // Confirmation step
+    if (!confirm) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `⚠️ TOKEN TRANSFER CONFIRMATION REQUIRED`,
+                        ``,
+                        `  From:   ${activeWalletAddress.slice(0, 20)}...`,
+                        `  To:     ${to_address.slice(0, 20)}...`,
+                        `  Send:   ${amount} ${t.symbol}  (${t.contract_type})`,
+                        ``,
+                        `Caveat: ${tokenCaveat(t)}`,
+                        ``,
+                        `Reply: send_token token=${t.symbol} to_address=${to_address} amount=${amount} confirm=true`,
+                        `(or rephrase: "yes, send ${amount} ${t.symbol}")`,
+                        ``,
+                        `This is irreversible. Verify above.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    // Execute
+    try {
+        const res = await api("/transactions/send", "POST", {
+            from: activeWalletAddress,
+            to: to_address,
+            amount: amount, // f64; the handler does decimal scaling per token_type
+            token_type: t.symbol,
+            ...(authToken ? { auth_token: authToken } : {}),
+        });
+        if (!res.success) {
+            return { content: [{ type: "text", text: `Token transfer failed: ${res.error || 'unknown error'}` }] };
+        }
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `✅ ${t.symbol} transfer submitted!`,
+                        ``,
+                        `  From:   ${activeWalletAddress.slice(0, 16)}...`,
+                        `  To:     ${to_address.slice(0, 16)}...`,
+                        `  Amount: ${amount} ${t.symbol}`,
+                        res.data?.tx_id ? `  Tx id:  ${res.data.tx_id}` : ``,
+                        ``,
+                        `Will be included in the next block (~1 second).`,
+                    ].filter(Boolean).join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Token send failed: ${e.message}` }] };
+    }
+});
+// ============================================================
+// AUTOMATED DECENTRALIZATION TEST — verify_node_consistency
+// ============================================================
+//
+// Validates that two Quillon nodes have produced bit-identical balance state.
+// Uses the public /api/v1/integrity/balance-root endpoint (which returns a
+// BLAKE3 fingerprint over all non-zero wallet balances) so no auth is needed.
+//
+// If the hashes match at the same height, every wallet on the network has the
+// same QUG balance on both nodes. This is the consensus correctness property
+// that BAL-001 (activation block 20,000,000) will enforce at the protocol layer.
+server.tool("verify_node_consistency", "Compare two Quillon nodes' balance state and report whether they agree. Uses /api/v1/integrity/balance-root — no auth needed. The primary node defaults to quillon.xyz (Epsilon); the secondary defaults to localhost:8080 (a local node you're running). Pass URLs to compare other nodes. Output includes a verdict, both nodes' wallet counts, total supplies, balance_root_hex values, and a per-node height.", {
+    primary_url: z.string().optional().describe("Primary node API base URL (default: https://quillon.xyz/api/v1)"),
+    secondary_url: z.string().optional().describe("Secondary node API base URL (default: http://localhost:8080/api/v1)"),
+}, async ({ primary_url, secondary_url }) => {
+    const primary = primary_url || "https://quillon.xyz/api/v1";
+    const secondary = secondary_url || "http://localhost:8080/api/v1";
+    async function fetchIntegrity(baseUrl) {
+        const url = `${baseUrl.replace(/\/$/, "")}/integrity/balance-root`;
+        const res = await fetch(url, { redirect: "error" });
+        if (!res.ok)
+            throw new Error(`${url} returned HTTP ${res.status}`);
+        return await res.json();
+    }
+    let p, s;
+    try {
+        p = await fetchIntegrity(primary);
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Could not reach primary ${primary}: ${e.message}` }] };
+    }
+    try {
+        s = await fetchIntegrity(secondary);
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Could not reach secondary ${secondary}: ${e.message}` }] };
+    }
+    if (!p.ok || !p.data)
+        return { content: [{ type: "text", text: `Primary returned invalid integrity response.` }] };
+    if (!s.ok || !s.data)
+        return { content: [{ type: "text", text: `Secondary returned invalid integrity response.` }] };
+    const pd = p.data, sd = s.data;
+    const matchRoot = pd.balance_root_hex === sd.balance_root_hex;
+    const matchHeight = pd.at_height === sd.at_height;
+    const matchWallets = pd.wallet_count === sd.wallet_count;
+    const matchSupply = pd.total_supply_base_units === sd.total_supply_base_units;
+    const passed = matchRoot && matchHeight && matchWallets && matchSupply;
+    const lines = [
+        `=== Node Consistency Check ===`,
+        ``,
+        `PRIMARY:    ${primary}`,
+        `  height:           ${pd.at_height.toLocaleString()}`,
+        `  wallet_count:     ${pd.wallet_count}`,
+        `  total_supply:     ${pd.total_supply_display} QUG`,
+        `  balance_root_hex: ${pd.balance_root_hex}`,
+        ``,
+        `SECONDARY:  ${secondary}`,
+        `  height:           ${sd.at_height.toLocaleString()}`,
+        `  wallet_count:     ${sd.wallet_count}`,
+        `  total_supply:     ${sd.total_supply_display} QUG`,
+        `  balance_root_hex: ${sd.balance_root_hex}`,
+        ``,
+        `Comparison:`,
+        `  heights match:        ${matchHeight ? "✓" : "✗ (Δ " + Math.abs(pd.at_height - sd.at_height) + " blocks — secondary may still be syncing)"}`,
+        `  wallet counts match:  ${matchWallets ? "✓" : `✗ (Δ ${Math.abs(pd.wallet_count - sd.wallet_count)})`}`,
+        `  total supply matches: ${matchSupply ? "✓" : "✗"}`,
+        `  balance_root matches: ${matchRoot ? "✓ (state is bit-identical)" : "✗ (DIVERGENCE — nodes disagree about wallet state)"}`,
+        ``,
+    ];
+    if (passed) {
+        lines.push(`✅ VERDICT: PASS — both nodes have bit-identical balance state.`, ``, `Every wallet on the network has the same QUG balance on both nodes. This is`, `the consensus correctness property that BAL-001 will enforce at the protocol`, `layer starting at block 20,000,000.`, ``, `Note: this check covers native QUG balances. Per-token (QUGUSD, wBTC, etc.)`, `consistency requires individual wallet queries (use the web wallet at quillon.xyz`, `or per-wallet auth to verify specific token amounts).`);
+    }
+    else if (!matchHeight) {
+        lines.push(`⏳ VERDICT: PENDING — secondary is at a different height. Either it's still`, `syncing or it's serving stale data. Re-run after the heights converge.`, ``, `If both nodes are caught up to network tip but still diverge, that's a real`, `consensus problem — file an issue immediately.`);
+    }
+    else {
+        lines.push(`❌ VERDICT: DIVERGENCE — same height, different state.`, ``, `This is a real consensus problem. One of the two nodes has wrong wallet state.`, `Compare with a third node (e.g., a freshly-synced Docker container) to`, `triangulate which one is correct. If multiple nodes disagree on the same`, `chain height, the network has split.`);
+    }
+    return { content: [{ type: "text", text: lines.join("\n") }] };
 });
 // ============================================================
 // START SERVER

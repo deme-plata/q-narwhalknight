@@ -922,6 +922,13 @@ pub struct SwapResult {
     pub amount_in: String,
     pub amount_out: String,
     pub gas_used: u64,
+    /// v10.10.1: optional quality-score breakdown rendered in SwapSuccessModal.
+    /// Computed via agent_panel::scorers::SwapScorer. Additive — clients that
+    /// don't render the field continue to work unchanged.
+    /// NOTE: dex_integration_api.rs is declared in main.rs (bin), so it references
+    /// the lib's agent_panel module via the crate name `q_api_server::`, not `crate::`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<q_api_server::agent_panel::scorers::ScoreReport>,
 }
 
 pub async fn execute_swap(
@@ -1105,6 +1112,34 @@ pub async fn execute_swap(
         state.libp2p_discovery.as_ref(),
     ).await;
 
+    let swap_score = {
+        use q_api_server::agent_panel::scorers::{SwapContext, SwapRecord, SwapScorer};
+        let amount_in_qug = amount_in as f64 / 1e24;
+        let amount_out_qug = amount_out as f64 / 1e24;
+        let reserve_in_qug = reserve_in as f64 / 1e24;
+        let reserve_out_qug = reserve_out as f64 / 1e24;
+        let spot_price = if reserve_in_qug > 0.0 { reserve_out_qug / reserve_in_qug } else { 0.0 };
+        let post_in = reserve_in_qug + amount_in_qug;
+        let post_out = reserve_out_qug - amount_out_qug;
+        let post_price = if post_in > 0.0 { post_out / post_in } else { 0.0 };
+        let expected_out_qug = amount_in_qug * spot_price;
+        let fee_paid_qug = amount_in_qug * 0.003;
+        let record = SwapRecord {
+            amount_in: amount_in_qug,
+            amount_out: amount_out_qug,
+            expected_out: expected_out_qug,
+            fee_paid: fee_paid_qug,
+        };
+        let ctx = SwapContext {
+            reserve_in: reserve_in_qug,
+            reserve_out: reserve_out_qug,
+            pre_swap_price: spot_price,
+            post_swap_price: post_price,
+            volatility_ratio: 0.0,
+        };
+        SwapScorer::score_swap(&record, &ctx)
+    };
+
     let swap_result = SwapResult {
         transaction_hash: tx_hash.clone(),
         status: match submission_result.status {
@@ -1115,6 +1150,7 @@ pub async fn execute_swap(
         amount_in: request.amount_in,
         amount_out: amount_out.to_string(),
         gas_used: 125000,
+        score: Some(swap_score),
     };
 
     tracing::info!(
@@ -1482,6 +1518,7 @@ pub async fn get_swap_status(
                     amount_in: "0".to_string(), // TODO: Extract from transaction
                     amount_out: "0".to_string(), // TODO: Extract from transaction
                     gas_used: 21000,            // TODO: Get actual gas used
+                    score: None,                // get_swap_status doesn't have reserve context
                 };
                 return Ok(Json(DexApiResponse::success(swap_result)));
             }

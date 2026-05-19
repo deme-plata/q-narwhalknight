@@ -66,6 +66,9 @@ mod ai_transaction_assistant;
 // mod attachment_api;
 // ✅ v1.0.3-beta - Block Production Loop v2 with Comprehensive Stall Protection
 mod block_production_v2;
+// v10.10.0: agent_panel module is declared in lib.rs (pub mod agent_panel);
+// main.rs accesses it via q_api_server::agent_panel::* to avoid duplicate
+// compilation units. Don't add `mod agent_panel;` here.
 // ✅ Chat/Voice/Video signaling server — routes SDP/ICE between browser peers
 use q_api_server::signaling_server::{signaling_diag_handler, ws_signal_handler, SignalingState};
 // ⛏️  Integrated mining removed v7.1.3 - use external q-miner binary instead
@@ -511,9 +514,9 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
     if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
-    else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
-    else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH which caused WrongPeerId rejections)
-    else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
+    else if url.contains("5.79.79.158") { Some("12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt") }     // Delta
+    else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp which caused WrongPeerId rejections)
+    else if url.contains("185.182.185.227") { Some("12D3KooWRQtxSd6hzfnvMN8jfuMQM4tVTbLXkAr1f3rtfG3baqUv") } // Beta (verified 2026-04-25)
     else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
     else { None }
 }
@@ -524,11 +527,11 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     // Known bootstrap nodes always get automatic approval
     let bootstrap_nodes = [
         "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM", // Server Epsilon (10Gbit supernode, verified 2026-04-25)
-        "12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93", // Server Beta (verified 2026-04-25)
+        "12D3KooWRQtxSd6hzfnvMN8jfuMQM4tVTbLXkAr1f3rtfG3baqUv", // Server Beta (verified 2026-04-25)
         "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
         "12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U", // Server Gamma (current peer ID, verified 2026-05-16)
-        "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
-        "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
+        "12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
+        "12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
         "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
     ];
@@ -2311,7 +2314,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .long("network")
                 .value_name("NETWORK")
                 .help("Network to join: testnet or mainnet [env: Q_NETWORK_ID]")
-                .default_value("testnet"),
+                .default_value("mainnet-genesis"), // v10.10.2: was "testnet" — fresh installs now join mainnet by default
         )
         .arg(
             Arg::new("experimental-fast-sync")
@@ -2393,7 +2396,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // already env-first per the Phase-8 priority fix (memory.md).
         let network = std::env::var("Q_NETWORK_ID").ok()
             .or_else(|| matches.get_one::<String>("network").cloned())
-            .unwrap_or_else(|| "testnet (default)".to_string());
+            .unwrap_or_else(|| "mainnet-genesis (default)".to_string());
         let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data (default)".to_string());
 
         boot_step(6, '✓', "Arguments parsed", &format!("port={} tui={}", port_str, if tui_on { "on" } else { "off" }));
@@ -2879,7 +2882,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let pruning_mode = std::env::var("Q_PRUNING_MODE").unwrap_or_else(|_| "disabled".to_string());
         let cache_mb = std::env::var("ROCKSDB_BLOCK_CACHE_MB").unwrap_or_else(|_| "auto".to_string());
         let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "default".to_string());
-        let tor_timeout = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT").unwrap_or_else(|_| "120".to_string());
+        let tor_timeout = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT").unwrap_or_else(|_| "5".to_string()); // v10.10.2: 120s→5s default
         let total_ram_mb = sysinfo::System::new_all().total_memory() / 1024 / 1024;
 
         // Read cgroup limits
@@ -6298,79 +6301,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
         info!("✅ libp2p network event loop spawned with storage and block sync configured");
 
-        // v10.9.41: spawn the producer-hook task that extends the lattice tip
-        // proof on every contiguous-height advance. Decoupled from save_qblock
-        // (which lives in q-storage, no dep on q-recursive-proofs) — instead we
-        // poll the atomic at 500ms and catch up on whatever was committed.
-        // Cost in steady state: 1 BLAKE3-XOF per new block (~1 µs), so even a
-        // 10-block-per-tick burst is sub-millisecond. On startup the loop walks
-        // from genesis (height 0, all-zero state) up to current contiguous
-        // height — for a fully-synced 18M-block chain that's ~18 s of warmup,
-        // amortised once. Future v10.9.42+: persist to RocksDB so the warmup
-        // is skipped on subsequent restarts.
-        {
-            // AppState is owned (not Arc-wrapped) at this point, so we clone just
-            // the Arc'd fields the producer-hook task needs.
-            let proof_slot = state.lattice_tip_proof.clone();
-            let height_atomic = state.contiguous_height_atomic.clone();
-            let storage = state.storage_engine.clone();
-            tokio::spawn(async move {
-                info!("🔐 [LATTICE-TIP] Producer-hook task starting (anchors at genesis, extends per block)");
-                // Anchor at genesis with the all-zero state root. We could query the
-                // genesis block for its real state_root here, but a constant anchor
-                // is simpler and the verifier just needs the same constant.
-                let mut current_proof = q_recursive_proofs::tip_anchor(0, [0u8; 32]);
-                {
-                    let mut guard = proof_slot.write().await;
-                    *guard = Some(current_proof.clone());
-                }
-                let mut last_extended_height = 0u64;
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                    let contiguous = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
-                    if contiguous <= last_extended_height {
-                        continue;
-                    }
-                    // Bound per-tick work so the warmup walk doesn't starve
-                    // other tasks. 1000 blocks * ~1 µs/block = 1 ms per tick.
-                    let target = contiguous.min(last_extended_height + 1000);
-                    for h in (last_extended_height + 1)..=target {
-                        match storage.get_qblock_by_height(h).await {
-                            Ok(Some(block)) => {
-                                current_proof = q_recursive_proofs::tip_extend(
-                                    &current_proof,
-                                    h,
-                                    block.header.state_root,
-                                    block.header.prev_block_hash,
-                                    block.header.tx_root,
-                                );
-                                last_extended_height = h;
-                            }
-                            Ok(None) => {
-                                if h % 1000 == 0 {
-                                    warn!("🔐 [LATTICE-TIP] block {} missing — skipping in proof chain", h);
-                                }
-                                last_extended_height = h;
-                            }
-                            Err(e) => {
-                                warn!("🔐 [LATTICE-TIP] failed to load block {}: {}", h, e);
-                                break; // retry next tick
-                            }
-                        }
-                    }
-                    {
-                        let mut guard = proof_slot.write().await;
-                        *guard = Some(current_proof.clone());
-                    }
-                    if last_extended_height % 10_000 == 0 && last_extended_height > 0 {
-                        info!(
-                            "🔐 [LATTICE-TIP] extended proof through height {} (anchor={}, transcript advance)",
-                            last_extended_height, current_proof.anchor_height
-                        );
-                    }
-                }
-            });
-        }
+        // v10.9.41 lattice-tip-proof producer-hook task removed for v10.10.0
+        //   — symbols q_recursive_proofs::tip_anchor / tip_extend never existed in the
+        //     published crate; this block was dead. Re-add when recursive-proofs lands
+        //     real tip_anchor/tip_extend (tracked: PR #80-82 follow-up).
+
 
         // 🚀 v1.0.3-beta: CRITICAL FIX #2 - Add P2P peer height announcements
         // BUG: v1.0.2-beta NEVER sends height announcements, causing network_height=0 on all fresh nodes

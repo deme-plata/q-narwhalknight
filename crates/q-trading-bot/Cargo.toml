@@ -10,6 +10,10 @@ repository.workspace = true
 name = "q-trading-bot"
 path = "src/main.rs"
 
+[[bin]]
+name = "send_with_memo"
+path = "src/bin/send_with_memo.rs"
+
 [dependencies]
 # Core dependencies
 tokio = { workspace = true, features = ["full"] }
@@ -61,6 +65,8 @@ blake3 = "1.5"
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+sha3 = { workspace = true }
+ed25519-dalek = { workspace = true }
 base64 = "0.22"
 
 # Q-NarwhalKnight types

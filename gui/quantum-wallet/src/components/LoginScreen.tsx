@@ -2112,6 +2112,28 @@ cargo build --release --package q-api-server
                 </button>
               </div>
 
+              {/* v10.10.0: Benchmark-mode browser mining quick-launch (no install required) */}
+              <motion.a
+                href="/webgpu-miner/index.html?benchmark=true"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full p-4 mb-3 bg-gradient-to-br from-purple-500/20 to-cyan-500/20 hover:from-purple-500/30 hover:to-cyan-500/30 border border-purple-500/40 hover:border-purple-500/60 rounded-xl transition-all flex items-center gap-4 group cursor-pointer"
+                whileHover={{ scale: 1.02, x: 4 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <div className="w-10 h-10 rounded-lg bg-purple-500/30 flex items-center justify-center shrink-0">
+                  <Zap className="w-5 h-5 text-purple-300" />
+                </div>
+                <div className="text-left flex-1">
+                  <div className="font-bold text-purple-100 flex items-center gap-2">
+                    Test your hashrate (browser, no install)
+                    <span className="text-[10px] px-1.5 py-0.5 bg-purple-500/30 text-purple-200 rounded font-normal">WebGPU</span>
+                  </div>
+                  <div className="text-xs text-purple-300/70">Runs SHA3 benchmark in your browser tab — see ~MH/s before downloading the real miner</div>
+                </div>
+                <span className="text-purple-300 text-sm font-mono opacity-60 group-hover:opacity-100 transition-opacity">→</span>
+              </motion.a>
+
               {/* Platform Downloads */}
               <div className="space-y-3">
                 {/* Linux x64 */}

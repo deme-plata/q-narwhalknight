@@ -9,6 +9,8 @@ import SmartContractModal from './SmartContractModal';
 import NetworkMapModal from './NetworkMapModal';
 import ThemeChooserModal from './ThemeChooserModal';
 import MinerLinkModal from './MinerLinkModal';
+import WebGpuMinerModal from './WebGpuMinerModal';
+import AgentTerminalModal from './AgentTerminalModal';
 import PapersLibraryModal from './PapersLibraryModal';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
@@ -318,6 +320,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
   const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  const [showWebGpuMiner, setShowWebGpuMiner] = useState(false);
+  const [showAgentTerminal, setShowAgentTerminal] = useState(false);
   const [showPapersLibrary, setShowPapersLibrary] = useState(false);
   const [showTaxModal, setShowTaxModal] = useState(false);
   const minerLink = useMinerLink(walletAddr || null);
@@ -1485,6 +1489,30 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           <div className="h-8 w-px bg-gradient-to-b from-transparent via-amber-500/30 to-transparent" />
 
           <div className="flex items-center gap-3">
+            {/* v10.10.0: WebGPU browser-mining quick-launch */}
+            <motion.button
+              className="flex items-center gap-1.5 px-2 py-1 bg-purple-500/10 border border-purple-500/30 rounded-lg cursor-pointer hover:bg-purple-500/20 transition-colors"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title="Mine QUG in your browser tab via WebGPU (with CPU fallback)"
+              onClick={() => setShowWebGpuMiner(true)}
+            >
+              <span className="text-base leading-none">⚒️</span>
+              <span className="text-purple-300 text-xs font-medium">WebGPU</span>
+            </motion.button>
+
+            {/* v10.10.0: Agent terminal quick-launch */}
+            <motion.button
+              className="flex items-center gap-1.5 px-2 py-1 bg-cyan-500/10 border border-cyan-500/30 rounded-lg cursor-pointer hover:bg-cyan-500/20 transition-colors"
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              title="Open the agent terminal — Claude Code MCP in your browser (preview)"
+              onClick={() => setShowAgentTerminal(true)}
+            >
+              <Code className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-cyan-300 text-xs font-medium">Terminal</span>
+            </motion.button>
+
             {/* v3.4.16-beta: Tor privacy indicator */}
             {isTorConnected && (
               <motion.div
@@ -1733,7 +1761,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
-            const isMaster = walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            // v10.10.0: case-insensitive + trim — wallet strings can vary in casing across storage layers
+            const isMaster = (walletAddr || '').trim().toLowerCase().replace(/^qnk/, '').replace(/^qug/, '') === MASTER_WALLET;
             if (!walletAddr) return null;
             return (
               <>
@@ -1756,7 +1785,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           {/* v9.0.3: Node Settings - Visible for admin wallet OR master wallet */}
           {(() => {
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
-            const isMasterOrAdmin = isNodeAdmin || walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            // v10.10.0: case-insensitive + trim
+            const isMasterOrAdmin = isNodeAdmin || (walletAddr || '').trim().toLowerCase().replace(/^qnk/, '').replace(/^qug/, '') === MASTER_WALLET;
             if (!isMasterOrAdmin || !walletAddr) return null;
             return (
               <motion.button
@@ -2542,6 +2572,20 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         isOpen={showMinerLinkModal}
         onClose={() => setShowMinerLinkModal(false)}
         minerLink={minerLink}
+      />
+
+      {/* v10.10.0: Browser WebGPU miner (PR #94 companion) */}
+      <WebGpuMinerModal
+        isOpen={showWebGpuMiner}
+        onClose={() => setShowWebGpuMiner(false)}
+        walletAddress={walletAddr}
+      />
+
+      {/* v10.10.0: Agent Terminal — Claude Code MCP in browser (preview) */}
+      <AgentTerminalModal
+        isOpen={showAgentTerminal}
+        onClose={() => setShowAgentTerminal(false)}
+        walletAddress={walletAddr}
       />
 
       {/* Research Library Modal — 78 whitepapers organized by category */}
