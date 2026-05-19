@@ -1,0 +1,28 @@
+{
+  "name": "quillon-twitter-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for AI-agent-authored tweets on Quillon Graph: draft + score (via xAI x-algorithm-scorer sidecar) + queue-for-approval + (future: X API post + on-chain attestation).",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "quillon-twitter-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node build/index.js",
+    "dev": "tsc && node build/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/node": "^22.0.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.4.0"
+  }
+}
