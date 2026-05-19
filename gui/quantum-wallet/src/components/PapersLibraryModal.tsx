@@ -13,6 +13,7 @@ interface Paper {
 
 const CATEGORIES = [
   'All',
+  'Vision',
   'Core Protocol',
   'Cryptography',
   'Privacy',
@@ -25,6 +26,14 @@ const CATEGORIES = [
 type Category = (typeof CATEGORIES)[number];
 
 const PAPERS: Paper[] = [
+  // ── Vision ──
+  { title: 'State of the Art (May 2026)', description: 'Multi-AI collaboration narrative: the agent that holds money, Phase 1 honesty model, cross-model engineering at the AI/crypto intersection', score: 10, category: 'Vision', filename: 'state-of-the-art-2026-05-18.pdf' },
+  { title: 'Agentic Money on Quillon Graph', description: 'How autonomous AI agents become economic principals on Quillon Graph: MCP wallet primitives, Apache-2.0 commons framing, the first closed agentic loop', score: 10, category: 'Vision', filename: 'agentic-money-quillon-graph.pdf' },
+  { title: 'The Entangled DAG', description: 'Formal structural analogy between quantum measurement, neural inference, and DAG-Knight consensus — with falsifiable prediction and explicit AI-authorship statement', score: 10, category: 'Vision', filename: 'entangled-dag-2026.pdf' },
+  { title: 'Five Mirrors', description: 'Five historical analogues for Quillon Graph: AC moment, Pacioli, Moog, Cambrian survivors, wide-body jet. The category-of-one phase before a name exists', score: 9, category: 'Vision', filename: 'five-mirrors-2026.pdf' },
+  { title: 'Speed at the Limit', description: 'Twenty comparisons between cryptographic networks and racing cars across 130 years of speed history; notes on what it feels like to move faster than your species', score: 8, category: 'Vision', filename: 'speed-twenty-comparisons-2026.pdf' },
+  { title: 'Cosmic Flux Philosophy', description: 'Philosophical foundation for treating blockchain state as cosmic flux — time, memory, and immutability in distributed consensus', score: 7, category: 'Vision', filename: 'cosmic-flux-philosophy.pdf' },
+
   // ── Core Protocol ──
   { title: 'Formal Safety & Liveness Proofs', description: 'Formal safety and liveness proofs for DAG-Knight consensus under partial synchrony with K-parameter finality bounds', score: 10, category: 'Core Protocol', filename: 'dagknight-formal-safety-liveness.pdf' },
   { title: 'DAG-Knight Architecture', description: 'Detailed architecture of the DAG-Knight consensus protocol with quantum anchor election', score: 10, category: 'Core Protocol', filename: 'dagknight-architecture-detailed.pdf' },
@@ -35,6 +44,9 @@ const PAPERS: Paper[] = [
   { title: 'Block Validation & Rewards', description: 'Mainnet block reward schedule, validation rules, and issuance mechanics', score: 8, category: 'Core Protocol', filename: 'mainnet-rewards.pdf' },
   { title: 'Block Rewards (Draft)', description: 'Draft specification for mainnet block reward distribution curves', score: 6, category: 'Core Protocol', filename: 'mainnet-block-rewards-DRAFT.pdf' },
   { title: 'Deterministic Balance Migration', description: 'Mathematically rigorous framework for ledger state recovery via first-principles chain replay with proportional emission normalization (v8.8.6)', score: 9, category: 'Core Protocol', filename: 'deterministic-balance-migration-v886.pdf' },
+  { title: 'Q-NarwhalKnight Whitepaper (May 2026)', description: 'Current canonical whitepaper covering DAG-Knight consensus, post-quantum cryptography roadmap, and emission economics as of May 2026', score: 10, category: 'Core Protocol', filename: 'qnk-whitepaper-2026-05-07.pdf' },
+  { title: 'Q-NarwhalKnight Combined Whitepaper', description: 'Combined comprehensive whitepaper bundling all subsystem specifications: consensus, networking, cryptography, economics, and applications', score: 9, category: 'Core Protocol', filename: 'qnk-combined-whitepaper-2026-05-07.pdf' },
+  { title: 'Quillon Graph Project Report v4', description: 'Fourth iteration of the comprehensive project report — current architecture, deployed components, and active engineering tracks', score: 8, category: 'Core Protocol', filename: 'quillon-graph-project-report-v4.pdf' },
 
   // ── Cryptography ──
   { title: 'Recursive SNARKs & Weak Subjectivity', description: 'Eliminating weak subjectivity through recursive SNARK proofs for trustless sync', score: 10, category: 'Cryptography', filename: 'recursive-snark-weak-subjectivity-elimination.pdf' },
@@ -45,6 +57,9 @@ const PAPERS: Paper[] = [
   { title: 'K-Parameter Cryptographic Trust', description: 'Original K-parameter trust model for consensus parameterization', score: 8, category: 'Cryptography', filename: 'k-parameter-cryptographic-trust.pdf' },
   { title: 'Genus-2 Jacobian VDF Mining', description: 'Novel VDF construction using genus-2 hyperelliptic curve Jacobians for mining', score: 10, category: 'Cryptography', filename: 'genus2-jacobian-vdf-mining-whitepaper.pdf' },
   { title: 'K-Parameter Quantum Frontiers', description: 'Extending the K-parameter to quantum computing frontiers and post-quantum readiness', score: 9, category: 'Cryptography', filename: 'k-parameter-quantum-frontiers.pdf' },
+  { title: 'Genus-2 VDF Dual-Lane Mining v3', description: 'Third iteration of the genus-2 hyperelliptic VDF mining construction with dual-lane proof acceleration and improved batch verification', score: 9, category: 'Cryptography', filename: 'genus2-vdf-dual-lane-mining-v3.pdf' },
+  { title: 'Recursive Lattice SNARK Whitepaper', description: 'Recursive zero-knowledge SNARK construction over lattice-based commitments for post-quantum verifiable computation (2026-05-13)', score: 10, category: 'Cryptography', filename: 'quillon-recursive-lattice-snark-whitepaper-2026-05-13.pdf' },
+  { title: 'Recursive Lattice SNARK v2', description: 'Revised recursive lattice SNARK construction with tighter parameters and explicit prover-side optimization (2026-05-13)', score: 10, category: 'Cryptography', filename: 'quillon-recursive-lattice-snark-whitepaper-v2-2026-05-13.pdf' },
 
   // ── Privacy ──
   { title: 'Privacy Layer v3', description: 'Network-layer privacy through Tor-integrated dedicated circuits — comprehensive privacy architecture for quantum-resistant blockchain infrastructure', score: 10, category: 'Privacy', filename: 'qnk-privacy-layer-whitepaper.pdf' },
@@ -64,6 +79,8 @@ const PAPERS: Paper[] = [
   { title: 'Quillon Vault', description: 'Decentralized vault system for yield-bearing QUG deposits with insurance', score: 8, category: 'Economics', filename: 'quillon-vault-whitepaper.pdf' },
   { title: 'Bank Aegis QL', description: 'Institutional-grade banking layer with quantum-secure custody and settlement', score: 8, category: 'Economics', filename: 'quillon_bank_aegis_ql_whitepaper.pdf' },
   { title: 'The Quantum Millionaire Mind', description: 'Secrets of blockchain wealth from the Q-NarwhalKnight founder — rewriting your financial blueprint with Rust, u128 arithmetic, and 4,000 tests', score: 8, category: 'Economics', filename: 'the-quantum-millionaire-mind.pdf' },
+  { title: 'ASIC 12nm Cost Model v1', description: 'Detailed cost-modelling exercise for a 12nm ASIC implementation of the Genus-2 VDF mining circuit, including wafer economics and break-even analysis', score: 9, category: 'Economics', filename: 'asic-12nm-cost-model-v1.pdf' },
+  { title: 'Trading Water Whitepaper', description: 'Continuous-DCA "water-bot" trading strategy on Quillon Graph DEX: design, safety policy, and observed P&L on testnet pools', score: 7, category: 'Economics', filename: 'trading-water-whitepaper.pdf' },
 
   // ── Infrastructure ──
   { title: 'Networking Whitepaper', description: 'libp2p-based networking stack with gossipsub, Kademlia DHT, and Tor support', score: 9, category: 'Infrastructure', filename: 'q-narwhalknight-networking-whitepaper.pdf' },
@@ -78,6 +95,8 @@ const PAPERS: Paper[] = [
   { title: 'Q Miner', description: 'Mining client architecture, proof-of-work algorithms, and pool protocol', score: 8, category: 'Infrastructure', filename: 'q-miner-whitepaper.pdf' },
   { title: 'Node Operator Guide v2', description: 'Zero-config setup, fee structure (0.1% block rewards + DEX protocol fees), admin wallet linking, and OAuth2 wallet integration', score: 9, category: 'Infrastructure', filename: 'qnk-node-operator-guide.pdf' },
   { title: 'Q-Flux Reverse Proxy Architecture', description: 'Architecture of a blockchain-aware reverse proxy with worker-per-core design, AIMD concurrency control, and lock-free connection pooling', score: 9, category: 'Infrastructure', filename: 'q-flux-reverse-proxy.pdf' },
+  { title: 'Q-Flux & Q-Queue Project Report', description: 'Combined project report on the q-flux reverse proxy and the q-queue task scheduler — design, deployment status, and integration with the API server', score: 8, category: 'Infrastructure', filename: 'q-flux-q-queue-project-report.pdf' },
+  { title: 'Balance Incident Report (April 2026)', description: 'Post-mortem of the April 2026 balance-replay incident on Epsilon: root cause, immediate mitigation, and the four non-negotiable balance-integrity rules now in CLAUDE.md', score: 9, category: 'Infrastructure', filename: 'balance-incident-report-2026-04-29.pdf' },
 
   // ── Applications ──
   { title: 'VM & DEX Whitepaper', description: 'WASM virtual machine and decentralized exchange with AMM liquidity pools', score: 9, category: 'Applications', filename: 'q-narwhalknight-vm-dex-whitepaper.pdf' },
@@ -89,6 +108,8 @@ const PAPERS: Paper[] = [
   { title: 'Distributed AI Technical Review', description: 'Technical review of distributed AI inference capabilities within Q-NarwhalKnight', score: 8, category: 'Applications', filename: 'distributed-ai-technical-review.pdf' },
   { title: 'QUG v1 Pocket Supercomputer', description: 'Edge computing node design for mobile-first blockchain participation', score: 7, category: 'Applications', filename: 'qug-v1-pocket-supercomputer.pdf' },
   { title: 'Quillion Graph Complete', description: 'Complete Quillion Graph ontology and knowledge-graph-on-chain architecture', score: 9, category: 'Applications', filename: 'quillion-graph-complete-whitepaper.pdf' },
+  { title: 'Agent Wallet as a Service — Spec', description: 'Product specification for a hosted Agent-Wallet service: 20 must/nice features (F-01 through F-20), 12-week roadmap, and pricing tiers (Free / $9 / $99 / $2000+)', score: 9, category: 'Applications', filename: 'agent-wallet-as-a-service-kravspec.pdf' },
+  { title: 'Crown Ash Whitepaper', description: 'Crown Ash hardware mining client design and integration pathway for Quillon Graph proof-of-work', score: 7, category: 'Applications', filename: 'crown-ash-whitepaper.pdf' },
 
   // ── Physics ──
   { title: 'K-Parameter Unified Theory', description: 'Unified K-parameter whitepaper bridging quantum physics and consensus mechanics', score: 10, category: 'Physics', filename: 'K-Parameter_Whitepaper.pdf' },
@@ -104,6 +125,11 @@ const PAPERS: Paper[] = [
   { title: 'Water Robots Universe Mission', description: 'Speculative water-robot mission framework with K-parameter extensions', score: 6, category: 'Physics', filename: 'water-robots-universe-mission.pdf' },
   { title: 'Water Robot K-Parameter Appendix', description: 'Appendix extending K-parameter theory to aquatic robotic systems', score: 6, category: 'Physics', filename: 'WATER_ROBOT_K_PARAMETER_APPENDIX.pdf' },
   { title: 'Quantum Water Robots Kingdom', description: 'Quantum-mechanical modeling of water robot swarm coordination', score: 5, category: 'Physics', filename: 'quantum-water-robots-kingdom.pdf' },
+  { title: 'Theoretical Physics Consensus (Susskind)', description: 'Theoretical physics framework for consensus mechanics drawing on Leonard Susskind\'s work on holographic principles and the eternal ledger', score: 9, category: 'Physics', filename: 'theoretical-physics-consensus-v3-susskind.pdf' },
+  { title: 'Theoretical Physics Consensus (Lloyd)', description: 'Fourth revision of the theoretical-physics consensus framework, drawing on Seth Lloyd\'s computational universe model for cosmological state-machine analogues', score: 9, category: 'Physics', filename: 'theoretical-physics-consensus-v4-lloyd.pdf' },
+  { title: 'Theoretical Physics Consensus', description: 'Original theoretical-physics-consensus whitepaper framing distributed agreement protocols as physical-state-machine evolution', score: 8, category: 'Physics', filename: 'theoretical-physics-consensus-whitepaper.pdf' },
+  { title: 'Quillon Thesis (Enhanced)', description: 'Enhanced edition of the Quillon thesis with expanded physical-foundations chapter and updated cryptographic appendices', score: 9, category: 'Physics', filename: 'quillon-thesis-enhanced.pdf' },
+  { title: 'Quantum Physics for Teens, Volume 2', description: 'Second volume in the youth-oriented quantum-physics series — building on Volume 1 to cover entanglement, measurement, and the consensus connection', score: 6, category: 'Physics', filename: 'quantum-physics-teens-volume2.pdf' },
 ];
 
 const DL_BASE = 'https://quillon.xyz/downloads';
