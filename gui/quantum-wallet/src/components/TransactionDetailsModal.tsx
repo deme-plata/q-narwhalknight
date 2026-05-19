@@ -2,6 +2,7 @@ import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Copy, ExternalLink, Clock, Hash, Wallet, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Check, Coins, Code, MessageSquare } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
+import ScoreBreakdown, { type ScoreData } from './ScoreBreakdown';
 
 interface Transaction {
   id: string;
@@ -23,6 +24,7 @@ interface Transaction {
   amountOut?: string;
   tokenIn?: string;
   tokenOut?: string;
+  score?: ScoreData;
 }
 
 interface TransactionDetailsModalProps {
@@ -361,6 +363,12 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 </div>
               </div>
             </div>
+
+            {transaction.score && (
+              <div className="mt-6">
+                <ScoreBreakdown score={transaction.score} title="Transaction Score" />
+              </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex gap-3 mt-6">

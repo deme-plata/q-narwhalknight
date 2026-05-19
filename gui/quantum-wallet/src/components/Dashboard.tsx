@@ -82,6 +82,11 @@ interface Transaction {
   tokenIn?: string;
   tokenOut?: string;
   memo?: string;
+  score?: {
+    total?: number;
+    components?: Array<{ label: string; value: number; explanation?: string; weight?: number }>;
+    weights?: Record<string, number>;
+  };
 }
 
 interface BalanceHistoryPoint {
