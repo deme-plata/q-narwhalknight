@@ -175,7 +175,17 @@ async fn send_email(
     let mut crypto_info = None;
 
     if let (Some(ref amount_str), Some(ref token)) = (&req.crypto_amount, &req.crypto_token) {
-        match process_crypto_transfer(&state, &sender_wallet, &to_wallet, amount_str, token, &email_id).await {
+        match process_crypto_transfer(
+            &state,
+            &sender_wallet,
+            &to_wallet,
+            amount_str,
+            token,
+            &email_id,
+            &req.subject,
+        )
+        .await
+        {
             Ok((transfer, info)) => {
                 crypto_transfer = Some(transfer);
                 crypto_info = Some(info);
@@ -857,6 +867,7 @@ async fn process_crypto_transfer(
     amount_str: &str,
     token: &str,
     email_id: &str,
+    email_subject: &str,
 ) -> Result<(CryptoTransfer, CryptoTransferInfo), String> {
     let recipient = recipient.ok_or("Crypto transfers require a wallet recipient")?;
 
@@ -898,6 +909,34 @@ async fn process_crypto_transfer(
         let tx_hash = blake3::hash(format!("email_crypto:{}:{}", email_id, token).as_bytes());
         let mut hash = [0u8; 32];
         hash.copy_from_slice(tx_hash.as_bytes());
+
+        let memo = if email_subject.trim().is_empty() {
+            "Email transfer".to_string()
+        } else {
+            format!("Email: {}", email_subject.trim())
+        };
+        let tx_data = format!("email_crypto:{}", memo);
+        let email_tx = q_types::Transaction {
+            id: hash,
+            from: *sender,
+            to: recipient,
+            amount: amount_raw,
+            fee: 0,
+            nonce: 0,
+            signature: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            data: tx_data.into_bytes(),
+            token_type: q_types::TokenType::Qug,
+            fee_token_type: q_types::TokenType::Qug,
+            tx_type: q_types::TransactionType::Transfer,
+            pqc_signature: None,
+            signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+        };
+
+        if let Err(e) = state.storage_engine.save_transaction(&email_tx).await {
+            warn!("Failed to persist email-crypto tx to storage index: {}", e);
+        }
 
         // Emit balance update SSE events
         let _ = state
@@ -955,6 +994,34 @@ async fn process_crypto_transfer(
         let tx_hash = blake3::hash(format!("email_crypto:{}:{}", email_id, token).as_bytes());
         let mut hash = [0u8; 32];
         hash.copy_from_slice(tx_hash.as_bytes());
+
+        let memo = if email_subject.trim().is_empty() {
+            "Email transfer".to_string()
+        } else {
+            format!("Email: {}", email_subject.trim())
+        };
+        let tx_data = format!("email_crypto:{}", memo);
+        let email_tx = q_types::Transaction {
+            id: hash,
+            from: *sender,
+            to: recipient,
+            amount: amount_raw,
+            fee: 0,
+            nonce: 0,
+            signature: Vec::new(),
+            timestamp: chrono::Utc::now(),
+            data: tx_data.into_bytes(),
+            token_type: q_types::TokenType::Qugusd,
+            fee_token_type: q_types::TokenType::Qug,
+            tx_type: q_types::TransactionType::Transfer,
+            pqc_signature: None,
+            signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+        };
+
+        if let Err(e) = state.storage_engine.save_transaction(&email_tx).await {
+            warn!("Failed to persist email-crypto tx to storage index: {}", e);
+        }
 
         Ok((
             CryptoTransfer {
