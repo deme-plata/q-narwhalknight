@@ -40,6 +40,9 @@ pub struct SseQueryParams {
     /// reducing miner bandwidth from ~111 KB/s to ~2-5 KB/s.
     #[serde(default)]
     pub miner_mode: bool,
+    /// NEW v10.9.58: signed JSON auth passed as URL query (for browser EventSource clients
+    /// that cannot set X-Wallet-Auth header). Same JSON format as the header.
+    pub auth: Option<String>,
 }
 
 /// v1.0.2: WebSocket query parameters
@@ -714,6 +717,26 @@ pub async fn sse_events(
     let requested_filter = params.wallet_address.clone();
     let headers_only = params.headers_only;
     let miner_mode = params.miner_mode;
+    let auth_wallet = match auth_wallet {
+        Some(w) => Some(w),
+        None => {
+            if let Some(auth_json) = params.auth.as_ref() {
+                match crate::wallet_auth::validate_wallet_auth_query(auth_json, "/api/v1/events") {
+                    Ok(addr) => Some(AuthenticatedWallet {
+                        address: addr,
+                        timestamp: chrono::Utc::now(),
+                        scheme: crate::wallet_auth::AuthScheme::Ed25519,
+                    }),
+                    Err(e) => {
+                        warn!("SSE query auth failed: {}", e);
+                        return Err((StatusCode::UNAUTHORIZED, "query auth invalid"));
+                    }
+                }
+            } else {
+                None
+            }
+        }
+    };
 
     // v11.1.1 PRIVACY: REQUIRE X-Wallet-Auth for any ?wallet_address= filter.
     // Earlier versions silently downgraded missing/mismatched auth to a public stream,
