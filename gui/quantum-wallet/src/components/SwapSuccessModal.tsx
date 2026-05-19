@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import './SwapSuccessModal.css';
+import ScoreBreakdown, { type ScoreData } from './ScoreBreakdown';
 
 interface SwapSuccessModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface SwapSuccessModalProps {
   fromAmount: number;
   toAmount: number;
   transactionHash?: string;
+  score?: ScoreData;
 }
 
 const SwapSuccessModal: React.FC<SwapSuccessModalProps> = ({
@@ -19,6 +21,7 @@ const SwapSuccessModal: React.FC<SwapSuccessModalProps> = ({
   fromAmount,
   toAmount,
   transactionHash,
+  score,
 }) => {
   const [showContent, setShowContent] = useState(false);
   const [particles, setParticles] = useState<Array<{ id: number; x: number; y: number; delay: number }>>([]);
@@ -145,6 +148,10 @@ const SwapSuccessModal: React.FC<SwapSuccessModalProps> = ({
             </div>
             <div className="badge-shimmer"></div>
           </div>
+
+          {score && (
+            <ScoreBreakdown score={score} title="Swap Score" />
+          )}
 
           {/* Action buttons */}
           <div className="success-actions">
