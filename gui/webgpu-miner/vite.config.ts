@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  // Deployed at https://quillon.xyz/webgpu-miner/ → vite needs the base
+  // path so all asset URLs in dist/index.html are prefixed correctly.
+  base: '/webgpu-miner/',
   server: {
     port: 5174,
     // Proxy /api/* to the local Quillon node during development

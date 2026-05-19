@@ -1761,7 +1761,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           {/* v5.1.1: Deploy Panel - Visible for all logged-in users (read-only status) */}
           {(() => {
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
-            const isMaster = walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            // v10.10.0: case-insensitive + trim — wallet strings can vary in casing across storage layers
+            const isMaster = (walletAddr || '').trim().toLowerCase().replace(/^qnk/, '').replace(/^qug/, '') === MASTER_WALLET;
             if (!walletAddr) return null;
             return (
               <>
@@ -1784,7 +1785,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           {/* v9.0.3: Node Settings - Visible for admin wallet OR master wallet */}
           {(() => {
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
-            const isMasterOrAdmin = isNodeAdmin || walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
+            // v10.10.0: case-insensitive + trim
+            const isMasterOrAdmin = isNodeAdmin || (walletAddr || '').trim().toLowerCase().replace(/^qnk/, '').replace(/^qug/, '') === MASTER_WALLET;
             if (!isMasterOrAdmin || !walletAddr) return null;
             return (
               <motion.button
