@@ -24738,6 +24738,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }) // v8.6.5: Dune Analytics sync status
         .route("/api/v1/dune/query/:chart_name", get(handle_local_analytics)) // v9.1.9: Local-first analytics (Dune fallback)
         .route("/api/v1/peer-id", get(handlers::get_peer_id)) // libp2p peer ID for dynamic bootstrap discovery
+        .route("/api/v1/p2p/known-peers", get(handlers::known_peers)) // v10.9.56: public known peers endpoint for self-healing bootstrap
         // v3.9.5-beta: Validator registry endpoints for P2P decentralization
         .route("/api/v1/validators", get(handlers::list_validators)) // List registered validators
         .route("/api/v1/validators/active", get(handlers::list_active_validators)) // Active validators only

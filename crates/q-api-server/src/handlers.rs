@@ -2135,6 +2135,59 @@ pub async fn get_peer_id(
     )))
 }
 
+#[derive(Debug, Serialize)]
+pub struct KnownPeerMetadata {
+    pub peer_id: String,
+    pub multiaddrs: Vec<String>,
+    pub last_seen: DateTime<Utc>,
+    pub connected: bool,
+}
+
+/// Get currently known libp2p peers for mesh bootstrap/self-heal.
+/// Public endpoint (no auth) because peer addresses are public network metadata.
+pub async fn known_peers(
+    State(state): State<Arc<AppState>>,
+) -> Result<(HeaderMap, Json<ApiResponse<Vec<KnownPeerMetadata>>>), StatusCode> {
+    let peers = if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let discovered = manager.get_discovered_peer_addresses().await;
+
+        use std::collections::BTreeMap;
+        let mut by_peer: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for peer in discovered {
+            by_peer
+                .entry(peer.node_id)
+                .or_default()
+                .push(format!("/ip4/{}/tcp/{}", peer.address.ip(), peer.address.port()));
+        }
+
+        let now = Utc::now();
+        by_peer
+            .into_iter()
+            .map(|(peer_id, mut multiaddrs)| {
+                multiaddrs.sort();
+                multiaddrs.dedup();
+                KnownPeerMetadata {
+                    peer_id,
+                    multiaddrs,
+                    last_seen: now,
+                    connected: true,
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("max-age=60"),
+    );
+
+    Ok((headers, Json(ApiResponse::success(peers))))
+}
+
 /// v3.4.8-beta: Get Resonance Hybrid Mode consensus metrics
 /// Returns comparison data between DAG-Knight and Quillon Resonance consensus
 pub async fn get_resonance_metrics(
