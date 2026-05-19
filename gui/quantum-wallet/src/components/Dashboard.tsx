@@ -84,7 +84,7 @@ interface Transaction {
   memo?: string;
   score?: {
     total?: number;
-    components?: Array<{ label: string; value: number; explanation?: string; weight?: number }>;
+    components?: Array<{ name: string; value: number; explanation?: string; weight?: number }>;
     weights?: Record<string, number>;
   };
 }

@@ -5117,6 +5117,32 @@ async fn send_transaction_inner(
         q_types::TokenType::QUGUSD => "QUGUSD",
         q_types::TokenType::Custom(_) => "CUSTOM",
     };
+    // v10.10.1: score the tx using the unified agent_panel::scorers::TxScorer.
+    // ScoreReport is additive — frontends not yet handling it just ignore the field.
+    let tx_score = {
+        use crate::agent_panel::scorers::{TxContext, TxScorer};
+        let sender_balance_before_qug = {
+            let bals = state.wallet_balances.read().await;
+            bals.get(&signed_transaction.from).copied().unwrap_or(0) as f64 / QUG_DISPLAY_DIVISOR
+        };
+        let amount_qug = signed_transaction.amount as f64 / QUG_DISPLAY_DIVISOR;
+        let fee_qug = signed_transaction.fee as f64 / QUG_DISPLAY_DIVISOR;
+        let sender_balance_after_qug = (sender_balance_before_qug - amount_qug - fee_qug).max(0.0);
+        let mempool_size = state.tx_pool.len() as f64;
+        // Treat 10K txs as a fully-saturated mempool.
+        let mempool_backlog_ratio = (mempool_size / 10_000.0).clamp(0.0, 1.0);
+        let ctx = TxContext {
+            sender_balance_before: sender_balance_before_qug,
+            sender_balance_after: sender_balance_after_qug,
+            fee_paid: fee_qug,
+            amount: amount_qug,
+            mempool_backlog_ratio,
+            // No live reserve-utilization signal available at tx submit time.
+            reserve_utilization_ratio: 0.0,
+        };
+        TxScorer::score_tx(&signed_transaction, &ctx)
+    };
+
     let response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "status": "submitted",
@@ -5132,7 +5158,8 @@ async fn send_transaction_inner(
         "stark_proof": stark_proof,
         "validator_count": validator_count,
         "consensus_type": if validator_count > 1 { "BFT 2f+1" } else { "Single-node" },
-        "message": format!("Transaction confirmed by {} validator node(s) via quantum consensus", validator_count)
+        "message": format!("Transaction confirmed by {} validator node(s) via quantum consensus", validator_count),
+        "score": tx_score,
     });
 
     Ok(Json(ApiResponse::success(response)))

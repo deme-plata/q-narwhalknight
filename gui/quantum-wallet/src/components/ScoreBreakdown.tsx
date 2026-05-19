@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 
 export interface ScoreComponent {
-  label: string;
+  name: string;
   value: number;
   explanation?: string;
   weight?: number;
@@ -51,9 +51,9 @@ export default function ScoreBreakdown({ score, title = 'Score Breakdown' }: Sco
           components.map((item, idx) => {
             const itemScore = clampScore(item?.value ?? 0);
             return (
-              <div key={`${item.label}-${idx}`}>
+              <div key={`${item.name}-${idx}`}>
                 <div className="flex items-center justify-between text-xs mb-1">
-                  <span className="text-white/80">{item?.label || `Component ${idx + 1}`}</span>
+                  <span className="text-white/80">{item?.name || `Component ${idx + 1}`}</span>
                   <span className="text-white/60">{itemScore.toFixed(1)} / 10</span>
                 </div>
                 <div className="h-2 rounded-full bg-white/10 overflow-hidden">
