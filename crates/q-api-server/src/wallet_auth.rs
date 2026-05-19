@@ -87,6 +87,10 @@ pub struct AuthHeader {
     pub aegis_signature: Option<String>,
     /// AEGIS-QL public key (required for AEGIS-QL verification)
     pub aegis_public_key: Option<String>,
+    /// Optional request body hash (AFL-1 canonical body hash, hex encoded SHA3-256)
+    /// Backward compatible: omitted for legacy read-only endpoints.
+    #[serde(default)]
+    pub body_hash: Option<String>,
 }
 
 fn default_scheme() -> AuthScheme {
@@ -219,6 +223,26 @@ impl FromRequestParts<std::sync::Arc<crate::AppState>> for AuthenticatedWallet {
         hasher.update(&address);
         hasher.update(&auth.timestamp.to_le_bytes());
         hasher.update(backend_path.as_bytes());
+
+        // AFL-1 extension: include canonical request body hash when present.
+        // This keeps legacy auth payloads valid for read-only requests that omit body_hash.
+        if let Some(body_hash_hex) = auth.body_hash.as_deref() {
+            let normalized = body_hash_hex.strip_prefix("0x").unwrap_or(body_hash_hex);
+            let body_hash_bytes = hex::decode(normalized).map_err(|_| AuthError {
+                error: "invalid_body_hash".to_string(),
+                message: "body_hash must be valid hex".to_string(),
+            })?;
+
+            if body_hash_bytes.len() != 32 {
+                return Err(AuthError {
+                    error: "invalid_body_hash_length".to_string(),
+                    message: "body_hash must be 32 bytes (SHA3-256)".to_string(),
+                });
+            }
+
+            hasher.update(&body_hash_bytes);
+        }
+
         let message = hasher.finalize();
 
         // v3.4.5: Debug log for transaction lookup path verification
