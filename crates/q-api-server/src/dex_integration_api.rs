@@ -387,26 +387,32 @@ pub async fn get_supported_tokens(
     // ✅ v7.2.5: Add wrapped bridge tokens (wBTC, wZEC, wIRON, wETH)
     {
         use q_types::{
-            WBTC_TOKEN_ADDRESS, WBTC_DECIMALS,
-            WZEC_TOKEN_ADDRESS, WZEC_DECIMALS,
-            WIRON_TOKEN_ADDRESS, WIRON_DECIMALS,
-            WETH_TOKEN_ADDRESS, WETH_DECIMALS,
+            WBTC_DECIMALS, WBTC_TOKEN_ADDRESS, WETH_DECIMALS, WETH_TOKEN_ADDRESS, WIRON_DECIMALS,
+            WIRON_TOKEN_ADDRESS, WZEC_DECIMALS, WZEC_TOKEN_ADDRESS,
         };
 
         // Get total supply from token_balances (sum of all minted wrapped tokens)
         let token_bals = state.token_balances.read().await;
-        let wbtc_supply: u128 = token_bals.iter()
+        let wbtc_supply: u128 = token_bals
+            .iter()
             .filter(|((_, t), _)| *t == WBTC_TOKEN_ADDRESS)
-            .map(|(_, a)| *a).sum();
-        let wzec_supply: u128 = token_bals.iter()
+            .map(|(_, a)| *a)
+            .sum();
+        let wzec_supply: u128 = token_bals
+            .iter()
             .filter(|((_, t), _)| *t == WZEC_TOKEN_ADDRESS)
-            .map(|(_, a)| *a).sum();
-        let wiron_supply: u128 = token_bals.iter()
+            .map(|(_, a)| *a)
+            .sum();
+        let wiron_supply: u128 = token_bals
+            .iter()
             .filter(|((_, t), _)| *t == WIRON_TOKEN_ADDRESS)
-            .map(|(_, a)| *a).sum();
-        let weth_supply: u128 = token_bals.iter()
+            .map(|(_, a)| *a)
+            .sum();
+        let weth_supply: u128 = token_bals
+            .iter()
             .filter(|((_, t), _)| *t == WETH_TOKEN_ADDRESS)
-            .map(|(_, a)| *a).sum();
+            .map(|(_, a)| *a)
+            .sum();
         drop(token_bals);
 
         tokens.push(TokenInfo {
@@ -629,7 +635,7 @@ pub async fn get_all_pools(
                 reserve0: reserve0_display.to_string(),
                 reserve1: reserve1_display.to_string(),
                 total_liquidity: pool.lp_token_supply.to_string(),
-                apy: 0.0, // TODO: Calculate from swap fees
+                apy: 0.0,                    // TODO: Calculate from swap fees
                 volume_24h: "0".to_string(), // TODO: Track volume
             }
         })
@@ -786,10 +792,11 @@ fn mul_div_u128(a: u128, b: u128, d: u128) -> u128 {
     // Overflow path: b = q*d + r → a*b/d = a*q + a*r/d
     let q = b / d;
     let r = b % d;
-    let main_part = a.checked_mul(q).unwrap_or_else(|| {
-        ((a as f64) * (q as f64)) as u128
-    });
-    let remainder_part = a.checked_mul(r)
+    let main_part = a
+        .checked_mul(q)
+        .unwrap_or_else(|| ((a as f64) * (q as f64)) as u128);
+    let remainder_part = a
+        .checked_mul(r)
         .map(|v| v / d)
         .unwrap_or_else(|| ((a as f64) * (r as f64) / (d as f64)) as u128);
     main_part.saturating_add(remainder_part)
@@ -860,7 +867,11 @@ pub async fn get_swap_quote(
             Ok(v) if v > 0 => v,
             _ => return Ok(Json(DexApiResponse::error("Invalid amount_in".to_string()))),
         },
-        None => return Ok(Json(DexApiResponse::error("amount_in required".to_string()))),
+        None => {
+            return Ok(Json(DexApiResponse::error(
+                "amount_in required".to_string(),
+            )))
+        }
     };
 
     // Calculate output using constant-product AMM (x*y=k with 0.3% fee)
@@ -895,10 +906,13 @@ pub async fn get_swap_quote(
 
     tracing::info!(
         "📊 [DEX] Swap quote: {} {} -> {} {} (impact: {:.4}%, pool reserves: {}/{})",
-        quote.amount_in, request.token_in,
-        quote.amount_out, request.token_out,
+        quote.amount_in,
+        request.token_in,
+        quote.amount_out,
+        request.token_out,
         price_impact * 100.0,
-        reserve_in, reserve_out
+        reserve_in,
+        reserve_out
     );
 
     Ok(Json(DexApiResponse::success(quote)))
@@ -922,6 +936,38 @@ pub struct SwapResult {
     pub amount_in: String,
     pub amount_out: String,
     pub gas_used: u64,
+    pub score: Option<f64>,
+}
+
+struct SwapScorerContext {
+    amount_in: u128,
+    minimum_out: u128,
+    amount_out: u128,
+    reserve_in: u128,
+    reserve_out: u128,
+    hop_count: usize,
+}
+
+struct SwapScorer;
+
+impl SwapScorer {
+    fn score_swap(context: &SwapScorerContext) -> f64 {
+        if context.amount_in == 0 || context.reserve_in == 0 || context.reserve_out == 0 {
+            return 0.0;
+        }
+
+        let slippage_buffer = (context.amount_out.saturating_sub(context.minimum_out) as f64)
+            / context.amount_out as f64;
+        let trade_size_ratio = context.amount_in as f64 / context.reserve_in as f64;
+        let depth_ratio = context.reserve_out as f64 / context.amount_out as f64;
+        let hop_penalty = (context.hop_count.saturating_sub(1) as f64) * 0.05;
+
+        let raw_score = 1.0 + (slippage_buffer * 0.8) + (depth_ratio.min(1000.0).ln() * 0.1)
+            - (trade_size_ratio * 0.5)
+            - hop_penalty;
+
+        raw_score.clamp(0.0, 1.0)
+    }
 }
 
 pub async fn execute_swap(
@@ -1050,7 +1096,10 @@ pub async fn execute_swap(
 
         // Persist updated pool to storage
         if let Ok(pool_bytes) = serde_json::to_vec(pool) {
-            let _ = state.storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await;
+            let _ = state
+                .storage_engine
+                .save_liquidity_pool(&pool_id, &pool_bytes)
+                .await;
         }
 
         // Update collateral vault price if this is the QUG/QUGUSD pool
@@ -1088,7 +1137,13 @@ pub async fn execute_swap(
         .to([0u8; 32]) // DEX contract address
         .amount(amount_in)
         .fee(1_000_000) // 0.01 QNK fee
-        .data(format!("swap:{}:{}:out:{}", request.token_in, request.token_out, amount_out).into_bytes())
+        .data(
+            format!(
+                "swap:{}:{}:out:{}",
+                request.token_in, request.token_out, amount_out
+            )
+            .into_bytes(),
+        )
         .token_type(q_types::TokenType::QUG)
         .fee_token_type(q_types::TokenType::QUGUSD)
         .tx_type(q_types::TransactionType::Swap)
@@ -1103,7 +1158,18 @@ pub async fn execute_swap(
         &state.tx_status,
         state.production_mempool.as_ref(),
         state.libp2p_discovery.as_ref(),
-    ).await;
+    )
+    .await;
+
+    let scorer_context = SwapScorerContext {
+        amount_in,
+        minimum_out: minimum_out,
+        amount_out,
+        reserve_in,
+        reserve_out,
+        hop_count: 1,
+    };
+    let score = SwapScorer::score_swap(&scorer_context);
 
     let swap_result = SwapResult {
         transaction_hash: tx_hash.clone(),
@@ -1115,6 +1181,7 @@ pub async fn execute_swap(
         amount_in: request.amount_in,
         amount_out: amount_out.to_string(),
         gas_used: 125000,
+        score: Some(score),
     };
 
     tracing::info!(
@@ -1152,7 +1219,11 @@ pub async fn get_all_prices(
     // QUG price from collateral vault (updated by AMM swaps)
     let qug_price_usd = {
         let vault = state.collateral_vault.read().await;
-        if vault.qug_price_usd > 0.0 { vault.qug_price_usd } else { 42.50 }
+        if vault.qug_price_usd > 0.0 {
+            vault.qug_price_usd
+        } else {
+            42.50
+        }
     };
 
     prices.push(TokenPrice {
@@ -1177,7 +1248,8 @@ pub async fn get_all_prices(
     // Filters out dust/broken pools using MIN_POOL_RESERVE_RAW threshold.
     let pools_guard = state.liquidity_pools.read().await;
     // token -> (k_value, price_usd, price_qnk)
-    let mut best_pool_per_token: std::collections::HashMap<String, (f64, f64, f64)> = std::collections::HashMap::new();
+    let mut best_pool_per_token: std::collections::HashMap<String, (f64, f64, f64)> =
+        std::collections::HashMap::new();
 
     for pool in pools_guard.values() {
         // Skip empty and dust/broken pools
@@ -1192,14 +1264,18 @@ pub async fn get_all_prices(
         if t0 == "QUG" && t1 != "QUGUSD" {
             let price_qnk = pool.reserve0 as f64 / pool.reserve1 as f64;
             let price_usd = price_qnk * qug_price_usd;
-            let better = best_pool_per_token.get(&t1).map_or(true, |(best_k, _, _)| k_value > *best_k);
+            let better = best_pool_per_token
+                .get(&t1)
+                .map_or(true, |(best_k, _, _)| k_value > *best_k);
             if better {
                 best_pool_per_token.insert(t1, (k_value, price_usd, price_qnk));
             }
         } else if t1 == "QUG" && t0 != "QUGUSD" {
             let price_qnk = pool.reserve1 as f64 / pool.reserve0 as f64;
             let price_usd = price_qnk * qug_price_usd;
-            let better = best_pool_per_token.get(&t0).map_or(true, |(best_k, _, _)| k_value > *best_k);
+            let better = best_pool_per_token
+                .get(&t0)
+                .map_or(true, |(best_k, _, _)| k_value > *best_k);
             if better {
                 best_pool_per_token.insert(t0, (k_value, price_usd, price_qnk));
             }
@@ -1342,7 +1418,10 @@ fn parse_address_32(address_str: &str) -> Result<[u8; 32], String> {
                 result[12..].copy_from_slice(&bytes);
                 Ok(result)
             } else {
-                Err(format!("Address must be 20 or 32 bytes, got {}", bytes.len()))
+                Err(format!(
+                    "Address must be 20 or 32 bytes, got {}",
+                    bytes.len()
+                ))
             }
         }
         Err(_) => Err("Invalid hex in address".to_string()),
@@ -1482,6 +1561,7 @@ pub async fn get_swap_status(
                     amount_in: "0".to_string(), // TODO: Extract from transaction
                     amount_out: "0".to_string(), // TODO: Extract from transaction
                     gas_used: 21000,            // TODO: Get actual gas used
+                    score: None,                // Not currently persisted in tx status
                 };
                 return Ok(Json(DexApiResponse::success(swap_result)));
             }
