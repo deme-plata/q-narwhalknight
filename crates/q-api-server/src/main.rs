@@ -514,9 +514,9 @@ const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
 /// peer IDs to register them in turbo sync. This mapping enables that.
 fn bootstrap_peer_id_for_url(url: &str) -> Option<&'static str> {
     if url.contains("89.149.241.126") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }      // Epsilon (verified 2026-04-25)
-    else if url.contains("5.79.79.158") { Some("12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK") }     // Delta
-    else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH which caused WrongPeerId rejections)
-    else if url.contains("185.182.185.227") { Some("12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93") } // Beta (verified 2026-04-25)
+    else if url.contains("5.79.79.158") { Some("12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt") }     // Delta
+    else if url.contains("109.205.176.60") { Some("12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U") }  // Gamma (verified live 2026-05-16; was 12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp which caused WrongPeerId rejections)
+    else if url.contains("185.182.185.227") { Some("12D3KooWRQtxSd6hzfnvMN8jfuMQM4tVTbLXkAr1f3rtfG3baqUv") } // Beta (verified 2026-04-25)
     else if url.contains("quillon.xyz") { Some("12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM") }    // quillon.xyz = Epsilon
     else { None }
 }
@@ -527,11 +527,11 @@ fn is_allowed_balance_update_origin(origin_node_id: &str) -> bool {
     // Known bootstrap nodes always get automatic approval
     let bootstrap_nodes = [
         "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM", // Server Epsilon (10Gbit supernode, verified 2026-04-25)
-        "12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93", // Server Beta (verified 2026-04-25)
+        "12D3KooWRQtxSd6hzfnvMN8jfuMQM4tVTbLXkAr1f3rtfG3baqUv", // Server Beta (verified 2026-04-25)
         "12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH", // Server Beta (legacy, for compat)
         "12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U", // Server Gamma (current peer ID, verified 2026-05-16)
-        "12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
-        "12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK", // Server Delta (Mainnet 2026.1.3)
+        "12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp", // Server Gamma (Mainnet 2026.1.3 legacy, kept for backwards-compat allowlist)
+        "12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt", // Server Delta (Mainnet 2026.1.3)
         "12D3KooWBHTC9FhwwXmvH7YA17YHTLdcxbtLWg2U5xEtxSeqX7jc", // Server Beta (legacy, for compat)
         "12D3KooWFqPX9TkvF43eyDeH9wwxYTSfnBn8AobLJeA7xRnmpPcv", // Server Gamma (legacy, for compat)
     ];
@@ -2314,7 +2314,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 .long("network")
                 .value_name("NETWORK")
                 .help("Network to join: testnet or mainnet [env: Q_NETWORK_ID]")
-                .default_value("testnet"),
+                .default_value("mainnet-genesis"), // v10.10.2: was "testnet" — fresh installs now join mainnet by default
         )
         .arg(
             Arg::new("experimental-fast-sync")
@@ -2396,7 +2396,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // already env-first per the Phase-8 priority fix (memory.md).
         let network = std::env::var("Q_NETWORK_ID").ok()
             .or_else(|| matches.get_one::<String>("network").cloned())
-            .unwrap_or_else(|| "testnet (default)".to_string());
+            .unwrap_or_else(|| "mainnet-genesis (default)".to_string());
         let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| "./data (default)".to_string());
 
         boot_step(6, '✓', "Arguments parsed", &format!("port={} tui={}", port_str, if tui_on { "on" } else { "off" }));
@@ -2882,7 +2882,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         let pruning_mode = std::env::var("Q_PRUNING_MODE").unwrap_or_else(|_| "disabled".to_string());
         let cache_mb = std::env::var("ROCKSDB_BLOCK_CACHE_MB").unwrap_or_else(|_| "auto".to_string());
         let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "default".to_string());
-        let tor_timeout = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT").unwrap_or_else(|_| "120".to_string());
+        let tor_timeout = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT").unwrap_or_else(|_| "5".to_string()); // v10.10.2: 120s→5s default
         let total_ram_mb = sysinfo::System::new_all().total_memory() / 1024 / 1024;
 
         // Read cgroup limits

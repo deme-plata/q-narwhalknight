@@ -355,7 +355,7 @@ impl RocksDBKV {
         // Only affects compaction and flush writes — reads go through block cache unaffected.
         // Default: 200 MB/s (plenty for sync, but prevents 100% disk saturation).
         let write_rate_mb: i64 = std::env::var("Q_ROCKSDB_WRITE_RATE_MB")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(400); // v10.10.2: 200→400, matches production /.env
         if write_rate_mb > 0 {
             let rate_bytes_per_sec = write_rate_mb * 1024 * 1024;
             opts.set_ratelimiter(rate_bytes_per_sec, 100_000, 10); // 100ms refill, fairness=10

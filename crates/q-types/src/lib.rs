@@ -4335,9 +4335,9 @@ impl NetworkConfig {
             // Multiple bootstrap nodes for redundancy
             bootstrap_peers: vec![
                 // Primary bootstrap node - Server Delta (5.79.79.158) - 1Gbit fastest sync
-                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWLJJRvqo6mBoHLpgxVbGKfW3Jv39ziU4kz1adKFv93JbK".to_string(),
+                "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt".to_string(),
                 // Secondary bootstrap node - Server Gamma (109.205.176.60) - 1Gbit
-                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH".to_string(),
+                "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp".to_string(),
                 // Tertiary bootstrap node - Server Beta (185.182.185.227) - 100Mbit DHT anchor
                 "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH".to_string(),
             ],
@@ -5057,7 +5057,7 @@ mod network_separation_tests {
         assert!(testnet.bootstrap_peers[0].contains("185.182.185.227"), "First bootstrap peer should be Server Beta");
         assert!(testnet.bootstrap_peers[0].contains("12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH"), "Bootstrap should include Beta peer ID");
         assert!(testnet.bootstrap_peers[1].contains("109.205.176.60"), "Second bootstrap peer should be Server Gamma");
-        assert!(testnet.bootstrap_peers[1].contains("12D3KooWFfZKfKbBnB5SehTRBacHndyhJ6aQWxTAQrrwXA7761cH"), "Bootstrap should include Gamma peer ID");
+        assert!(testnet.bootstrap_peers[1].contains("12D3KooWEZKN13gsYXmvoUSeu5VnbUCTyEcAVdqKfWz14CAnm3bp"), "Bootstrap should include Gamma peer ID");
         assert!(testnet.bootstrap_peers[2].contains("5.79.79.158"), "Third bootstrap peer should be Server Delta");
         assert!(testnet.bootstrap_peers[2].contains("12D3KooWQZZAyLA4VQmwNozCBTZXXoWfvKE86ebbaPhSKu6XVmJJ"), "Bootstrap should include Delta peer ID");
         assert!(testnet.bootstrap_peers[3].contains("161.35.219.10"), "Fourth bootstrap peer should be Server Alpha");
