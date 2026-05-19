@@ -714,16 +714,15 @@ async fn try_aioc_service_auth(
     }))
 }
 
-/// Validate an `X-Wallet-Auth`-style JSON auth header passed as a WebSocket query parameter.
+/// Validate an `X-Wallet-Auth`-style JSON auth header passed as a URL query parameter.
 ///
-/// Used by the signaling server to authenticate WebSocket connections without custom HTTP headers
-/// (browser WebSocket API cannot send custom headers).
+/// Used for endpoints where the client cannot set HTTP headers (SSE EventSource,
+/// WebSocket). The frontend signs the canonical path (e.g. "/api/v1/events" or
+/// "/ws/chat/signal") with SHA3-256(address || ts_le_i64 || path) challenge,
+/// identical to the standard `X-Wallet-Auth` flow.
 ///
-/// The frontend signs the fixed path `/ws/chat/signal` — same SHA3-256(address || ts || path)
-/// challenge as the standard `X-Wallet-Auth` flow.
-///
-/// Returns the validated wallet address string on success.
-pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) -> Result<String, &'static str> {
+/// Returns the validated 32-byte wallet address on success.
+pub fn validate_wallet_auth_query(auth_json: &str, expected_path: &str) -> Result<[u8; 32], &'static str> {
     let auth: AuthHeader = serde_json::from_str(auth_json).map_err(|_| "invalid_auth_json")?;
 
     // Replay-attack prevention: reject headers older than 5 minutes.
@@ -732,7 +731,7 @@ pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) ->
     let drift = now - auth.timestamp;
     if drift.abs() > 300 {
         tracing::warn!(
-            "Signaling auth: expired_auth — drift={}s (server_now={}, client_ts={})",
+            "auth-via-query: expired_auth — drift={}s (server_now={}, client_ts={})",
             drift, now, auth.timestamp
         );
         return Err("expired_auth");
@@ -745,14 +744,8 @@ pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) ->
     let mut address = [0u8; 32];
     address.copy_from_slice(&addr_bytes);
 
-    // peer_id must match the address in the auth header
-    let strip_prefix = |s: &str| s.strip_prefix("qnk").unwrap_or(s).to_lowercase();
-    if strip_prefix(&auth.address) != strip_prefix(expected_peer_id) {
-        return Err("peer_id_mismatch");
-    }
-
-    // Reconstruct the challenge: identical to generate_auth_challenge() for /ws/chat/signal
-    let challenge = generate_auth_challenge(&address, "/ws/chat/signal", auth.timestamp);
+    // Reconstruct the challenge: identical to generate_auth_challenge()
+    let challenge = generate_auth_challenge(&address, expected_path, auth.timestamp);
 
     // Verify Ed25519 signature (only Ed25519 supported for WebSocket auth)
     let sig_hex = auth.signature.as_deref().ok_or("missing_signature")?;
@@ -764,12 +757,24 @@ pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) ->
     let vk = VerifyingKey::from_bytes(&address).map_err(|_| "invalid_public_key")?;
     vk.verify(&challenge, &sig).map_err(|_| "signature_verification_failed")?;
 
-    Ok(auth.address.clone())
+    Ok(address)
+}
+
+/// Backwards-compat shim — preserved so existing /ws/chat/signal call sites continue to work.
+pub fn validate_signaling_auth_query(auth_json: &str, expected_peer_id: &str) -> Result<String, &'static str> {
+    let strip_prefix = |s: &str| s.strip_prefix("qnk").unwrap_or(s).to_lowercase();
+    let addr_bytes = validate_wallet_auth_query(auth_json, "/ws/chat/signal")?;
+    let addr_str = format!("qnk{}", hex::encode(addr_bytes));
+    if strip_prefix(&addr_str) != strip_prefix(expected_peer_id) {
+        return Err("peer_id_mismatch");
+    }
+    Ok(addr_str)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
     fn test_auth_challenge_generation() {
@@ -779,5 +784,77 @@ mod tests {
 
         let challenge = generate_auth_challenge(&address, path, timestamp);
         assert_eq!(challenge.len(), 32); // SHA3-256 output
+    }
+
+    #[test]
+    fn test_validate_wallet_auth_query_valid() {
+        let secret = [7u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let address = signing_key.verifying_key().to_bytes();
+        let timestamp = chrono::Utc::now().timestamp();
+        let challenge = generate_auth_challenge(&address, "/api/v1/events", timestamp);
+        let sig = signing_key.sign(&challenge);
+        let auth_json = serde_json::json!({
+            "address": format!("qnk{}", hex::encode(address)),
+            "timestamp": timestamp,
+            "scheme": "Ed25519",
+            "signature": hex::encode(sig.to_bytes()),
+        })
+        .to_string();
+
+        let out = validate_wallet_auth_query(&auth_json, "/api/v1/events").expect("should validate");
+        assert_eq!(out, address);
+    }
+
+    #[test]
+    fn test_validate_wallet_auth_query_expired() {
+        let auth_json = serde_json::json!({
+            "address": format!("qnk{}", "11".repeat(32)),
+            "timestamp": chrono::Utc::now().timestamp() - 301,
+            "scheme": "Ed25519",
+            "signature": "00".repeat(64),
+        })
+        .to_string();
+        let err = validate_wallet_auth_query(&auth_json, "/api/v1/events").unwrap_err();
+        assert_eq!(err, "expired_auth");
+    }
+
+    #[test]
+    fn test_validate_wallet_auth_query_wrong_signature() {
+        let secret = [8u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let address = signing_key.verifying_key().to_bytes();
+        let timestamp = chrono::Utc::now().timestamp();
+        let challenge = generate_auth_challenge(&address, "/api/v1/events", timestamp);
+        let mut sig = signing_key.sign(&challenge).to_bytes();
+        sig[0] ^= 0x01;
+        let auth_json = serde_json::json!({
+            "address": format!("qnk{}", hex::encode(address)),
+            "timestamp": timestamp,
+            "scheme": "Ed25519",
+            "signature": hex::encode(sig),
+        })
+        .to_string();
+        let err = validate_wallet_auth_query(&auth_json, "/api/v1/events").unwrap_err();
+        assert_eq!(err, "signature_verification_failed");
+    }
+
+    #[test]
+    fn test_validate_wallet_auth_query_wrong_path() {
+        let secret = [9u8; 32];
+        let signing_key = SigningKey::from_bytes(&secret);
+        let address = signing_key.verifying_key().to_bytes();
+        let timestamp = chrono::Utc::now().timestamp();
+        let challenge = generate_auth_challenge(&address, "/ws/chat/signal", timestamp);
+        let sig = signing_key.sign(&challenge);
+        let auth_json = serde_json::json!({
+            "address": format!("qnk{}", hex::encode(address)),
+            "timestamp": timestamp,
+            "scheme": "Ed25519",
+            "signature": hex::encode(sig.to_bytes()),
+        })
+        .to_string();
+        let err = validate_wallet_auth_query(&auth_json, "/api/v1/events").unwrap_err();
+        assert_eq!(err, "signature_verification_failed");
     }
 }
