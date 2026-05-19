@@ -8,21 +8,21 @@
 //! `github.com/xai-org/x-algorithm` (Apache-2.0): six composable trait-types
 //! that any decision-streaming workload fits.
 //!
-//! Module layout (Codex to fill in as work progresses):
+//! Module layout (filled in as work progresses):
 //! - `pipeline`  — the six trait definitions (this file pulls them together)
 //! - `sources`   — concrete `Source` impls per task class
 //! - `hydrators` — concrete `Hydrator` impls for context enrichment
 //! - `filters`   — concrete `Filter` impls for age/visibility/correctness
-//! - `scorers`   — concrete `Scorer` impls for ranking
+//! - `scorers`   — concrete `Scorer` impls for ranking (initial PR #100)
 //! - `selectors` — concrete `Selector` impls (Top-K, FIFO, by-status)
 //! - `handler`   — `GET /api/v1/agent/panel/{addr}` REST handler
 
 pub mod pipeline;
+pub mod scorers;
 
-// Sub-modules below are stubs — Codex implements per the spec roadmap layers L1-L5.
+// Sub-modules below are stubs — implemented per the spec roadmap layers L1-L5.
 // pub mod sources;
 // pub mod hydrators;
 // pub mod filters;
-// pub mod scorers;
 // pub mod selectors;
 // pub mod handler;
