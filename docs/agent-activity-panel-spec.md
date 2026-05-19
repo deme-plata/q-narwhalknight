@@ -91,6 +91,25 @@ Older history is paginated via a "View archive" link → separate page.
 - **No notification badges** — the task list IS the notification
 - **No "loading..." skeletons** — empty zones are explicit ("No tasks running. Your agent is idle.")
 
+### 2.4 Trust-tier indicator per task (added per UX review)
+
+Users must be able to distinguish at a glance: *my own code is doing this* vs *an agentic service I delegated to is doing this on my behalf*. A trust-tier chip appears at the left edge of every task row.
+
+| Chip | Meaning | When used |
+|---|---|---|
+| 🟢 **local** | Running in user's own process, with user's seed in user's RAM | Self-hosted MCP server, local agent script, locally-running miner |
+| 🔵 **signed-by-X** | Running as a service user authorised via a one-shot X-Wallet-Auth signature | Tasks the user explicitly approved via signed challenge (queue_for_approval flow) |
+| 🟣 **delegated-via-fiber-lane** | Hosted agentic service holding a delegation attestation from the user, submitting on their behalf via AFL-1 | Long-running services (e.g. quillon-twitter-mcp on a managed host, claude.ai delegations) |
+| 🟠 **observed** | Read-only — viewing another wallet's task via embed mode | Cross-wallet observation, no control |
+
+Visual: 12px coloured circle + one-word label, leftmost element in each task row. Tooltip on hover explains the tier in one sentence.
+
+**Why this matters**: a delegated agent can mint a transaction the user didn't directly approve. The user needs to see, at a glance, *which agents in their panel have that level of autonomy*. Without the chip, users mentally conflate "my own code" with "a service I gave permission to" — and the failure mode of that conflation is a user being surprised by a transaction they didn't realise they'd implicitly authorised.
+
+This is the same UI pattern as OAuth connected-apps indicators in consumer software (Google's "X has access to your account" badges, GitHub's PAT-vs-OAuth-App distinction). Applied at task granularity because tasks are the right unit for the agentic surface.
+
+The chip's data source: each `AgentTaskStarted` SSE event carries a `trust_tier` field; see §4 for the schema. Backend MUST determine `trust_tier` based on how the task entered the system (local API call → Local; one-shot approval flow → SignedByUser; AFL-1 submit with a delegation attestation → DelegatedViaFiberLane).
+
 ---
 
 ## 3. Backend architecture — Home Mixer pattern applied
@@ -191,7 +210,13 @@ pub enum StreamEvent {
     // ... existing variants ...
 
     /// v10.10.0: agent activity panel events
-    AgentTaskStarted { task_id: Uuid, kind: TaskKind, started_at: DateTime<Utc>, context: serde_json::Value },
+    AgentTaskStarted {
+        task_id: Uuid,
+        kind: TaskKind,
+        started_at: DateTime<Utc>,
+        context: serde_json::Value,
+        trust_tier: TrustTier,  // ← §2.4 — drives the chip on each task row
+    },
     AgentTaskProgress { task_id: Uuid, last_event: serde_json::Value, age_secs: u64 },
     AgentTaskCompleted { task_id: Uuid, outcome: TaskOutcome, finished_at: DateTime<Utc> },
     AgentTaskFailed { task_id: Uuid, reason: String, finished_at: DateTime<Utc> },
@@ -213,6 +238,27 @@ pub enum AwaitingReason {
     HumanApproval { approval_url: String, expires_at: DateTime<Utc> },
     ExternalConfirmation { confirms_needed: u32, confirms_seen: u32 },
     Timer { fires_at: DateTime<Utc> },
+}
+
+/// v10.10.0: trust tier per task — drives the chip on each task row (§2.4)
+pub enum TrustTier {
+    /// Running in the user's own process. User's seed is in user's RAM. Highest trust.
+    Local,
+    /// Authorized via a one-shot X-Wallet-Auth signature for a specific action.
+    /// Each task here required an explicit approve-click in the recent past.
+    SignedByUser {
+        signed_at: DateTime<Utc>,
+        scope_description: String,
+    },
+    /// Hosted agentic service holding a delegation attestation from the user.
+    /// Can submit arbitrary actions within scope until the delegation expires.
+    DelegatedViaFiberLane {
+        delegate_address: Address,
+        delegation_expires_at: DateTime<Utc>,
+        scope_summary: String,
+    },
+    /// Read-only view of another wallet's task. No control affordance shown.
+    Observed,
 }
 ```
 
