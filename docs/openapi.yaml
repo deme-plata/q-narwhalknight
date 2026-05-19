@@ -1,0 +1,562 @@
+# Quillon Graph — Agent-API OpenAPI 3.1 spec
+#
+# Scope: the endpoints that AI agents (Claude Code via MCP, Codex, DeepSeek,
+# self-hosted swarms) actually consume — read state, sign requests, submit
+# transactions, query DEX. This is NOT the full chain API (mining-pool
+# protocols, validator-coordination, bridge-relayer specifics, etc. live in
+# their own specs).
+#
+# Status of each endpoint is marked under the operation's `x-status`:
+#   - "stable"    — exists and validated in v10.9.55 (current production)
+#   - "proposed"  — part of the Agent Fiber Lane (docs/agent-fiber-lane-spec.md)
+#                   landing in v10.10.0 candidate
+#
+# Intended consumer: Stainless SDK + MCP-server generator. Once Anthropic's
+# Stainless integration stabilises post-acquisition (May 2026), this spec
+# becomes the source of truth for:
+#   - `tools/quillon-wallet-mcp/` (replaces the hand-written TS MCP server)
+#   - Official TypeScript / Python / Go SDKs (none today)
+#   - The published "agent-native chain" surface
+
+openapi: 3.1.0
+
+info:
+  title: Quillon Graph — Agent API
+  version: "10.10.0-rc1"
+  description: |
+    The transaction-level + read-level surface of Quillon Graph, scoped to
+    what AI agents need to operate as economic principals on the chain.
+    Companion docs: `AGENT.md` (one-page recipe), `docs/agent-fiber-lane-spec.md`
+    (full design brief), `papers/agentic-money-quillon-graph.pdf` (the why).
+  contact:
+    name: Quillon Foundation
+    url: https://quillon.xyz
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: https://quillon.xyz
+    description: Production (Epsilon supernode, 10 Gbit)
+  - url: https://quillon.xyz:8080
+    description: Direct (bypasses q-flux reverse proxy; useful for debugging)
+
+tags:
+  - name: status
+    description: Chain status and discovery
+  - name: wallet
+    description: Wallet balance and nonce, X-Wallet-Auth required
+  - name: agent
+    description: Agent Fiber Lane — co-located fast lane for AI-agent submission
+  - name: transactions
+    description: Legacy transaction submission paths
+  - name: dex
+    description: Decentralized exchange (AMM)
+  - name: mining
+    description: Mining stats and miner setup
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reusable security scheme: X-Wallet-Auth Ed25519
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    XWalletAuth:
+      type: apiKey
+      in: header
+      name: X-Wallet-Auth
+      description: |
+        Ed25519 signed challenge proving ownership of a Quillon wallet.
+        Header value is a JSON object:
+        ```json
+        {
+          "address": "qnk<64hex>",
+          "timestamp": 1779168000,
+          "scheme": "Ed25519",
+          "signature": "<128hex>",
+          "body_hash": "<64hex SHA3-256 of body, optional but required for /agent/* endpoints>"
+        }
+        ```
+        Challenge format:
+        ```
+        challenge = SHA3-256(
+          address_bytes (32) ||
+          timestamp_i64.to_le_bytes() (8) ||
+          path_utf8 (variable) ||
+          body_hash_bytes (32, only when body present)
+        )
+        signature = Ed25519::sign(priv_key, challenge)
+        ```
+        Reference: `crates/q-trading-bot/src/wallet_auth.rs::AgentWallet::sign_request`
+
+    OAuth2Wallet:
+      type: oauth2
+      description: |
+        Browser-mediated OAuth2 flow via `quillon.xyz/miner-login?code=<32hex>`.
+        Used by browser wallet UIs. Not recommended for AI agents — use
+        X-Wallet-Auth instead.
+      flows:
+        authorizationCode:
+          authorizationUrl: https://quillon.xyz/miner-login
+          tokenUrl: https://quillon.xyz/api/v1/auth/token
+          scopes:
+            wallet:read: Read wallet balance and nonce
+            wallet:send: Submit transactions from this wallet
+
+  schemas:
+    # ─── Common shapes ───────────────────────────────────────────────────────
+    ApiResponse:
+      type: object
+      required: [success, timestamp]
+      properties:
+        success: { type: boolean }
+        data: { description: Response payload (shape depends on endpoint) }
+        error: { type: string, nullable: true }
+        timestamp: { type: integer, format: int64, description: "Unix seconds" }
+
+    Address:
+      type: string
+      pattern: '^qnk[0-9a-f]{64}$'
+      example: qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb
+      description: 67-char Quillon wallet address (`qnk` + 64 hex chars = pub key)
+
+    AmountString:
+      type: string
+      pattern: '^[0-9]+$'
+      description: |
+        Raw u128 amount as decimal string. Display × 10²⁴ (regardless of the
+        token's "display decimals" field). JSON cannot represent u128 as a
+        number without precision loss — always serialize as string.
+      example: "50000000000000000000000"
+
+    TokenType:
+      type: string
+      enum: [QUG, QUGUSD, Custom]
+      description: Native QUG, USD-pegged stablecoin, or a custom token (Custom requires data field with token address)
+
+    # ─── Status ──────────────────────────────────────────────────────────────
+    NetworkStatus:
+      type: object
+      properties:
+        version: { type: string, example: "10.9.55" }
+        network_id: { type: string, example: "mainnet-genesis" }
+        peer_id: { type: string, example: "12D3KooWFpbXxx..." }
+        status: { type: string, example: "ready" }
+        bootstrap_node: { type: boolean }
+        multiaddrs: { type: array, items: { type: string } }
+        upgrades:
+          type: object
+          properties:
+            current_height: { type: integer, format: int64 }
+            active: { type: array, items: { type: object } }
+            pending: { type: array, items: { type: object } }
+
+    # ─── Transactions ────────────────────────────────────────────────────────
+    TransactionIntent:
+      type: object
+      required: [to, amount]
+      properties:
+        to: { $ref: '#/components/schemas/Address' }
+        amount: { $ref: '#/components/schemas/AmountString' }
+        token_type: { $ref: '#/components/schemas/TokenType', default: QUG }
+        fee:
+          oneOf:
+            - { $ref: '#/components/schemas/AmountString' }
+            - { type: 'null' }
+          description: Optional. Server uses MIN_TRANSACTION_FEE (21000) if null.
+        nonce:
+          oneOf:
+            - { type: integer, format: int64 }
+            - { type: 'null' }
+          description: Optional. Server auto-assigns from wallet's nonce counter if null.
+        memo:
+          type: string
+          maxLength: 8192
+          description: Free-form memo. No protocol limit; keep under 8 KB to be polite.
+
+    TransactionReceipt:
+      type: object
+      required: [tx_id, assigned_nonce]
+      properties:
+        tx_id: { type: string, pattern: '^[0-9a-f]{64}$' }
+        assigned_nonce: { type: integer, format: int64 }
+        included_at_block:
+          oneOf:
+            - { type: integer, format: int64 }
+            - { type: 'null' }
+
+    BatchTransactionRequest:
+      type: object
+      required: [transactions]
+      properties:
+        transactions:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/TransactionIntent' }
+
+    BatchTransactionReceipt:
+      type: object
+      required: [tx_ids, first_nonce, last_nonce]
+      properties:
+        tx_ids:
+          type: array
+          items: { type: string, pattern: '^[0-9a-f]{64}$' }
+        first_nonce: { type: integer, format: int64 }
+        last_nonce: { type: integer, format: int64 }
+
+    # ─── DEX ─────────────────────────────────────────────────────────────────
+    SwapQuote:
+      type: object
+      properties:
+        from_token: { type: string }
+        to_token: { type: string }
+        amount_in: { type: string }
+        amount_out: { type: string }
+        amount_out_min_after_slippage: { type: string }
+        price_impact_percent: { type: number }
+        execution_price: { type: number }
+        quote_valid_until: { type: integer, format: int64 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+  /api/v1/status:
+    get:
+      tags: [status]
+      summary: Chain status
+      description: |
+        Returns chain status, current height, peer ID, network ID. No auth.
+        Note: the current height is at `data.upgrades.current_height`, NOT at
+        top-level `data.current_height`. The hand-written MCP server in
+        `tools/quillon-wallet-mcp/` has this bug; a Stainless-generated client
+        would not.
+      x-status: stable
+      responses:
+        '200':
+          description: Status payload
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/NetworkStatus' }
+
+  /api/v1/wallets/{address}/balance:
+    get:
+      tags: [wallet]
+      summary: Wallet balance (signed)
+      description: |
+        Returns QUG + QUGUSD balances. Requires X-Wallet-Auth. The address
+        in the URL must match the address in the X-Wallet-Auth header.
+      x-status: stable
+      security:
+        - XWalletAuth: []
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Address' }
+      responses:
+        '200':
+          description: Balance payload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResponse' }
+        '401':
+          description: Missing or invalid X-Wallet-Auth header
+
+  /api/v1/wallets/{address}/nonce:
+    get:
+      tags: [wallet]
+      summary: Current nonce for the wallet
+      description: |
+        Returns the next-usable nonce. Agents using `/api/v1/agent/submit`
+        do NOT need to fetch this — the server auto-assigns. This endpoint
+        is for clients that want to build transactions client-side without
+        relying on the server's nonce tracker.
+      x-status: stable
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Address' }
+      responses:
+        '200':
+          description: Nonce payload
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          nonce: { type: integer, format: int64 }
+
+  # ─── Agent Fiber Lane (proposed, v10.10.0) ─────────────────────────────────
+  /api/v1/agent/submit:
+    post:
+      tags: [agent]
+      summary: Agent Fiber Lane — submit single transaction
+      description: |
+        Co-located fast lane for AI-agent submission. X-Wallet-Auth signature
+        binds wallet + timestamp + path + body-hash. Server auto-fills nonce
+        and timestamp; client specifies intent only. Target: ≤ 5 ms server-side
+        latency.
+
+        See `docs/agent-fiber-lane-spec.md` for full security + performance
+        analysis. Height-gated: this endpoint rejects requests before
+        `AGENT_FIBER_LANE_ACTIVATION_HEIGHT` (set ≈ 2 weeks after v10.10.0
+        merge per CLAUDE.md mainnet-safety rules).
+      x-status: proposed
+      security:
+        - XWalletAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransactionIntent' }
+      responses:
+        '200':
+          description: Transaction accepted into mempool
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/TransactionReceipt' }
+        '401':
+          description: X-Wallet-Auth invalid or replay detected
+        '429':
+          description: Rate-limit exceeded (default 10,000 tx/s/wallet)
+
+  /api/v1/agent/submit-batch:
+    post:
+      tags: [agent]
+      summary: Agent Fiber Lane — submit batch (up to 1000 txs in one POST)
+      description: |
+        Batch submission for high-throughput agent traffic. One X-Wallet-Auth
+        signature authenticates the whole batch (O(1) sig verify). Server
+        atomically allocates sequential nonces, builds all txs, single batch
+        mempool insert + one gossipsub broadcast.
+
+        Target: 1000-tx batches at 100 batches/s = **100,000 TPS** matching
+        the Q4-2025 benchmark ceiling.
+
+        The body_hash field in the X-Wallet-Auth header covers the entire
+        JSON body (the whole `transactions` array).
+      x-status: proposed
+      security:
+        - XWalletAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BatchTransactionRequest' }
+      responses:
+        '200':
+          description: Batch accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/BatchTransactionReceipt' }
+        '413':
+          description: Batch exceeds max size (default 1000, Q_AGENT_BATCH_MAX configurable up to 10000)
+
+  /api/v1/agent/stream:
+    get:
+      tags: [agent]
+      summary: Agent Fiber Lane — persistent WebSocket for sustained submission
+      description: |
+        WebSocket upgrade endpoint. First frame from client carries X-Wallet-Auth
+        signing `connection_id || timestamp || "/api/v1/agent/stream"`. Subsequent
+        frames are intent-level JSON (one tx per frame); server replies with
+        `{tx_id, nonce, client_seq_id}`. Eliminates per-tx TLS overhead for
+        sustained high-rate agent traffic (TPS test harnesses, water-bots,
+        market makers).
+
+        Max 4 concurrent streams per wallet.
+      x-status: proposed
+      responses:
+        '101': { description: Switching Protocols (WebSocket upgrade) }
+
+  # ─── Legacy transaction paths ──────────────────────────────────────────────
+  /api/v1/transactions/send:
+    post:
+      tags: [transactions]
+      summary: OAuth-mediated send (browser wallets)
+      description: |
+        Server-side transaction building + signing using OAuth2-vaulted key.
+        Designed for browser wallets, NOT recommended for AI agents — use
+        `/api/v1/agent/submit` instead.
+      x-status: stable
+      security:
+        - OAuth2Wallet: [wallet:send]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to, amount]
+              properties:
+                from: { $ref: '#/components/schemas/Address' }
+                to: { $ref: '#/components/schemas/Address' }
+                amount: { type: number, description: "Display QUG (e.g. 0.05)" }
+                token_type: { $ref: '#/components/schemas/TokenType' }
+                memo: { type: string }
+      responses:
+        '200':
+          description: Transaction accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResponse' }
+
+  /api/v1/transactions:
+    post:
+      tags: [transactions]
+      summary: Pre-signed transaction submit (BROKEN for client-side signing in v10.9.55)
+      description: |
+        Submit a client-side-signed Transaction. **Currently unusable for
+        client-built signatures** because `Transaction::verify_signature` uses
+        `self.hash()` which postcard-includes the signature field itself,
+        creating a chicken-and-egg.
+
+        The Agent Fiber Lane (`/api/v1/agent/submit`) is the working
+        alternative. This endpoint is documented for completeness and may
+        be repaired or deprecated in v10.10.0.
+      x-status: stable
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                transaction:
+                  type: object
+                  description: Full Transaction struct from q-types
+      responses:
+        '200':
+          description: Submission outcome (likely error in current state)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResponse' }
+
+  # ─── DEX ───────────────────────────────────────────────────────────────────
+  /api/v1/dex/quote:
+    get:
+      tags: [dex]
+      summary: DEX swap quote (no commitment)
+      x-status: stable
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string }
+          description: From-token symbol (e.g. QUG)
+        - name: to
+          in: query
+          required: true
+          schema: { type: string }
+        - name: amount
+          in: query
+          required: true
+          schema: { type: number }
+          description: Display amount (e.g. 1.0 for 1 QUG)
+      responses:
+        '200':
+          description: Quote
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/SwapQuote' }
+
+  /api/v1/dex/swap/execute:
+    post:
+      tags: [dex]
+      summary: Execute swap (X-Wallet-Auth signed)
+      x-status: stable
+      security:
+        - XWalletAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from_token, to_token, amount, slippage_percent]
+              properties:
+                from_token: { type: string }
+                to_token: { type: string }
+                amount: { type: number }
+                slippage_percent: { type: number, default: 0.5 }
+      responses:
+        '200':
+          description: Swap result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResponse' }
+
+  /api/v1/mining/stats:
+    get:
+      tags: [mining]
+      summary: Network mining stats
+      x-status: stable
+      responses:
+        '200':
+          description: Stats payload
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          current_height: { type: integer, format: int64 }
+                          block_reward: { type: number }
+                          network_hashrate: { type: number }
+                          connected_miners: { type: integer }
+                          difficulty: { type: string }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Generation targets (for Stainless / Speakeasy / similar)
+# ─────────────────────────────────────────────────────────────────────────────
+x-stainless:
+  # Target SDK languages
+  languages:
+    - typescript
+    - python
+    - go
+  # Generate MCP server
+  mcp:
+    enabled: true
+    tool_naming: snake_case
+    # Tool descriptions are derived from operation summaries + descriptions.
+    # The current hand-written `tools/quillon-wallet-mcp/` should be retired
+    # in favour of the Stainless-generated server once endpoints stabilize.
+  # Retries: idempotent reads OK; mutating writes (POST) NEVER auto-retry
+  # without explicit client opt-in (X-Wallet-Auth replay protection makes
+  # retries safe, but only after the client has rebuilt the body_hash).
+  retries:
+    safe_methods: [GET]
+    unsafe_methods: []
