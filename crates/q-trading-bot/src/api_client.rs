@@ -262,4 +262,99 @@ impl QuillonClient {
     pub async fn get_all_balances(&self) -> Result<Vec<(String, WalletBalance)>> {
         Ok(vec![])
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    // QSHARE-1 Phase 1.1 — X-Wallet-Auth signed endpoints for QCREDIT-DCA
+    // ════════════════════════════════════════════════════════════════════
+
+    /// GET /api/v1/wallets/<addr>/balance with X-Wallet-Auth signature.
+    /// Returns the QUG balance in display units (e.g. 0.05).
+    /// Per AFL-1 §3 and AGENT.md §2 — signed challenge = SHA3-256(addr ‖ ts_le ‖ path).
+    pub async fn get_balance_qug_signed(
+        &self,
+        wallet: &str,
+        signer: &crate::wallet_auth::AgentWallet,
+    ) -> Result<f64> {
+        let path = format!("/api/v1/wallets/{}/balance", wallet);
+        let auth_header = signer.sign_request(&path)
+            .context("sign get_balance request")?;
+        let url = format!("{}{}", self.base_url, path);
+        debug!("GET {} (signed)", url);
+        let resp = self.client
+            .get(&url)
+            .header("X-Wallet-Auth", auth_header)
+            .send()
+            .await
+            .context("balance request")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.context("balance json")?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "balance fetch failed: status={} body={}",
+                status, body
+            ));
+        }
+        // Response shape: {success, data: {qug_balance: "<raw u128 str>" | float, ...}}
+        let data = body.get("data").unwrap_or(&body);
+        // Try multiple field names + numeric representations the API may use
+        let qug = data.get("qug_balance")
+            .or_else(|| data.get("balance"))
+            .or_else(|| data.get("qug"));
+        match qug {
+            Some(serde_json::Value::String(s)) => {
+                let raw: u128 = s.parse().context("balance str→u128")?;
+                Ok(to_display(raw, DECIMALS_24))
+            }
+            Some(serde_json::Value::Number(n)) => {
+                if let Some(f) = n.as_f64() { Ok(f) }
+                else if let Some(u) = n.as_u64() { Ok(to_display(u as u128, DECIMALS_24)) }
+                else { Ok(0.0) }
+            }
+            _ => Ok(0.0),
+        }
+    }
+
+    /// POST /api/v1/qcredit/lock — lock QUG into a QCREDIT yield tier.
+    /// Returns the position_id as a String.
+    /// Endpoint contract: crates/q-api-server/src/qcredit_api.rs::LockRequest
+    pub async fn qcredit_lock_signed(
+        &self,
+        wallet: &str,
+        amount_qug: f64,
+        tier: &str,
+        signer: &crate::wallet_auth::AgentWallet,
+    ) -> Result<String> {
+        let path = "/api/v1/qcredit/lock";
+        let auth_header = signer.sign_request(path).context("sign qcredit_lock")?;
+        let url = format!("{}{}", self.base_url, path);
+        let body = serde_json::json!({
+            "wallet": wallet,
+            "amount": format!("{}", amount_qug),
+            "tier": tier,
+        });
+        debug!("POST {} | wallet={} amount={} tier={}", url, wallet, amount_qug, tier);
+        let resp = self.client
+            .post(&url)
+            .header("X-Wallet-Auth", auth_header)
+            .json(&body)
+            .send()
+            .await
+            .context("qcredit_lock request")?;
+        let status = resp.status();
+        let json: serde_json::Value = resp.json().await.context("qcredit_lock json")?;
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "qcredit_lock failed: status={} body={}",
+                status, json
+            ));
+        }
+        // Response shape: {success, data: {position_id: "...", ...}}
+        let position_id = json.pointer("/data/position_id")
+            .or_else(|| json.get("position_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("unknown-{}", chrono::Utc::now().timestamp_millis()));
+        info!("✅ QCREDIT lock: {:.6} QUG into {} tier (position={})", amount_qug, tier, position_id);
+        Ok(position_id)
+    }
 }
