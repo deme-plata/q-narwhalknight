@@ -1,0 +1,23 @@
+[package]
+name = "x-algorithm-scorer"
+version = "0.1.0-scaffold"
+edition = "2021"
+license = "Apache-2.0"
+description = "HTTP sidecar that scores tweet drafts against xAI's open-sourced ranking algorithm (github.com/xai-org/x-algorithm, Apache-2.0). Returns per-action engagement probabilities + negative-signal risk. Scaffold returns calibrated stub predictions; the real Phoenix-engine integration is the next layer of work."
+
+[[bin]]
+name = "x-algorithm-scorer"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }
