@@ -4367,15 +4367,19 @@ async fn run_decentralized_pool_mining(
                 let batch_size = 50_000u64;
                 let mut local_count: u64 = 0;
 
+                // PERF: Pre-build hash input once per batch and only update nonce bytes in-loop.
+                // Avoids re-copying 32-byte challenge for every nonce.
+                let mut hash_input = [0u8; 40];
+                hash_input[..32].copy_from_slice(&challenge_bytes);
+
                 for i in 0..batch_size {
-                    if !is_running.load(Ordering::Relaxed) {
+                    // PERF: Check stop flag every 256 hashes instead of every iteration.
+                    if i & 255 == 0 && !is_running.load(Ordering::Relaxed) {
                         break;
                     }
 
                     local_nonce = local_nonce.wrapping_add(1);
 
-                    let mut hash_input = [0u8; 40];
-                    hash_input[..32].copy_from_slice(&challenge_bytes);
                     hash_input[32..].copy_from_slice(&local_nonce.to_le_bytes());
                     let hash_result = compute_dag_knight_hash_optimized(&hash_input);
                     local_count += 1;
