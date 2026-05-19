@@ -17,6 +17,7 @@ pub mod dex_activity;
 pub mod water_bot;
 pub mod dark_knight;
 pub mod btc_advantage;
+pub mod qcredit_dca; // QSHARE-1 Phase 1 — yield-bearing DCA into QCREDIT Platinum tier
 
 // Re-export DEX activity components for easy access
 pub use dex_activity::{
@@ -29,3 +30,4 @@ pub use dex_activity::{
 pub use water_bot::{TunnelingOctopusBot, WaterBotConfig};
 pub use dark_knight::{DarkKnightBot, DarkKnightConfig};
 pub use btc_advantage::{BtcAdvantageBot, BtcAdvantageConfig};
+pub use qcredit_dca::{QcreditDcaBot, QcreditDcaConfig, LockCycleResult};
