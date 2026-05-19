@@ -233,6 +233,51 @@ pub struct ApiResponse<T> {
     pub timestamp: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoreReport {
+    pub total: f64,
+    pub fee_efficiency: f64,
+    pub amount_score: f64,
+    pub token_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct TxScoreContext {
+    amount: u128,
+    fee: u128,
+    token_type: q_types::TokenType,
+}
+
+struct TxScorer;
+
+impl TxScorer {
+    fn score_tx(tx: &Transaction, ctx: &TxScoreContext) -> ScoreReport {
+        let fee_efficiency = if ctx.amount == 0 {
+            0.0
+        } else {
+            (ctx.fee as f64 / ctx.amount as f64).clamp(0.0, 1.0)
+        };
+        let amount_score = ((ctx.amount as f64) / QUG_DISPLAY_DIVISOR).ln_1p().min(1.0);
+        let token_score = match ctx.token_type {
+            q_types::TokenType::QUG => 1.0,
+            q_types::TokenType::QUGUSD => 0.95,
+            q_types::TokenType::Custom(_) => 0.9,
+        };
+        let signature_score = if tx.signature.is_empty() { 0.0 } else { 1.0 };
+        let total = (0.35 * fee_efficiency)
+            + (0.25 * amount_score)
+            + (0.25 * token_score)
+            + (0.15 * signature_score);
+
+        ScoreReport {
+            total,
+            fee_efficiency,
+            amount_score,
+            token_score,
+        }
+    }
+}
+
 impl<T> ApiResponse<T> {
     pub fn success(data: T) -> Self {
         Self {
@@ -5117,7 +5162,14 @@ async fn send_transaction_inner(
         q_types::TokenType::QUGUSD => "QUGUSD",
         q_types::TokenType::Custom(_) => "CUSTOM",
     };
-    let response = serde_json::json!({
+    let score_context = TxScoreContext {
+        amount: signed_transaction.amount,
+        fee: signed_transaction.fee,
+        token_type: signed_transaction.token_type.clone(),
+    };
+    let score: Option<ScoreReport> = Some(TxScorer::score_tx(&signed_transaction, &score_context));
+
+    let mut response = serde_json::json!({
         "transaction_hash": hex::encode(tx_hash),
         "status": "submitted",
         "from": hex::encode(signed_transaction.from),
@@ -5134,6 +5186,15 @@ async fn send_transaction_inner(
         "consensus_type": if validator_count > 1 { "BFT 2f+1" } else { "Single-node" },
         "message": format!("Transaction confirmed by {} validator node(s) via quantum consensus", validator_count)
     });
+
+    if let Some(score) = score {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "score".to_string(),
+                serde_json::to_value(score).unwrap_or(Value::Null),
+            );
+        }
+    }
 
     Ok(Json(ApiResponse::success(response)))
 }
