@@ -21,6 +21,7 @@ mod resonance;
 mod strategies;
 mod swarm;
 mod types;
+mod wallet_auth; // X-Wallet-Auth Ed25519 signer (AFL-1 §3)
 mod wallet_manager;
 
 use crate::config::BotConfig;

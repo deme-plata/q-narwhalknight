@@ -32,6 +32,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::api_client::QuillonClient;
+use crate::wallet_auth::AgentWallet;
 
 // ════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -109,6 +110,7 @@ pub struct LockCycleResult {
 pub struct QcreditDcaBot {
     config: QcreditDcaConfig,
     client: QuillonClient,
+    wallet: AgentWallet,
     cycles_run: u32,
     cycles_skipped: u32,
     total_qug_locked: f64,
@@ -118,9 +120,20 @@ pub struct QcreditDcaBot {
 impl QcreditDcaBot {
     pub fn new(config: QcreditDcaConfig) -> Result<Self> {
         let client = QuillonClient::new(config.api_url.clone());
+        let wallet = AgentWallet::from_env_or_default()
+            .map_err(|e| anyhow!("qcredit-dca needs a signing wallet (TRADING_SEED env or ~/.claude/quillon-agent-seed file): {}", e))?;
+        // Sanity check: derived address should match configured wallet
+        if wallet.address() != config.wallet {
+            return Err(anyhow!(
+                "qcredit-dca wallet mismatch: TRADING_SEED derives to {} but config.wallet is {}",
+                wallet.address(),
+                config.wallet
+            ));
+        }
         Ok(Self {
             config,
             client,
+            wallet,
             cycles_run: 0,
             cycles_skipped: 0,
             total_qug_locked: 0.0,
@@ -133,22 +146,17 @@ impl QcreditDcaBot {
         let cycle_idx = self.cycles_run + self.cycles_skipped;
         let now_unix = chrono::Utc::now().timestamp();
 
-        // TODO(follow-up PR): add QuillonClient::get_balance_qug with X-Wallet-Auth.
-        // For Phase 1, the bot operates in dry-run-only mode until the signed
-        // balance endpoint is wired in trading-bot's api_client.rs.
-        // Workaround: when dry_run=true, treat balance as effectively unlimited
-        // (large enough that cycle never skips). When dry_run=false, refuse to
-        // run because we can't safely verify funds.
         let qug_balance: f64 = if self.config.dry_run {
-            f64::MAX / 2.0 // never trips the floor check
+            f64::MAX / 2.0
         } else {
-            return Err(anyhow!(
-                "qcredit-dca live mode requires QuillonClient::get_balance_qug — \
-                 follow-up PR will wire it via wallet_auth.rs X-Wallet-Auth signer. \
-                 For now, set dry_run=true to test cycle logic."
-            ));
+            self.client
+                .get_balance_qug_signed(&self.config.wallet, &self.wallet)
+                .await
+                .unwrap_or_else(|e| {
+                    warn!("[qcredit-dca] balance fetch failed (treating as 0): {}", e);
+                    0.0
+                })
         };
-        let _ = self.client.list_pools().await; // touch the client to avoid dead-code warnings
 
         // Skip if balance would drop below floor after this cycle.
         let required_balance = self.config.qug_per_cycle + self.config.min_balance_floor;
@@ -186,14 +194,34 @@ impl QcreditDcaBot {
             });
         }
 
-        // TODO(follow-up PR): POST /api/v1/qcredit/lock via
-        // QuillonClient::qcredit_lock — wire via trading-bot's wallet_auth.rs
-        // X-Wallet-Auth signer to authenticate the lock request. The endpoint
-        // contract is in crates/q-api-server/src/qcredit_api.rs::LockRequest.
-        return Err(anyhow!(
-            "qcredit-dca live lock not yet wired. \
-             See crates/q-api-server/src/qcredit_api.rs for the endpoint contract."
-        ));
+        let position_id = self
+            .client
+            .qcredit_lock_signed(
+                &self.config.wallet,
+                self.config.qug_per_cycle,
+                &self.config.tier,
+                &self.wallet,
+            )
+            .await
+            .map_err(|e| anyhow!("QCREDIT lock failed: {}", e))?;
+
+        info!(
+            "[qcredit-dca] cycle {} locked {:.6} QUG into {} tier (position={})",
+            cycle_idx, self.config.qug_per_cycle, self.config.tier, position_id
+        );
+
+        self.cycles_run += 1;
+        self.total_qug_locked += self.config.qug_per_cycle;
+
+        Ok(LockCycleResult {
+            cycle_index: cycle_idx,
+            qug_locked_display: self.config.qug_per_cycle,
+            tier: self.config.tier.clone(),
+            position_id: Some(position_id),
+            at_unix: now_unix,
+            skipped: false,
+            skip_reason: None,
+        })
     }
 
     /// Run the bot loop until max_cycles is reached OR an unrecoverable error.
