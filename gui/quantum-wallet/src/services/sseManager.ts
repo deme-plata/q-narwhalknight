@@ -13,6 +13,7 @@
  * Components subscribe via sseManager.on('event-type', callback).
  * Reconnection uses jittered backoff with fast initial retry.
  */
+import { generateAuthHeader, walletSession } from './walletAuth';
 
 type SSECallback = (data: any) => void;
 
@@ -115,7 +116,7 @@ function handleEvent(type: string, rawData: string) {
   }
 }
 
-function connect() {
+async function connect() {
   // Don't reconnect if already connected or connecting
   if (state.eventSource && state.eventSource.readyState !== EventSource.CLOSED) {
     return;
@@ -131,7 +132,23 @@ function connect() {
   dispatchStatusEvent(state.status);
 
   const baseUrl = localStorage.getItem('nodeUrl') || '';
-  const url = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
+  let authParam = '';
+  try {
+    const session = walletSession.getSession();
+    if (session?.privateKey && session?.address) {
+      const authHeader = await generateAuthHeader(
+        session.privateKey,
+        session.address,
+        '/api/v1/events',
+        'Ed25519',
+      );
+      authParam = `&auth=${encodeURIComponent(authHeader)}`;
+    }
+  } catch (e) {
+    console.warn('[SSE Manager] auth signing failed, falling back to unauth stream', e);
+  }
+
+  const url = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}${authParam}`;
 
   console.log(`[SSE Manager] Connecting (attempt ${state.reconnectAttempts})...`);
 
@@ -293,3 +310,4 @@ export const sseManager = {
 };
 
 export default sseManager;
+import { generateAuthHeader, walletSession } from './walletAuth';
