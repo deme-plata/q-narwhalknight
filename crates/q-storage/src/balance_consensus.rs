@@ -417,8 +417,10 @@ impl BalanceConsensusEngine {
                 }
 
                 // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                // v10.10.4: QSHARE added — routes to token_balances like QUGUSD (reserved address)
                 let token_addr = match block_tx.token_type {
                     q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::QSHARE => Some(q_types::QSHARE_TOKEN_ADDRESS),
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
@@ -842,8 +844,10 @@ impl BalanceConsensusEngine {
                 }
 
                 // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                // v10.10.4: QSHARE added — routes to token_balances like QUGUSD (reserved address)
                 let token_addr = match block_tx.token_type {
                     q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::QSHARE => Some(q_types::QSHARE_TOKEN_ADDRESS),
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
@@ -1208,8 +1212,10 @@ impl BalanceConsensusEngine {
                 }
 
                 // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
+                // v10.10.4: QSHARE added — routes to token_balances like QUGUSD (reserved address)
                 let token_addr = match block_tx.token_type {
                     q_types::TokenType::QUGUSD => Some(q_types::QUGUSD_TOKEN_ADDRESS),
+                    q_types::TokenType::QSHARE => Some(q_types::QSHARE_TOKEN_ADDRESS),
                     q_types::TokenType::Custom(addr) => Some(addr),
                     q_types::TokenType::QUG => None,
                 };
