@@ -95,10 +95,11 @@ async fn read_qshare_pool(state: &AppState) -> Option<DexPoolSnapshot> {
     let qshare_addr = hex::encode(q_types::QSHARE_TOKEN_ADDRESS);
     let qug_addr = hex::encode(q_types::QUG_TOKEN_ADDRESS);
     for (_pool_id, pool) in pools.iter() {
-        let (token0, token1) = (pool.token0, pool.token1);
-        if (token0 == qshare_addr && token1 == qug_addr) || (token0 == qug_addr && token1 == qshare_addr) {
+        let token0 = &pool.token0;
+        let token1 = &pool.token1;
+        if (token0 == &qshare_addr && token1 == &qug_addr) || (token0 == &qug_addr && token1 == &qshare_addr) {
             // Reserves are ordered (token0, token1). Map to (qug_reserves, qshare_reserves).
-            let (qug_r, qshare_r) = if token0 == qug_addr {
+            let (qug_r, qshare_r) = if token0 == &qug_addr {
                 (pool.reserve0, pool.reserve1)
             } else {
                 (pool.reserve1, pool.reserve0)
