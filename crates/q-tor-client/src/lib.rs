@@ -32,6 +32,14 @@ pub mod dedicated_circuits;
 // libp2p-Tor Transport (native libp2p integration)
 pub mod libp2p_transport;
 
+// v10.10.9 — Phase C prep: libp2p Transport adapter over QTorClient that uses
+// connect_to_peer instead of DedicatedCircuitManager. Avoids the type mismatch
+// that blocked the original libp2p_transport::TorTransport from being wired
+// into unified_network_manager's SwarmBuilder. Not yet hooked into the swarm
+// (that's v10.10.10's job); compiled in so it's ready when called.
+pub mod qtor_transport;
+pub use qtor_transport::QTorTransport;
+
 // Proactive Circuit Prewarming
 pub mod circuit_prewarming;
 
