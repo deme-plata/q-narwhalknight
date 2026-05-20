@@ -21,6 +21,16 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// v2.0.0: X-Wallet-Auth seed-derived signing for production v10.9.55+ endpoints.
+// See ./wallet_auth.ts for the signing algorithm (matches raw_balance.mjs exactly).
+import {
+  loadSeed,
+  deriveKeys,
+  signXWalletAuth,
+  SeedNotFoundError,
+  SignatureError,
+} from "./wallet_auth.js";
+
 // ═══════════════════════════════════════════════════════════════
 // SECURITY FIX 5: API URL validation — prevent SSRF/phishing via env vars
 // ═══════════════════════════════════════════════════════════════
@@ -51,7 +61,20 @@ function validateApiUrl(url: string): string {
 const API_BASE = validateApiUrl(process.env.QUILLON_API_URL || "https://quillon.xyz/api/v1");
 const DOWNLOAD_BASE = validateApiUrl(process.env.QUILLON_DOWNLOAD_URL || "https://quillon.xyz/downloads");
 
-// --- HTTP helper ---
+// --- HTTP helpers ---
+
+// API_BASE includes /api/v1 (e.g., "https://quillon.xyz/api/v1"); when we sign
+// an X-Wallet-Auth header the server expects the FULL request path including
+// the prefix, so we extract the path portion of API_BASE once and prepend it
+// to the per-call suffix.
+const API_PATH_PREFIX = (() => {
+  try {
+    return new URL(API_BASE).pathname.replace(/\/$/, "");
+  } catch {
+    return "/api/v1";
+  }
+})();
+
 async function api(path: string, method = "GET", body?: unknown): Promise<unknown> {
   const url = `${API_BASE}${path}`;
   const opts: RequestInit = {
@@ -66,10 +89,63 @@ async function api(path: string, method = "GET", body?: unknown): Promise<unknow
   return res.json();
 }
 
+// v2.0.0: signed variant for endpoints that require X-Wallet-Auth.
+// On 401 we re-load the seed and retry ONCE (handles fresh-seed-after-launch).
+// On final failure throws a SignatureError with diagnostic content the agent
+// can act on (which seed source, which derived address, server reply).
+async function apiSigned(
+  path: string,
+  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
+  body?: unknown,
+  opts?: { seed?: string },
+): Promise<unknown> {
+  const url = `${API_BASE}${path}`;
+  const signPath = `${API_PATH_PREFIX}${path}`;
+
+  const doRequest = async (attempt: number): Promise<Response> => {
+    const auth = signXWalletAuth(signPath, { seedArg: opts?.seed });
+    const init: RequestInit = {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wallet-Auth": auth.header,
+      },
+      redirect: "error",
+    };
+    if (body) init.body = JSON.stringify(body);
+    const res = await fetch(url, init);
+    // Stash the derived address + source so the error path can report them.
+    (res as Response & { _qnk?: { addr: string; src: string; attempt: number } })._qnk = {
+      addr: auth.address,
+      src: auth.source,
+      attempt,
+    };
+    return res;
+  };
+
+  let res = await doRequest(1);
+  if (res.status === 401) {
+    res = await doRequest(2);
+  }
+  if (!res.ok) {
+    const ctx = (res as Response & { _qnk?: { addr: string; src: string; attempt: number } })._qnk;
+    const bodyText = await res.text();
+    throw new SignatureError(
+      `Signed API ${method} ${path} returned ${res.status} (attempt ${ctx?.attempt ?? "?"}). ` +
+        `Seed source: ${ctx?.src ?? "?"}. Derived address: ${ctx?.addr ?? "?"}. ` +
+        `Server reply: ${bodyText}. ` +
+        `Hints: confirm the address matches the wallet you intended; check clock drift (server tolerance ±5min); ` +
+        `if mid-session seed change, verify the new seed file content.`,
+      ctx?.addr,
+    );
+  }
+  return res.json();
+}
+
 // --- MCP Server ---
 const server = new McpServer({
   name: "quillon-wallet",
-  version: "1.2.0",
+  version: "2.0.0",
 });
 
 // ============================================================
@@ -300,24 +376,43 @@ server.tool(
 
 server.tool(
   "get_balance",
-  "Check the balance of any Quillon wallet address (qnk...)",
-  { address: z.string().describe("Wallet address starting with 'qnk'") },
-  async ({ address }) => {
-    const res = await api(`/wallets/${address}/balance`) as any;
-    if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
+  "Check the balance of any Quillon wallet address (qnk...). Production v10.9.55+ requires X-Wallet-Auth; the MCP signs automatically using the configured seed (file ~/.claude/quillon-agent-seed → QNK_SEED env, override per-call with `seed`). Returns balance in QUG.",
+  {
+    address: z.string().optional().describe("Wallet address starting with 'qnk'. If omitted, uses the address derived from the configured seed (your own wallet)."),
+    seed: z.string().optional().describe("Optional 64-char hex seed to override the configured seed for this call only."),
+  },
+  async ({ address, seed }) => {
+    try {
+      // If no address given, derive from seed (signs as the same wallet).
+      const targetAddress = address ?? (() => {
+        const { seed: s } = loadSeed({ seedArg: seed });
+        return deriveKeys(s).address;
+      })();
+      const res = await apiSigned(`/wallets/${targetAddress}/balance`, "GET", undefined, { seed }) as any;
+      if (!res.success) return { content: [{ type: "text", text: `Failed: ${res.error}` }] };
 
-    const balance = res.data;
-    return {
-      content: [{
-        type: "text",
-        text: [
-          `Wallet: ${address}`,
-          `Balance: ${balance.balance_qug || balance.balance || 0} QUG`,
-          balance.pending ? `Pending: ${balance.pending} QUG` : '',
-          balance.staked ? `Staked: ${balance.staked} QUG` : '',
-        ].filter(Boolean).join("\n"),
-      }],
-    };
+      const balance = res.data;
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Wallet: ${targetAddress}`,
+            `Balance: ${balance.balance_qnk ?? balance.balance_qug ?? balance.balance ?? 0} QUG`,
+            balance.pending ? `Pending: ${balance.pending} QUG` : "",
+            balance.staked ? `Staked: ${balance.staked} QUG` : "",
+            `Auth: ${balance.auth_scheme ?? "Ed25519"} (${balance.privacy_mode ?? "authenticated"})`,
+          ].filter(Boolean).join("\n"),
+        }],
+      };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) {
+        return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      }
+      if (e instanceof SignatureError) {
+        return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      }
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
   }
 );
 
@@ -1669,33 +1764,220 @@ server.tool(
 
 server.tool(
   "qshare_mint",
-  "Attempt to trigger an autonomous QSHARE mint. Permissionless — anyone can call. The contract enforces premium threshold (≥ 1.5×), cooldown (360 blocks default), and pool depth gates. If the trigger succeeds, the caller receives a bounty (default 0.5% of accumulated QUG, capped at 1 QUG). Requires X-Wallet-Auth signing. The trigger fee (0.01 QUG) is refunded + bounty added on success. Use qshare_premium_ratio first to check eligibility.",
+  "Attempt to trigger an autonomous QSHARE mint. Permissionless — the contract gates by premium threshold (≥ 1.5×), cooldown (360 blocks default), and pool depth. If accepted, caller earns a bounty (~0.5% of accumulated QUG, capped at 1 QUG). Calls POST /api/v1/qshare/try_mint_signed (v10.10.7+). Seed defaults to file → env per usual; per-call `seed` overrides.",
   {
-    seed: z.string().describe("Wallet seed used to sign the X-Wallet-Auth header"),
-    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
-    dry_run: z.boolean().optional().describe("If true, return what would be done without submitting"),
+    seed: z.string().optional().describe("Override the configured seed for this call (otherwise: file → QNK_SEED env)"),
+    dry_run: z.boolean().optional().describe("If true, describe what would happen without submitting"),
   },
-  async ({ seed, api_url, dry_run }) => {
-    if (dry_run) {
-      return { content: [{ type: "text", text: `[DRY RUN] Would call POST ${api_url || "https://quillon.xyz/api/v1"}/qshare/try_mint_signed with X-Wallet-Auth(seed=<redacted>). The contract gates the mint by premium ≥ 1.5×, cooldown ≥ 360 blocks since last mint, and pool depth ≥ 1000 QUG. If accepted, bounty arrives as a coinbase-style payout in the next block.` }] };
+  async ({ seed, dry_run }) => {
+    try {
+      if (dry_run) {
+        const { seed: s, source } = loadSeed({ seedArg: seed });
+        const { address } = deriveKeys(s);
+        return {
+          content: [{
+            type: "text",
+            text:
+              `[DRY RUN] POST ${API_BASE}/qshare/try_mint_signed\n` +
+              `Seed source: ${source}\n` +
+              `Caller: ${address}\n` +
+              `Contract gates: premium ≥ 1.5×, cooldown ≥ 360 blocks, pool depth.`,
+          }],
+        };
+      }
+      const res = await apiSigned("/qshare/try_mint_signed", "POST", {}, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
     }
-    return { content: [{ type: "text", text: `qshare_mint not yet wired to /api/v1/qshare/try_mint_signed. The endpoint is spec'd at docs/standards/qshare-treasury-protocol-spec.md §5. Phase 2 wire-up: implement qshare_api.rs in q-api-server that calls QShareContract::try_autonomous_mint and routes the result. The contract and the signing path are already complete on agent/cross-shard-simd-validation as of v10.10.x.` }] };
   }
 );
 
 server.tool(
   "qshare_buyback",
-  "Attempt to trigger a QSHARE buyback. Permissionless — anyone can call. The contract gates by discount threshold (≤ 0.95×), cooldown (720 blocks default), pool depth, AND available accrued yield (buybacks never spend treasury principal). Tighter pool cap than mint (0.1% vs 0.5%) to prevent gaming. Same auth shape as qshare_mint.",
+  "Attempt to trigger a QSHARE buyback. Permissionless — gates by discount ≤ 0.95×, cooldown ≥ 720 blocks, pool depth, AND accrued-yield availability (principal is never spent). Tighter pool cap than mint (0.1% vs 0.5%). Calls POST /api/v1/qshare/try_buyback_signed (v10.10.7+).",
   {
-    seed: z.string().describe("Wallet seed used to sign the X-Wallet-Auth header"),
-    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
-    dry_run: z.boolean().optional().describe("If true, return what would be done without submitting"),
+    seed: z.string().optional().describe("Override the configured seed for this call"),
+    dry_run: z.boolean().optional().describe("If true, describe what would happen without submitting"),
   },
-  async ({ seed, api_url, dry_run }) => {
-    if (dry_run) {
-      return { content: [{ type: "text", text: `[DRY RUN] Would call POST ${api_url || "https://quillon.xyz/api/v1"}/qshare/try_buyback_signed. The contract gates by discount ≤ 0.95×, cooldown ≥ 720 blocks, pool depth, and accrued-yield availability. Buybacks burn QSHARE; principal is never touched.` }] };
+  async ({ seed, dry_run }) => {
+    try {
+      if (dry_run) {
+        const { seed: s, source } = loadSeed({ seedArg: seed });
+        const { address } = deriveKeys(s);
+        return {
+          content: [{
+            type: "text",
+            text:
+              `[DRY RUN] POST ${API_BASE}/qshare/try_buyback_signed\n` +
+              `Seed source: ${source}\n` +
+              `Caller: ${address}\n` +
+              `Contract gates: discount ≤ 0.95×, cooldown ≥ 720 blocks, pool depth, accrued yield available.`,
+          }],
+        };
+      }
+      const res = await apiSigned("/qshare/try_buyback_signed", "POST", {}, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
     }
-    return { content: [{ type: "text", text: `qshare_buyback not yet wired to /api/v1/qshare/try_buyback_signed. The endpoint is spec'd at docs/standards/qshare-treasury-protocol-spec.md §5. Phase 2 wire-up: implement qshare_api.rs in q-api-server. The contract method QShareContract::try_buyback is already complete on agent/cross-shard-simd-validation as of v10.10.x.` }] };
+  }
+);
+
+// ============================================================
+// v2.0.0 — DISCOVERY + AGENT-PANEL + ENGINE PULSE + BATCH SUBMIT
+// ============================================================
+
+server.tool(
+  "wallet_info",
+  "One-shot discovery: address derived from the configured seed, seed source actually used, server endpoint + version, and current balance. Call this first in any new session — it confirms which wallet the MCP will sign as.",
+  {
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)"),
+  },
+  async ({ seed }) => {
+    try {
+      const { seed: s, source } = loadSeed({ seedArg: seed });
+      const { address } = deriveKeys(s);
+      // Pull status (no auth) + balance (signed) in parallel
+      const [status, balance] = await Promise.all([
+        api("/status").catch(() => null) as Promise<any>,
+        apiSigned(`/wallets/${address}/balance`, "GET", undefined, { seed }).catch(() => null) as Promise<any>,
+      ]);
+      const lines: string[] = [
+        `address:       ${address}`,
+        `seed source:   ${source}`,
+        `endpoint:      ${API_BASE}`,
+      ];
+      if (status?.data) {
+        lines.push(`server status: ${status.data.status ?? "?"}`);
+        lines.push(`network_id:    ${status.data.network_id ?? "?"}`);
+        const upgrades = status.data.upgrades;
+        if (upgrades?.current_height !== undefined) {
+          lines.push(`tip height:    ${upgrades.current_height}`);
+        }
+      } else {
+        lines.push(`server status: UNREACHABLE`);
+      }
+      if (balance?.data) {
+        lines.push(`balance:       ${balance.data.balance_qnk ?? balance.data.balance_qug ?? "?"} QUG`);
+        lines.push(`auth scheme:   ${balance.data.auth_scheme ?? "Ed25519"}`);
+      } else {
+        lines.push(`balance:       (failed to read — seed correct? server reachable?)`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "engine_pulse",
+  "Live engine vitals: sync heights, mining counters, P2P bytes, mempool size, gap-to-tip. No auth needed. Useful as a first-look health check before deeper queries.",
+  {},
+  async () => {
+    try {
+      const res = await api("/engine/pulse") as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "agent_panel",
+  "Fetch the agent activity panel for a wallet (v10.10.7+, route /api/v1/agent/panel/:addr). With mode=owner the server requires X-Wallet-Auth matching :addr; the MCP signs automatically using the configured seed. With mode=embed it's a public read.",
+  {
+    address: z.string().optional().describe("Wallet address; omit to use the address derived from the configured seed (only valid with mode=owner)"),
+    mode: z.enum(["owner", "embed"]).optional().describe("'owner' (default) shows the full panel and requires signing; 'embed' is the public truncated view"),
+    zone: z.enum(["now", "queued", "done"]).optional().describe("Filter to one zone"),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ address, mode, zone, seed }) => {
+    try {
+      const effectiveMode = mode ?? "owner";
+      // Owner mode needs a wallet match — derive from seed if address omitted.
+      const targetAddr = address ?? (() => {
+        const { seed: s } = loadSeed({ seedArg: seed });
+        return deriveKeys(s).address;
+      })();
+      const qs = new URLSearchParams();
+      qs.set("mode", effectiveMode);
+      if (zone) qs.set("zone", zone);
+      const path = `/agent/panel/${targetAddr}?${qs.toString()}`;
+      const res = effectiveMode === "owner"
+        ? await apiSigned(path, "GET", undefined, { seed }) as any
+        : await api(path) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "agent_submit",
+  "Submit a single agent transaction (v10.10.7+ AFL-1, route POST /api/v1/agent/submit). The MCP signs as the caller automatically. Intent should match the AFL-1 spec; the server constructs + broadcasts the underlying Transaction.",
+  {
+    intent: z.record(z.any()).describe("Agent intent object per AFL-1 protocol (see docs/standards/afl-1-protocol-spec.md). Required fields depend on intent kind."),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ intent, seed }) => {
+    try {
+      const res = await apiSigned("/agent/submit", "POST", { intent }, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "agent_submit_batch",
+  "Submit a batch of agent intents in one call (v10.10.7+ AFL-1, route POST /api/v1/agent/submit-batch). Each intent is processed independently; the response includes a per-item result so partial failures don't lose the whole batch. Default cap is 1000 intents per call (Q_AGENT_BATCH_MAX, hard cap 10000).",
+  {
+    intents: z.array(z.record(z.any())).describe("Array of intent objects per AFL-1 spec"),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ intents, seed }) => {
+    try {
+      const res = await apiSigned("/agent/submit-batch", "POST", { intents }, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "qshare_bootstrap_pool",
+  "Seed the genesis QSHARE/QUG AMM pool (v10.10.7+, route POST /api/v1/qshare/bootstrap_pool). Founder-style call: deposits initial liquidity so the premium-ratio math has reserves to read against. Future v10.10.8 will add an AEGIS-QL founder gate; today this just requires a signed call.",
+  {
+    qug_amount: z.number().describe("Amount of QUG to deposit into the pool"),
+    qshare_amount: z.number().describe("Amount of QSHARE to deposit (typically minted from initial allocation)"),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ qug_amount, qshare_amount, seed }) => {
+    try {
+      const res = await apiSigned("/qshare/bootstrap_pool", "POST", { qug_amount, qshare_amount }, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
   }
 );
 
