@@ -37,15 +37,18 @@ This guide explains how to set up distributed development with multiple Claude C
 - **Note**: When checking sync test status, the container runs on Server Alpha, not Beta
 - **To get sync status**: Ask user to run `docker logs q-v1098 2>&1 | tail -50` on Server Alpha
 
-#### **Server Beta (Production/Bootstrap Node)**
+#### **Server Beta (Development / Dev-Endpoint Node)**
 - **IP Address**: `185.182.185.227`
-- **Role**: Production bootstrap node, network anchor
+- **Role**: **DEVELOPMENT server** — where code lives, where commits happen, where local-git lives. Also serves `beta.quillon.xyz` (a developer/staging-facing subdomain).
+- **NOT** the production endpoint for `quillon.xyz` — see Epsilon below for that.
 - **API Port**: `8080` (HTTP REST API)
 - **P2P Port**: `9001` (libp2p gossipsub + Kademlia DHT)
-- **Working Directory**: `/opt/orobit/shared/q-narwhalknight`
+- **Working Directory**: `/opt/orobit/shared/q-narwhalknight` (canonical source of truth for code)
 - **Service**: `systemd` service at `/etc/systemd/system/q-api-server.service`
-- **Frontend**: Nginx serving from `gui/quantum-wallet/dist-final/`
-- **Domain**: `quillon.xyz`
+- **Frontend**: served via q-flux from `gui/quantum-wallet/dist-final/` (was nginx; q-flux replaced it)
+- **Subdomain**: `beta.quillon.xyz` (NOT the apex `quillon.xyz` — that points to Epsilon)
+- **Local-git server**: hosts `code.quillon.xyz/repo.git` (currently HTTPS route is broken, cert expired 2026-05-08, q-flux routing needs sidecar) and `git://185.182.185.227:9418/q-narwhalknight` (git daemon — working, Epsilon pulls from here)
+- **Implication for deploys**: Beta is the FIRST place to deploy any new release. It's the safety-net dev endpoint. Production (`quillon.xyz`) traffic only moves to a new version AFTER Beta has run it cleanly.
 
 #### **Server Gamma (Backup/Failover Node)**
 - **IP Address**: `109.205.176.60`
@@ -60,9 +63,11 @@ This guide explains how to set up distributed development with multiple Claude C
 - **RAM**: 7.8GB + 4GB swap (swap required to prevent OOM during sync)
 - **Note**: Has Claude Code installed for remote administration
 
-#### **Server Epsilon (10Gbit SUPERNODE — Primary Sync Target)**
+#### **Server Epsilon (10Gbit SUPERNODE — PRODUCTION + Primary Sync Target)**
 - **IP Address**: `89.149.241.126`
-- **Role**: Primary bootstrap node, 10Gbit supernode, fastest sync source
+- **Role**: **PRODUCTION node serving `quillon.xyz`** (apex domain, where end users + miners + downloads land). Also 10Gbit supernode + fastest sync source on the network.
+- **DNS**: `quillon.xyz` → Epsilon. This is the user-facing production endpoint.
+- **Deploy implication**: Epsilon is the LAST server to receive a new release. Only deploy here after Beta (dev) + Gamma + Delta (backups) confirm the new binary is stable. A bad deploy on Epsilon affects all production users directly.
 - **API Port**: `8080` (HTTP REST API)
 - **P2P Port**: `9001` (libp2p gossipsub + Kademlia DHT)
 - **SSH**: `root@89.149.241.126` (SSH key auth from Beta)
