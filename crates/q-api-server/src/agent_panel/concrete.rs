@@ -883,6 +883,7 @@ pub fn build_default_panel_pipeline(
                 // Group by (task_type, first-4-hex-of-origin)
                 format!("{:?}-{}", c.task_type, &c.origin_wallet.chars().take(8).collect::<String>())
             },
+            _phantom: std::marker::PhantomData,
         })
         // Phase 8: PostSelectionHydrators — expensive, only on final 50
         .post_selection_hydrator(TokenMetadataHydrator)

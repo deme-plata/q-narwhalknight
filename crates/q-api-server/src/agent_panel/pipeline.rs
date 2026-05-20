@@ -597,6 +597,11 @@ pub struct DiversityTopK<C: Send + Sync, F: Fn(&C) -> String + Send + Sync> {
     pub lambda: f64,
     /// Closure extracting the diversity key from a candidate.
     pub key: F,
+    /// Phantom marker — `C` only appears in the `F` Fn bound, which Rust
+    /// considers an unused type parameter on the struct itself. Carrying a
+    /// zero-sized `PhantomData<fn(&C)>` makes the parameter "used" while
+    /// keeping the struct `Send + Sync` (we don't actually own a `C`).
+    pub _phantom: std::marker::PhantomData<fn(&C)>,
 }
 
 impl<C: Send + Sync, F: Fn(&C) -> String + Send + Sync> Selector<C> for DiversityTopK<C, F> {
