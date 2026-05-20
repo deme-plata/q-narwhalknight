@@ -2908,29 +2908,63 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Set Q_TOR_DISABLED=1 ONLY for development/testing (NOT for production!)
     let tor_disabled = std::env::var("Q_TOR_DISABLED").is_ok();
 
-    // Tor bootstraps in the background — does NOT block node startup.
-    // Arti needs 30-90s to establish circuits; the old 5s timeout always failed.
-    // Dandelion++ propagation uses gossipsub (always live); Tor circuits are an enhancement.
-    let tor_client: Option<Arc<q_tor_client::QTorClient>> = None;
-    if !tor_disabled {
-        info!("🧅 Tor bootstrap starting in background (30-90s for circuit establishment)...");
-        let bg_node_id = node_id;
-        tokio::spawn(async move {
-            let tor_config = q_tor_client::TorConfig::default();
-            match q_tor_client::QTorClient::new(tor_config, bg_node_id, q_types::Phase::Phase1).await {
-                Ok(_client) => {
-                    info!("✅ Tor client bootstrapped — Tor circuits are ready");
-                    info!("   Dandelion++ already running via gossipsub; Tor enhances stem privacy");
-                }
-                Err(e) => {
-                    warn!("⚠️  Tor background bootstrap failed: {}", e);
-                    warn!("   Dandelion++ continues in gossipsub-only mode (no Tor circuits)");
-                }
-            }
-        });
-    } else {
+    // v10.10.8: Synchronous Tor bootstrap so the resulting Arc<QTorClient> can be
+    // handed into UnifiedNetworkManager::new() for Phase A onion announcement.
+    // Pre-v10.10.8 this was tokio::spawn-and-drop — the Arc never escaped the spawn,
+    // so downstream code that wanted it (Phase A onion listener, Phase B/C wiring)
+    // got a permanent `None`.
+    //
+    // Timeout default 60s (Arti's typical bootstrap) and overridable via
+    // Q_TOR_BOOTSTRAP_TIMEOUT for operator control. If it times out or fails, we
+    // continue without Tor and downstream phases gracefully skip.
+    //
+    // Skipped entirely when Q_TOR_DISABLED=1 or Q_TOR_LISTEN_ONION/STEM/OUTBOUND
+    // are all unset (avoid paying the bootstrap cost for clearnet-only nodes).
+    let tor_client: Option<Arc<q_tor_client::QTorClient>> = if tor_disabled {
         warn!("⚠️  Tor DISABLED via Q_TOR_DISABLED=1");
-    }
+        None
+    } else if std::env::var("Q_TOR_LISTEN_ONION").map(|v| v == "1" || v == "true").unwrap_or(false)
+        || std::env::var("Q_TOR_STEM").map(|v| v == "1" || v == "true").unwrap_or(false)
+        || std::env::var("Q_TOR_OUTBOUND").map(|v| v == "1" || v == "true").unwrap_or(false)
+        || std::env::var("Q_TOR_ENABLED").map(|v| v == "1" || v == "true").unwrap_or(false)
+    {
+        let bootstrap_secs = std::env::var("Q_TOR_BOOTSTRAP_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        info!(
+            "🧅 Tor bootstrap starting (synchronous, up to {}s for circuit establishment)...",
+            bootstrap_secs
+        );
+        let tor_config = q_tor_client::TorConfig::default();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(bootstrap_secs),
+            q_tor_client::QTorClient::new(tor_config, node_id, q_types::Phase::Phase1),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                info!("✅ Tor client bootstrapped — Tor circuits are ready");
+                info!("   Available to UnifiedNetworkManager for Phase A/B/C wiring");
+                Some(Arc::new(client))
+            }
+            Ok(Err(e)) => {
+                warn!("⚠️  Tor bootstrap failed: {}", e);
+                warn!("   Dandelion++ continues in gossipsub-only mode (no Tor circuits)");
+                None
+            }
+            Err(_) => {
+                warn!("⚠️  Tor bootstrap timed out after {}s — continuing without Tor", bootstrap_secs);
+                warn!("   Increase Q_TOR_BOOTSTRAP_TIMEOUT or check Tor reachability");
+                None
+            }
+        }
+    } else {
+        // No Tor lifecycle flag set; skip the bootstrap to avoid 60s startup cost
+        // on clearnet-only nodes.
+        info!("🧅 Tor bootstrap skipped (no Q_TOR_* phase flag set; set Q_TOR_LISTEN_ONION=1 to enable)");
+        None
+    };
 
     // Initialize Bitcoin-Tor Bridge - DEACTIVATED
     let bitcoin_bridge: Option<Arc<()>> = {
