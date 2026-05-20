@@ -322,6 +322,250 @@ struct SerializedScoreHistory {
     by_wallet: HashMap<String, Vec<ScoreEntry>>,
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// v10.10.10: calibration suggestions
+//
+// Closes the loop on the "killer next move": now that we have persisted
+// scores, we can compute the basic calibration heuristic Twitter's heavy-
+// ranker bootstraps from — what's the empirical distribution of each
+// component, and how should we reweight to maximise spread between selected
+// vs unselected sets?
+//
+// This is a heuristic Layer-0 calibrator, not a real ML model. It's intended
+// to surface "this component has zero variance, drop its weight" or "this
+// component fires only 5% of the time, increase its weight" — the kinds of
+// signal you'd notice by hand if you read 100 score reports. v10.10.11+
+// will replace with a proper Bayesian regression once we have outcome labels
+// (did the tx confirm? did the swap profit?).
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ComponentCalibration {
+    /// Component name (matches ScoreComponent.name).
+    pub name: String,
+    /// Current weight (constant per scorer impl).
+    pub current_weight: f64,
+    /// Empirical mean of this component's value across selected entries.
+    pub mean_value: f64,
+    /// Standard deviation. If ~0, the scorer is producing constant output —
+    /// no information content, weight could be lowered.
+    pub stddev: f64,
+    /// Fraction of entries where the component was non-zero. If small,
+    /// the scorer is rarely firing — bumping the weight on rare fires
+    /// gives them more impact.
+    pub fire_rate: f64,
+    /// Suggested new weight (computed from variance + fire rate). Same
+    /// scale as current_weight — diff to know the direction.
+    pub suggested_weight: f64,
+    /// Free-text explanation for the operator.
+    pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibrationReport {
+    pub wallet: String,
+    pub sample_size: usize,
+    pub components: Vec<ComponentCalibration>,
+    pub overall_recommendation: String,
+}
+
+impl ScoreHistory {
+    /// Compute a calibration report for the wallet. Returns None if no data.
+    pub fn calibrate(&self, wallet_hex: &str) -> Option<CalibrationReport> {
+        let map = self.by_wallet.read();
+        let q = map.get(wallet_hex)?;
+        if q.is_empty() {
+            return None;
+        }
+        let n = q.len();
+        // Aggregate per-component stats across SELECTED entries (those are
+        // what the user actually sees; unselected aren't worth calibrating
+        // against because they're already being suppressed).
+        let mut per_component: HashMap<String, ComponentAgg> = HashMap::new();
+        let mut selected_count = 0usize;
+        for entry in q.iter() {
+            if !entry.selected {
+                continue;
+            }
+            selected_count += 1;
+            for c in &entry.score.components {
+                let agg = per_component.entry(c.name.clone()).or_insert_with(|| ComponentAgg {
+                    name: c.name.clone(),
+                    weight: c.weight,
+                    sum: 0.0,
+                    sum_sq: 0.0,
+                    nonzero: 0,
+                    total: 0,
+                });
+                agg.sum += c.value;
+                agg.sum_sq += c.value * c.value;
+                if c.value.abs() > f64::EPSILON {
+                    agg.nonzero += 1;
+                }
+                agg.total += 1;
+            }
+        }
+        if selected_count == 0 {
+            return None;
+        }
+
+        let mut components: Vec<ComponentCalibration> = per_component
+            .into_iter()
+            .map(|(_, agg)| {
+                let mean = if agg.total > 0 { agg.sum / agg.total as f64 } else { 0.0 };
+                let variance = if agg.total > 0 {
+                    (agg.sum_sq / agg.total as f64) - (mean * mean)
+                } else {
+                    0.0
+                };
+                let stddev = variance.max(0.0).sqrt();
+                let fire_rate = if agg.total > 0 {
+                    agg.nonzero as f64 / agg.total as f64
+                } else {
+                    0.0
+                };
+
+                // Heuristic: target the suggested weight at a fraction of the
+                // current weight, scaled by (stddev × fire_rate). A scorer
+                // that always fires the same value (low variance) gets its
+                // weight halved; one that fires rarely with high variance
+                // gets bumped up. Clamp to [0.5×, 2.0×] current.
+                let signal_quality = stddev * fire_rate;
+                let lift = (signal_quality * 4.0).clamp(0.5, 2.0);
+                let suggested = (agg.weight * lift).clamp(0.0, 1.0);
+
+                let recommendation = if stddev < 0.01 {
+                    "constant output — likely dead code, consider removing".to_string()
+                } else if fire_rate < 0.05 {
+                    format!(
+                        "fires {:.1}% — rarely active; increase weight to give fires more impact",
+                        fire_rate * 100.0,
+                    )
+                } else if signal_quality > 0.2 {
+                    "strong signal — keep weight or increase slightly".to_string()
+                } else {
+                    "moderate signal — current weight reasonable".to_string()
+                };
+
+                ComponentCalibration {
+                    name: agg.name,
+                    current_weight: agg.weight,
+                    mean_value: mean,
+                    stddev,
+                    fire_rate,
+                    suggested_weight: suggested,
+                    recommendation,
+                }
+            })
+            .collect();
+        // Sort by absolute weight change desc — surface biggest suggested
+        // changes first.
+        components.sort_by(|a, b| {
+            let da = (a.suggested_weight - a.current_weight).abs();
+            let db = (b.suggested_weight - b.current_weight).abs();
+            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let overall_recommendation = if selected_count < 30 {
+            format!(
+                "low sample size ({} entries) — calibration suggestions are speculative; collect more data before adjusting weights",
+                selected_count,
+            )
+        } else if components.iter().all(|c| (c.suggested_weight - c.current_weight).abs() < 0.05) {
+            "weights look well-calibrated — no significant changes suggested".to_string()
+        } else {
+            "consider adjusting weights for the top-3 components by suggested delta — these have the biggest reweighting opportunity".to_string()
+        };
+
+        Some(CalibrationReport {
+            wallet: wallet_hex.to_string(),
+            sample_size: n,
+            components,
+            overall_recommendation,
+        })
+    }
+}
+
+struct ComponentAgg {
+    name: String,
+    weight: f64,
+    sum: f64,
+    sum_sq: f64,
+    nonzero: usize,
+    total: usize,
+}
+
+#[cfg(test)]
+mod calibration_tests {
+    use super::*;
+    use crate::agent_panel::scorers::{ScoreComponent, ScoreReport};
+
+    fn entry_with_components(comps: Vec<(&str, f64, f64)>, at: i64, selected: bool) -> ScoreEntry {
+        ScoreEntry {
+            at_unix: at,
+            viewer_wallet: "alice".to_string(),
+            task_id: format!("tx-{}", at),
+            task_type: "MempoolTx".to_string(),
+            status: "Executing".to_string(),
+            score: ScoreReport {
+                total: comps.iter().map(|(_, v, w)| v * w).sum(),
+                components: comps
+                    .into_iter()
+                    .map(|(name, value, weight)| ScoreComponent {
+                        name: name.to_string(),
+                        value,
+                        weight,
+                        explanation: "test".to_string(),
+                    })
+                    .collect(),
+            },
+            selected,
+        }
+    }
+
+    #[test]
+    fn calibrate_empty_returns_none() {
+        let h = ScoreHistory::new();
+        assert!(h.calibrate("alice").is_none());
+    }
+
+    #[test]
+    fn calibrate_flags_constant_output() {
+        let h = ScoreHistory::new();
+        // 5 entries with identical recency=0.5 (no variance)
+        for i in 0..5 {
+            h.record(entry_with_components(
+                vec![("recency", 0.5, 0.4)],
+                i,
+                true,
+            ));
+        }
+        let report = h.calibrate("alice").unwrap();
+        let recency = report.components.iter().find(|c| c.name == "recency").unwrap();
+        assert!(recency.stddev < 0.01);
+        assert!(recency.recommendation.contains("constant"));
+    }
+
+    #[test]
+    fn calibrate_returns_components() {
+        let h = ScoreHistory::new();
+        // 10 entries with varying signal
+        for i in 0..10 {
+            h.record(entry_with_components(
+                vec![
+                    ("recency", (i as f64) * 0.1, 0.4),
+                    ("trust", 1.0, 0.3),
+                ],
+                i,
+                true,
+            ));
+        }
+        let report = h.calibrate("alice").unwrap();
+        assert_eq!(report.components.len(), 2);
+        assert_eq!(report.sample_size, 10);
+    }
+}
+
 /// Summary statistics over a wallet's score history — what a calibration
 /// run actually needs.
 #[derive(Debug, Clone, Serialize)]

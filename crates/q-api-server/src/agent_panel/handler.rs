@@ -367,6 +367,74 @@ pub async fn get_score_history(
         .into_response()
 }
 
+// ============ CALIBRATION ENDPOINT (v10.10.10) ============
+
+/// `GET /api/v1/agent/calibrate/:addr`
+///
+/// Returns a `CalibrationReport` for the wallet, computed from the in-memory
+/// + persisted score history. Surfaces per-component statistics + suggested
+/// weight adjustments. Owner-only — same auth model as score-history.
+///
+/// This is the operator-facing entry point for the "killer next move" from
+/// docs/x-algorithm-deeper-dive-2026-05-20.md §3.a-b: turn persisted scores
+/// into actionable recommendations for the next scorer weight pass.
+pub async fn get_calibration_report(
+    State(_state): State<Arc<AppState>>,
+    Path(addr_str): Path<String>,
+    auth: Option<AuthenticatedWallet>,
+) -> impl IntoResponse {
+    let wallet = match parse_wallet_address(&addr_str) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PanelError {
+                    error: "INVALID_WALLET_ADDRESS".to_string(),
+                    detail: e,
+                }),
+            )
+                .into_response();
+        }
+    };
+    let authed = match auth {
+        Some(a) if a.address == wallet => a,
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(PanelError {
+                    error: "AUTH_MISMATCH".to_string(),
+                    detail: "X-Wallet-Auth address does not match path :addr".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(PanelError {
+                    error: "AUTH_REQUIRED".to_string(),
+                    detail: "/api/v1/agent/calibrate requires X-Wallet-Auth".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let wallet_hex = hex::encode(authed.address);
+    let history = super::score_history::global();
+    match history.calibrate(&wallet_hex) {
+        Some(report) => (StatusCode::OK, Json(report)).into_response(),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "wallet": wallet_hex,
+                "sample_size": 0,
+                "note": "no selected score-history entries yet — submit some panel queries first"
+            })),
+        )
+            .into_response(),
+    }
+}
+
 // ============ HELPERS ============
 
 #[derive(Debug, Clone, Copy)]

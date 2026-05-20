@@ -25172,6 +25172,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // the calibration-friendly aggregate stats; default returns the
         // raw entries newest-first.
         .route("/api/v1/agent/score-history/:addr", get(q_api_server::agent_panel::handler::get_score_history))
+        // v10.10.10: calibration audit — surfaces per-component statistics +
+        // suggested weight adjustments computed from the persisted score
+        // history. Owner-only. Closes x-algo deeper-dive §3.a-b.
+        .route("/api/v1/agent/calibrate/:addr", get(q_api_server::agent_panel::handler::get_calibration_report))
         // v10.10.7: QSHARE-1 L3 REST handlers.
         // Per docs/standards/qshare-treasury-protocol-spec.md §5.
         .route("/api/v1/qshare/state", get(q_api_server::qshare_api::get_state))
