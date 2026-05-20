@@ -15,6 +15,9 @@ pub mod pq_deployment;
 pub mod decentralized_identity;
 /// v8.5.5: Quillon Credit yield vault (lock QUG → mint QCREDIT, tiered APY)
 pub mod qcredit_vault;
+/// v10.10.x: Quillon Treasury Share (QSHARE) — L3 autonomous premium-arbitrage
+/// per docs/standards/qshare-treasury-protocol-spec.md
+pub mod qshare_token;
 
 // Re-export main types for convenience
 pub use orobit_smart_contracts::{

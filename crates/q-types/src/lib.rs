@@ -540,6 +540,10 @@ pub enum TokenType {
     QUG,
     /// QUGUSD - Algorithmic stablecoin pegged to USD ($1.00)
     QUGUSD,
+    /// QSHARE - L3 autonomous treasury share (QSHARE-1 protocol).
+    /// Mint-on-demand (not POW emitted); supply controlled by the on-chain
+    /// QShareContract per `docs/standards/qshare-treasury-protocol-spec.md`.
+    QSHARE,
     /// Custom - User-created tokens identified by contract address
     Custom([u8; 32]),
 }
@@ -575,6 +579,17 @@ pub const QUG_TOKEN_ADDRESS: [u8; 32] = [
 pub const QUGUSD_DECIMALS: u8 = 24;
 pub const QUGUSD_TOKEN_ADDRESS: [u8; 32] = [
     0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0x00, 0x00, // "QUGUSD" in hex + zeros
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// QSHARE token constants — L3 treasury share (QSHARE-1 protocol).
+/// Decimals=24 matching QUG. Mint-on-demand, not POW emitted.
+/// Implementation in crates/q-vm/src/contracts/qshare_token.rs.
+pub const QSHARE_DECIMALS: u8 = 24;
+pub const QSHARE_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x53, 0x48, 0x41, 0x52, 0x45, 0x00, 0x00, // "QSHARE" in hex + zeros
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1077,6 +1092,19 @@ impl TokenInfo {
             max_supply: None, // Unlimited if properly collateralized
         }
     }
+
+    /// Get QSHARE token information.
+    /// L3 autonomous treasury share. Supply is mint-on-demand via the
+    /// QShareContract per docs/standards/qshare-treasury-protocol-spec.md.
+    pub fn qshare() -> Self {
+        Self {
+            token_type: TokenType::QSHARE,
+            name: "Quillon Treasury Share".to_string(),
+            symbol: "QSHARE".to_string(),
+            decimals: QSHARE_DECIMALS,
+            max_supply: None, // Mint-on-demand controlled by QShareContract premium gate
+        }
+    }
 }
 
 impl TokenType {
@@ -1085,6 +1113,7 @@ impl TokenType {
         match self {
             TokenType::QUG => QUG_TOKEN_ADDRESS,
             TokenType::QUGUSD => QUGUSD_TOKEN_ADDRESS,
+            TokenType::QSHARE => QSHARE_TOKEN_ADDRESS,
             TokenType::Custom(addr) => *addr,
         }
     }
@@ -1094,6 +1123,7 @@ impl TokenType {
         match self {
             TokenType::QUG => TokenInfo::qug(),
             TokenType::QUGUSD => TokenInfo::qugusd(),
+            TokenType::QSHARE => TokenInfo::qshare(),
             TokenType::Custom(addr) => TokenInfo {
                 token_type: TokenType::Custom(*addr),
                 name: format!("Custom Token {}", hex::encode(&addr[..4])),
@@ -1105,12 +1135,14 @@ impl TokenType {
     }
 
     /// Convert to u8 discriminant for serialization
-    /// QUG = 0, QUGUSD = 1, Custom = 2
+    /// QUG = 0, QUGUSD = 1, QSHARE = 3, Custom = 2
+    /// (QSHARE = 3 to keep existing serialized data backward-compatible)
     pub fn discriminant(&self) -> u8 {
         match self {
             TokenType::QUG => 0,
             TokenType::QUGUSD => 1,
             TokenType::Custom(_) => 2,
+            TokenType::QSHARE => 3,
         }
     }
 }
