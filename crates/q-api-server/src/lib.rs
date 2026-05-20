@@ -3513,9 +3513,11 @@ impl AppState {
             tracing::info!("✅ Using pre-configured libp2p manager from main.rs");
             libp2p_discovery
         } else {
-            // Fallback: create a basic discovery manager with testnet config
+            // Fallback: create a basic discovery manager with testnet config.
+            // v10.10.8: fallback path runs without Tor (None) — only the main
+            // production path in main.rs has access to the Arti client.
             let fallback_config = q_types::NetworkConfig::testnet();
-            match q_network::UnifiedNetworkManager::new(fallback_config).await {
+            match q_network::UnifiedNetworkManager::new(fallback_config, None).await {
                 Ok(discovery) => {
                     tracing::info!("🚀 libp2p Zero-Knowledge Discovery initialized successfully (fallback testnet)!");
                     tracing::info!("📡 Active discovery mechanisms: mDNS (local network), Identify (peer exchange), Ping (keepalive)");

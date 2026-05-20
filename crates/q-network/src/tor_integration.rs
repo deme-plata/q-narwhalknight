@@ -69,6 +69,21 @@ pub struct NetworkTorConfig {
     pub enable_prewarming: bool,
     /// Prewarmer configuration
     pub prewarmer_config: PrewarmingConfig,
+
+    // v10.10.8 — three lifecycle phase flags (orthogonal to the per-topic flags above).
+    // Q_TOR_LISTEN_ONION=1 → Phase A: secondary /onion3 listener via the embedded Arti
+    // service. Other peers reach us anonymously; we still dial them clearnet.
+    pub listen_onion: bool,
+    // Q_TOR_STEM=1 → Phase B: Dandelion++ stem phase routes through dedicated Tor
+    // circuits instead of plain gossipsub publish. TX broadcast only; block sync untouched.
+    pub stem_via_tor: bool,
+    // Q_TOR_OUTBOUND=1 → Phase C: wrap libp2p TCP transport with TorEnabledTransport.
+    // ALL outbound dials route through Arti SOCKS5. Block sync slows 3-5×; pair with
+    // Q_TOR_SKIP_SYNC=1 to keep block-pack on clearnet.
+    pub outbound_via_tor: bool,
+    // Q_TOR_SKIP_SYNC=1 escape hatch: when outbound_via_tor is true, block-pack and
+    // turbo-sync requests still go clearnet. Prevents 17M-block bootstrap stall.
+    pub skip_sync_via_tor: bool,
 }
 
 impl Default for NetworkTorConfig {
@@ -84,6 +99,11 @@ impl Default for NetworkTorConfig {
             tor_for_balance_updates: true,
             enable_prewarming: true,
             prewarmer_config: PrewarmingConfig::default(),
+            // v10.10.8 lifecycle flags default OFF — code ships dead-disabled.
+            listen_onion: false,
+            stem_via_tor: false,
+            outbound_via_tor: false,
+            skip_sync_via_tor: true,
         }
     }
 }
@@ -101,6 +121,11 @@ impl NetworkTorConfig {
             tor_for_balance_updates: true, // Privacy-sensitive
             enable_prewarming: false,
             prewarmer_config: PrewarmingConfig::default(),
+            // v10.10.8 lifecycle flags default OFF in minimal mode too.
+            listen_onion: false,
+            stem_via_tor: false,
+            outbound_via_tor: false,
+            skip_sync_via_tor: true,
         }
     }
 
@@ -159,6 +184,34 @@ impl NetworkTorConfig {
             config.tor_for_miner_stats = false;
             config.tor_for_balance_updates = false;
             config.enable_prewarming = false;
+        }
+
+        // v10.10.8 lifecycle flags read independently of Q_TOR_ENABLED so they can
+        // be toggled per node without flipping the topic-level master switch.
+        config.listen_onion = std::env::var("Q_TOR_LISTEN_ONION")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        config.stem_via_tor = std::env::var("Q_TOR_STEM")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        config.outbound_via_tor = std::env::var("Q_TOR_OUTBOUND")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        config.skip_sync_via_tor = std::env::var("Q_TOR_SKIP_SYNC")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true);
+
+        if config.listen_onion {
+            info!("🧅 [TOR] Phase A enabled — onion listener will be announced");
+        }
+        if config.stem_via_tor {
+            info!("🧅 [TOR] Phase B enabled — Dandelion stems route via Tor circuits");
+        }
+        if config.outbound_via_tor {
+            info!("🧅 [TOR] Phase C enabled — libp2p outbound dials route via Tor SOCKS5");
+            if config.skip_sync_via_tor {
+                info!("🧅 [TOR]   (block-pack stays clearnet — Q_TOR_SKIP_SYNC=1)");
+            }
         }
 
         config

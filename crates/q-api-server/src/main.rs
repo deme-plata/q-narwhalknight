@@ -3259,7 +3259,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         network_config.network_id.display_name()
     );
 
-    let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone()).await {
+    // v10.10.8: pass the bootstrapped Arti client through so Phases A/B/C can
+    // wire the libp2p transport against it. `tor_client` is the Arc built at
+    // line ~2914 above; it's `None` if Tor bootstrap failed (e.g., no network).
+    let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone(), tor_client.clone()).await {
         Ok(mut manager) => {
             info!(
                 "✅ libp2p Network Manager initialized for {}",

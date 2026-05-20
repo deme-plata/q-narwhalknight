@@ -34,6 +34,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
+// v10.10.8 — Tor wiring foundation. QTorClient is the embedded Arti client
+// (bootstrapped in q-api-server::main); we accept it as an Option so non-Tor
+// builds/tests don't break. NetworkTorConfig is read from env in `new()`.
+use q_tor_client::QTorClient;
+use crate::tor_integration::NetworkTorConfig;
+
 // v4.3.0-beta: Global peer latency tracker and bootstrap health cache
 lazy_static::lazy_static! {
     /// Peer latency tracker fed by libp2p ping RTT measurements
@@ -1453,6 +1459,16 @@ pub struct UnifiedNetworkManager {
     /// clamped to [5s, 120s]. Falls back to `Q_P2P_REQUEST_TIMEOUT` (or 60s)
     /// when no samples have been observed yet.
     pub ewmv_rtt: Arc<DashMap<PeerId, q_sync_optimizers::EwmvRtt>>,
+
+    /// v10.10.8: Embedded Arti Tor client (when bootstrapped by q-api-server::main).
+    /// Used by Phase A (start_onion_service for inbound listener) and Phase C
+    /// (SOCKS5 proxy address for outbound transport wrap). `None` for non-Tor
+    /// builds or when QTorClient bootstrap failed at startup.
+    pub tor_client: Option<Arc<QTorClient>>,
+    /// v10.10.8: Compiled Tor policy read from env in `new()` via
+    /// `NetworkTorConfig::from_env()`. Phases A/B/C consult `listen_onion`,
+    /// `stem_via_tor`, `outbound_via_tor`, `skip_sync_via_tor` here.
+    pub tor_policy: NetworkTorConfig,
 }
 
 // SAFETY: UnifiedNetworkManager is Sync because:
@@ -1466,7 +1482,17 @@ impl UnifiedNetworkManager {
     ///
     /// # Arguments
     /// * `network_config` - Network configuration (testnet/mainnet)
-    pub async fn new(network_config: q_types::NetworkConfig) -> anyhow::Result<Self> {
+    /// * `tor_client` - Optional embedded Arti client bootstrapped by main.rs.
+    ///   When provided AND `Q_TOR_LISTEN_ONION`/`Q_TOR_STEM`/`Q_TOR_OUTBOUND` flags
+    ///   are set, libp2p routing switches over per the phase policy. Pass `None`
+    ///   for tests, non-Tor builds, or any code path that wants pure clearnet.
+    pub async fn new(
+        network_config: q_types::NetworkConfig,
+        tor_client: Option<Arc<QTorClient>>,
+    ) -> anyhow::Result<Self> {
+        // v10.10.8: Read Tor policy once at startup; phases A/B/C read these flags.
+        // Defaults all OFF so v10.10.8 with NO env changes behaves like v10.10.7.
+        let tor_policy = NetworkTorConfig::from_env();
         // 🚀 v1.0.3-beta: Docker network namespace initialization delay
         // Docker containers with --network host may need time for network to be fully ready
         // This prevents "error sending request" failures in reqwest
@@ -2775,6 +2801,9 @@ impl UnifiedNetworkManager {
             pq_session_manager: Arc::new(crate::pq_handshake::PQSessionManager::new()),
             qkd_session_manager: Arc::new(crate::qkd_transport::QKDSessionManager::new()),
             websocket_peers: HashSet::new(),
+            // v10.10.8: foundational wiring for Phases A/B/C (all default OFF in tor_policy).
+            tor_client,
+            tor_policy,
             // v10.9.44: per-peer CUBIC cwnd + EWMV RTT
             cubic_registry: Arc::new(parking_lot::Mutex::new(q_sync_optimizers::CubicRegistry::new())),
             ewmv_rtt: Arc::new(DashMap::new()),
