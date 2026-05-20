@@ -1870,6 +1870,297 @@ server.tool("score_tx_dry", "Dry-score a candidate tx without submitting it. Run
         return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
     }
 });
+async function fetchEnginePulse() {
+    const raw = await api("/engine/pulse");
+    if (raw?.success === false)
+        throw new Error(raw.error ?? "engine_pulse returned success=false");
+    return (raw?.data ?? raw);
+}
+/** Is the caller signing as the node's admin wallet? Operator-only tools
+ *  gate on this. We compare the seed-derived address to whatever the node
+ *  declared as its admin in /status (cheap heuristic; the server is the
+ *  real authority — these tools just don't display fields the caller
+ *  shouldn't see). */
+async function isOperatorSelf(seedArg) {
+    try {
+        const { seed } = loadSeed({ seedArg });
+        const { address } = deriveKeys(seed);
+        const status = await api("/status");
+        const adminAddr = (status?.data?.admin_wallet || status?.admin_wallet || "").toLowerCase();
+        return adminAddr.length > 0 && adminAddr === address.toLowerCase();
+    }
+    catch {
+        return false;
+    }
+}
+function fmtBytes(n) {
+    if (n < 1024)
+        return `${n} B`;
+    if (n < 1024 * 1024)
+        return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 ** 3)
+        return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+function fmtNum(n) {
+    return Number(n).toLocaleString("en-US");
+}
+server.tool("chain_overview", "Scientist module — high-level chain stats anyone analyzing Quillon Graph needs first: height, sync status, mempool depth, mining health, peer bytes, version. Public — no admin gating. Use this as the entry point before drilling into mining_network or speed_report.", {}, async () => {
+    try {
+        const p = await fetchEnginePulse();
+        const ageMs = Date.now() - p.ts_unix_ms;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== Quillon Graph — Chain Overview ===`,
+                        ``,
+                        `  Version:               ${p.version}`,
+                        `  Tip height:            ${fmtNum(p.sync.current_height)}`,
+                        `  Contiguous:            ${fmtNum(p.sync.contiguous_height)}`,
+                        `  Network max seen:      ${fmtNum(p.sync.highest_network_height)}`,
+                        `  Gap to tip:            ${p.sync.gap_to_tip} blocks  ${p.sync.is_caught_up ? "✓ caught up" : "⚠ syncing"}`,
+                        ``,
+                        `  Mempool size:          ${p.mempool.tx_pool_size} pending tx (tracked: ${p.mempool.tx_status_tracked})`,
+                        `  Wallets seen:          ${fmtNum(p.wallets.known_count)}`,
+                        ``,
+                        `  Mining health:         ${p.mining.is_healthy ? "✓ healthy" : "⚠ unhealthy"}`,
+                        `  Solutions submitted:   ${fmtNum(p.mining.solutions_submitted_total)}`,
+                        `  Solutions accepted:    ${fmtNum(p.mining.solutions_accepted_total)}`,
+                        `  Acceptance ratio:      ${p.mining.accept_ratio_pct.toFixed(2)}%`,
+                        ``,
+                        `  P2P bytes in:          ${fmtBytes(p.p2p.bytes_in_total)}`,
+                        `  P2P bytes out:         ${fmtBytes(p.p2p.bytes_out_total)}`,
+                        ``,
+                        `  K-param (decentralization EMA): ${p.consensus.decentralization_ema.toFixed(2)}`,
+                        ``,
+                        `Data freshness: ${ageMs} ms.  Endpoint: GET /api/v1/engine/pulse`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `chain_overview failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("mining_network", "Scientist module — mining network power for the explorer's network-power modal: solutions per second (smoothed), accept ratio, time-since-last-solution, miner health. Use to argue 'is this chain alive + secured by real work'.", {}, async () => {
+    try {
+        const p = await fetchEnginePulse();
+        const sinceLastSolutionMs = Date.now() - p.mining.last_solution_unix_ms;
+        const sinceLastSolutionSec = (sinceLastSolutionMs / 1000).toFixed(1);
+        const submitted = p.mining.solutions_submitted_total;
+        const accepted = p.mining.solutions_accepted_total;
+        const rejectedTotal = submitted - accepted;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== Mining Network Power ===`,
+                        ``,
+                        `  Health:                ${p.mining.is_healthy ? "✓ healthy" : "⚠ degraded"}`,
+                        `  Last solution:         ${sinceLastSolutionSec}s ago`,
+                        ``,
+                        `  Solutions submitted:   ${fmtNum(submitted)}`,
+                        `  Solutions accepted:    ${fmtNum(accepted)}`,
+                        `  Solutions rejected:    ${fmtNum(rejectedTotal)}  (${((rejectedTotal / Math.max(1, submitted)) * 100).toFixed(2)}%)`,
+                        `  Accept ratio:          ${p.mining.accept_ratio_pct.toFixed(2)}%`,
+                        ``,
+                        `  Notes for analysts:`,
+                        `   - Accept ratio > 95% = mempool tracks current difficulty cleanly`,
+                        `   - Last-solution < 2s = continuous block production (1 bps target)`,
+                        `   - High rejection often signals miner is on stale difficulty`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `mining_network failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("speed_report", "Scientist module — SPEED. The pitch every DAG-Knight analyst will lead with: block time, finality latency, tip-proof verification time. Combines /engine/pulse with /proof/tip telemetry. Useful for comparing throughput against L1/L2 alternatives.", {}, async () => {
+    try {
+        const p = await fetchEnginePulse();
+        let proofMs = "?";
+        let proofVersion = "?";
+        let proofSize = "?";
+        try {
+            const proof = await api("/proof/tip");
+            const d = proof?.data ?? proof;
+            if (d) {
+                proofMs = (d.last_verify_us ? (d.last_verify_us / 1000).toFixed(2) : (d.verify_ms?.toFixed?.(2) ?? "?")) + " ms";
+                proofVersion = d.proof_version ?? "?";
+                proofSize = d.wire_size_bytes ? `${d.wire_size_bytes} bytes` : "?";
+            }
+        }
+        catch { /* /proof/tip optional */ }
+        const sinceLastSolutionMs = Date.now() - p.mining.last_solution_unix_ms;
+        const blocksPerSecApprox = sinceLastSolutionMs > 0 ? (1000 / sinceLastSolutionMs).toFixed(3) : "n/a";
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== Speed Report — Why Quillon Graph is fast ===`,
+                        ``,
+                        `  Block production:`,
+                        `    Target:              ~1 block/sec (DAG-Knight cadence)`,
+                        `    Observed instant:    ${blocksPerSecApprox} blk/s (from last solution timestamp)`,
+                        `    Tip height:          ${fmtNum(p.sync.current_height)}`,
+                        ``,
+                        `  Finality:`,
+                        `    DAG-Knight is BFT — finality is ANCHOR-COMMITTED, not probabilistic.`,
+                        `    Once an anchor includes a vertex, it's final (no reorgs at depth ≥ 1 anchor).`,
+                        `    Typical anchor-to-finality: < 3 seconds.`,
+                        ``,
+                        `  Trustless bootstrap (tip-proof):`,
+                        `    Scheme:              ${proofVersion}`,
+                        `    Wire size:           ${proofSize}`,
+                        `    Verify time:         ${proofMs}  (target: < 10 ms)`,
+                        `    Post-quantum:        BLAKE3 Fiat-Shamir (~128-bit Grover-quantum)`,
+                        ``,
+                        `  Sync throughput (recent benchmarks):`,
+                        `    Peak block-pack:     ~3,348 blocks/sec to fresh node from Epsilon (10Gbit)`,
+                        `    Steady-state:        ~570 blocks/sec average over full sync`,
+                        ``,
+                        `  Network observed:`,
+                        `    Bytes in:            ${fmtBytes(p.p2p.bytes_in_total)}`,
+                        `    Bytes out:           ${fmtBytes(p.p2p.bytes_out_total)}`,
+                        ``,
+                        `  Comparison cheat-sheet (typical L1 numbers, NOT endorsements):`,
+                        `    Bitcoin   ~10 min blocks, probabilistic finality (~60 min)`,
+                        `    Ethereum  ~12 sec slots, single-slot finality (~12 sec since Pectra)`,
+                        `    Solana    ~400 ms slots, deterministic ~12 sec`,
+                        `    Quillon   ~1 sec blocks, anchor finality ~3 sec, < 10 ms trustless bootstrap`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `speed_report failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("k_parameter", "Scientist module — the K-parameter (decentralization gauge). It's the EMA of the effective number of independent validators contributing recent anchors. Higher = more decentralized. Lower = bus-factor risk. Public.", {}, async () => {
+    try {
+        const p = await fetchEnginePulse();
+        const k = p.consensus.decentralization_ema;
+        const interpretation = k >= 50
+            ? "✓ healthy — diverse anchor authorship"
+            : k >= 20
+                ? "moderate — visible diversity but watch trend"
+                : k >= 5
+                    ? "⚠ low — small set carrying anchors; investigate validator participation"
+                    : "🚨 critical — single-operator risk; chain is effectively centralized";
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== K-Parameter — Decentralization EMA ===`,
+                        ``,
+                        `  Current value:    ${k.toFixed(4)}`,
+                        `  Interpretation:   ${interpretation}`,
+                        ``,
+                        `  What this measures:`,
+                        `    Exponentially weighted moving average of the effective number`,
+                        `    of independent validators that have contributed anchors in the`,
+                        `    recent window. Computed entirely on-chain from block producer`,
+                        `    keys; not self-reported.`,
+                        ``,
+                        `  Thresholds (rule of thumb):`,
+                        `    K ≥ 50   healthy decentralization`,
+                        `    20 ≤ K < 50   moderate, recoverable`,
+                        `    5 ≤ K < 20   degraded, alertable`,
+                        `    K < 5    critical — single-operator failure mode`,
+                        ``,
+                        `  Source: GET /api/v1/engine/pulse → consensus.decentralization_ema`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `k_parameter failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("operator_stats", "Scientist module (OPERATOR-ONLY) — node operator income, dev-fee config, and fee-tx counters. Returns the public summary if the caller's seed-derived address isn't the node's admin wallet, full breakdown otherwise. Gated by isOperatorSelf().", {
+    seed: z.string().optional().describe("Optional seed override"),
+}, async ({ seed }) => {
+    try {
+        const p = await fetchEnginePulse();
+        const isOp = await isOperatorSelf(seed);
+        const f = p.fees;
+        const lines = [`=== Node Fee / Operator Stats ===`, ``];
+        lines.push(`  Dev fee:               ${(f.dev_fee_bps / 100).toFixed(2)}% (${f.dev_fee_bps} bps)`);
+        if (isOp) {
+            lines.push(`  Operator fee:          ${(f.operator_fee_promille / 10).toFixed(2)}% (${f.operator_fee_promille} ‰)`);
+            lines.push(`  Operator tx count:     ${fmtNum(f.operator_fee_tx_count)}`);
+            lines.push(`  Earned this session:   ${fmtNum(f.operator_fees_earned_session)} (raw units)`);
+            lines.push(`  Earned total:          ${fmtNum(f.operator_fees_earned_total)} (raw units)`);
+            lines.push(``);
+            lines.push(`  (Authenticated as operator — full breakdown shown.)`);
+        }
+        else {
+            lines.push(``);
+            lines.push(`  (Operator-specific fields hidden — call with the node's admin`);
+            lines.push(`   seed to see operator_fee_promille / earned totals.)`);
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `operator_stats failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("science_summary", "Scientist module — composite one-shot answer for 'tell me about this chain.' Bundles chain_overview + mining_network + speed_report + k_parameter into a single readable card. Use when pitching DAG-Knight to someone in 30 seconds.", {}, async () => {
+    try {
+        const p = await fetchEnginePulse();
+        const sinceLastSolutionSec = ((Date.now() - p.mining.last_solution_unix_ms) / 1000).toFixed(1);
+        const k = p.consensus.decentralization_ema;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `╔══════════════════════════════════════════════════════════════╗`,
+                        `║         Quillon Graph — Science Summary                      ║`,
+                        `╠══════════════════════════════════════════════════════════════╣`,
+                        ``,
+                        `  Speed`,
+                        `    • ~1 block/sec, anchor finality ~3s, tip-proof verify <10ms`,
+                        `    • Last solution: ${sinceLastSolutionSec}s ago (mining live)`,
+                        ``,
+                        `  Scale`,
+                        `    • Tip:        ${fmtNum(p.sync.current_height)} blocks`,
+                        `    • Wallets:    ${fmtNum(p.wallets.known_count)}`,
+                        `    • P2P traffic: ${fmtBytes(p.p2p.bytes_in_total + p.p2p.bytes_out_total)} cumulative`,
+                        ``,
+                        `  Health`,
+                        `    • Mining: ${p.mining.is_healthy ? "healthy" : "DEGRADED"}, accept ${p.mining.accept_ratio_pct.toFixed(1)}%`,
+                        `    • Sync: ${p.sync.is_caught_up ? "caught up" : "syncing"}, gap ${p.sync.gap_to_tip}`,
+                        `    • Mempool: ${p.mempool.tx_pool_size} pending`,
+                        ``,
+                        `  Decentralization`,
+                        `    • K-parameter (EMA): ${k.toFixed(2)}  ${k >= 20 ? "✓" : k >= 5 ? "⚠" : "🚨"}`,
+                        ``,
+                        `  Crypto stack`,
+                        `    • Block sigs: Hybrid Ed25519 + Dilithium5 (FIPS 204, NIST L5 PQ)`,
+                        `    • Hashing: BLAKE3 + SHA3-256`,
+                        `    • Tip proof: BLAKE3 Fiat-Shamir (~128-bit Grover-quantum)`,
+                        ``,
+                        `  Why analysts should care`,
+                        `    • DAG-Knight = single-canonical-consensus + parallel execution`,
+                        `      (sharding-grade throughput without cross-shard 2PC tax)`,
+                        `    • Post-quantum from day 1, not bolted on later`,
+                        `    • Trustless bootstrap = wallet verifies chain tip in <10ms,`,
+                        `      no light-client trust assumption`,
+                        ``,
+                        `Drill down: chain_overview, mining_network, speed_report, k_parameter,`,
+                        `             operator_stats (if you're the node operator).`,
+                        ``,
+                        `Source: GET /api/v1/engine/pulse (v${p.version})`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `science_summary failed: ${e?.message ?? e}` }] };
+    }
+});
 // ============================================================
 // START SERVER
 // ============================================================
