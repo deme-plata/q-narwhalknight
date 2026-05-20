@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::AppState;
+use crate::wallet_auth::AuthenticatedWallet;
 use super::concrete::{
     build_default_panel_pipeline, TaskCandidate, TaskStatus,
 };
@@ -84,10 +85,16 @@ struct PanelError {
 // ============ HANDLER ============
 
 /// `GET /api/v1/agent/panel/:addr`
+///
+/// SECURITY (v10.10.7): `mode=owner` requires X-Wallet-Auth whose signing
+/// address matches the path :addr. `mode=embed` is public + filtered
+/// (TrustTier::Local tasks are hidden by EmbedVisibilityFilter so private
+/// labels/memos don't leak to external viewers).
 pub async fn get_agent_panel(
     State(state): State<Arc<AppState>>,
     Path(addr_str): Path<String>,
     Query(params): Query<PanelQuery>,
+    auth: Option<AuthenticatedWallet>,
 ) -> impl IntoResponse {
     // Parse wallet address from string (accepts "qnk<hex>" or raw hex).
     let wallet = match parse_wallet_address(&addr_str) {
@@ -104,9 +111,36 @@ pub async fn get_agent_panel(
         }
     };
 
-    // Resolve viewer mode.
-    let viewer_mode = match params.mode.as_deref().unwrap_or("owner") {
-        "owner" => ViewerMode::Owner,
+    // Resolve viewer mode + enforce auth for owner mode.
+    let requested_mode = params.mode.as_deref().unwrap_or("owner");
+    let viewer_mode = match requested_mode {
+        "owner" => {
+            // mode=owner requires X-Wallet-Auth signing this exact path with
+            // the panel wallet's address. Anything else is observed/embed.
+            match auth {
+                Some(a) if a.address == wallet => ViewerMode::Owner,
+                Some(_) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(PanelError {
+                            error: "AUTH_MISMATCH".to_string(),
+                            detail: "X-Wallet-Auth address does not match path :addr; mode=owner requires the wallet to authenticate itself".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+                None => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(PanelError {
+                            error: "AUTH_REQUIRED".to_string(),
+                            detail: "mode=owner requires X-Wallet-Auth header signing this path; use mode=embed for public read".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
+        }
         "embed" => ViewerMode::Embed,
         other => {
             return (
