@@ -145,7 +145,7 @@ async function apiSigned(
 // --- MCP Server ---
 const server = new McpServer({
   name: "quillon-wallet",
-  version: "2.0.0",
+  version: "2.1.0",
 });
 
 // ============================================================
@@ -1983,6 +1983,149 @@ server.tool(
     } catch (e: any) {
       if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
       if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ============================================================
+// v2.1.0 — X-ALGORITHM SURFACE (score tweet drafts + panel breakdown)
+// ============================================================
+
+server.tool(
+  "score_tweet_draft",
+  "Score a tweet draft for engagement using the x-algorithm-scorer Layer-1 heuristic sidecar (proxies http://localhost:8090/score on the q-api-server host). Returns per-action probabilities (favorite, reply, repost, quote, block, mute, report) and variant suggestions for low-scoring drafts. Sidecar implements hand-engineered features (text-length sweet-spot, question-mark boost, all-caps risk, inflammatory-keyword list) — Layer-2 ML wrapper of xAI Phoenix engine deferred to v2+. No auth needed (read-only inference). Sidecar must be running on the same host as the MCP; configure via XALGO_SCORER_URL env.",
+  {
+    text: z.string().describe("Tweet draft to score"),
+    recent_tweets: z.array(z.string()).optional().describe("Recent tweets for context (improves variant suggestions)"),
+    target_audience: z.string().optional().describe("Brief description of target audience"),
+  },
+  async ({ text, recent_tweets, target_audience }) => {
+    const url = process.env.XALGO_SCORER_URL || "http://localhost:8090/score";
+    try {
+      const body: any = { text };
+      if (recent_tweets || target_audience) {
+        body.context = {};
+        if (recent_tweets) body.context.recent_tweets = recent_tweets;
+        if (target_audience) body.context.target_audience = target_audience;
+      }
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        redirect: "error",
+      });
+      if (!res.ok) {
+        return {
+          content: [{
+            type: "text",
+            text:
+              `Sidecar at ${url} returned ${res.status}.\n` +
+              `Is x-algorithm-scorer running? Start it with:\n` +
+              `  cd tools/quillon-twitter-mcp/crates/x-algorithm-scorer && cargo run --release\n` +
+              `Then it listens on :8090.`,
+          }],
+        };
+      }
+      const data = await res.json();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (e: any) {
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Sidecar at ${url} unreachable (${e?.message ?? e}).\n` +
+            `Either x-algorithm-scorer isn't running here, or XALGO_SCORER_URL needs to point at the host where it does.\n` +
+            `Quick start (on this host): cd tools/quillon-twitter-mcp/crates/x-algorithm-scorer && cargo run --release`,
+        }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "agent_panel_breakdown",
+  "Same as agent_panel but renders the full ScoreReport.components for each task so you can see WHY each was ranked. Each candidate's TaskCandidate already has score: Option<ScoreReport> in the wire format — this tool just makes the breakdown legible instead of dropping it. Use mode=owner for full task list (needs signing); mode=embed for public truncated view.",
+  {
+    address: z.string().optional().describe("Wallet address; omit to use the address derived from the configured seed (only valid with mode=owner)"),
+    mode: z.enum(["owner", "embed"]).optional().describe("'owner' (default) shows the full panel and requires signing; 'embed' is the public truncated view"),
+    zone: z.enum(["now", "queued", "done"]).optional().describe("Filter to one zone"),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ address, mode, zone, seed }) => {
+    try {
+      const effectiveMode = mode ?? "owner";
+      const targetAddr = address ?? (() => {
+        const { seed: s } = loadSeed({ seedArg: seed });
+        return deriveKeys(s).address;
+      })();
+      const qs = new URLSearchParams();
+      qs.set("mode", effectiveMode);
+      if (zone) qs.set("zone", zone);
+      const path = `/agent/panel/${targetAddr}?${qs.toString()}`;
+      const res = effectiveMode === "owner"
+        ? await apiSigned(path, "GET", undefined, { seed }) as any
+        : await api(path) as any;
+
+      // Render the panel with score breakdowns expanded.
+      const data = res?.data ?? res;
+      const out: string[] = [];
+      out.push(`Panel for ${data.wallet ?? targetAddr} (viewer: ${data.viewer_mode ?? effectiveMode})`);
+      out.push(`Computed at: ${data.computed_at ?? "?"}`);
+      out.push("");
+      for (const zoneName of ["now", "queued", "done"]) {
+        const tasks = data.zones?.[zoneName] ?? [];
+        if (!tasks.length) continue;
+        out.push(`=== ${zoneName.toUpperCase()} (${tasks.length}) ===`);
+        for (const t of tasks) {
+          const score = t.score?.total !== undefined ? `score=${t.score.total.toFixed(3)}` : "score=?";
+          out.push(`• ${t.task_type ?? "?"}/${t.status ?? "?"} ${score} — ${t.label ?? t.task_id?.slice(0, 16) ?? "?"}`);
+          if (t.score?.components?.length) {
+            for (const c of t.score.components) {
+              const explanation = c.explanation ? ` (${c.explanation})` : "";
+              out.push(`    ${c.name}: value=${c.value?.toFixed(3) ?? "?"} weight=${c.weight?.toFixed(2) ?? "?"}${explanation}`);
+            }
+          }
+          out.push("");
+        }
+      }
+      return { content: [{ type: "text", text: out.join("\n") || "(panel empty)" }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) return { content: [{ type: "text", text: `🔒 ${e.message}` }] };
+      return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "score_tx_dry",
+  "Dry-score a candidate tx without submitting it. Runs the q-api-server's TxScorer against the current mempool + reserves snapshot, returns the full ScoreReport (4 components: balance_delta_health 0.35, fee_burden 0.20, mempool_pressure 0.20, reserve_utilization 0.25). Requires POST /api/v1/agent/score-tx-dry endpoint on the server (v10.10.10+). Lets the agent ask 'how would my candidate tx rank?' before committing.",
+  {
+    to_address: z.string().describe("Recipient qnk address"),
+    amount_qug: z.number().describe("Amount of QUG to send (display units)"),
+    fee_qug: z.number().optional().describe("Override fee; defaults to current mempool median"),
+    seed: z.string().optional().describe("Optional seed override"),
+  },
+  async ({ to_address, amount_qug, fee_qug, seed }) => {
+    try {
+      const body: any = { to_address, amount_qug };
+      if (fee_qug !== undefined) body.fee_qug = fee_qug;
+      const res = await apiSigned("/agent/score-tx-dry", "POST", body, { seed }) as any;
+      return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
+    } catch (e: any) {
+      if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
+      if (e instanceof SignatureError) {
+        // Common case until v10.10.10 ships: server returns 404 for unknown route.
+        return {
+          content: [{
+            type: "text",
+            text:
+              `🔒 ${e.message}\n\nIf the error is HTTP 404, /api/v1/agent/score-tx-dry isn't deployed yet. ` +
+              `That endpoint lands in v10.10.10. Production is currently v10.9.55.`,
+          }],
+        };
+      }
       return { content: [{ type: "text", text: `Failed: ${e?.message ?? e}` }] };
     }
   }
