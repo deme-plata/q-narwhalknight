@@ -25097,6 +25097,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // Per docs/standards/afl-1-protocol-spec.md §2.
         .route("/api/v1/agent/submit", post(q_api_server::agent_api::submit_single))
         .route("/api/v1/agent/submit-batch", post(q_api_server::agent_api::submit_batch))
+        // v10.10.5: Agent Activity Panel — xAI Home Mixer-inspired scoring pipeline.
+        // Per docs/agent-activity-panel-spec.md §2.
+        .route("/api/v1/agent/panel/:addr", get(q_api_server::agent_panel::handler::get_agent_panel))
         // v2.3.34-beta: Token Details Modal API endpoints
         .route("/api/v1/oracle/price-history/:token_id", get(handlers::get_token_price_history))
         .route("/api/v1/transactions/token/:token_id", get(handlers::get_token_transactions))
