@@ -1183,31 +1183,26 @@ server.tool("dex_get_quote", "Get a swap quote — see how much you'd receive be
         return { content: [{ type: "text", text: `Quote error: ${e.message}` }] };
     }
 });
-server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first (run authenticate_wallet). Call once to see a quote + confirmation prompt; call again with confirm=true to actually execute.", {
+server.tool("dex_swap", "Execute a DEX swap. v2.1.1: signs via the configured seed (file → QNK_SEED env); no browser-auth required. Call once with confirm omitted to see the quote; call again with confirm=true to execute.", {
     from_token: z.string().describe("Token to sell (e.g., QUG)"),
     to_token: z.string().describe("Token to buy (e.g., QUGUSD)"),
     amount: z.number().positive().describe("Amount of from_token in display units"),
     slippage_percent: z.number().optional().describe("Slippage tolerance (default 0.5)"),
     confirm: z.boolean().optional().describe("Set to true to execute; without it, returns the quote first"),
-}, async ({ from_token, to_token, amount, slippage_percent, confirm }) => {
-    // Step 1: auth check (same pattern as send_qug)
-    if (!isSessionValid()) {
-        return {
-            content: [{
-                    type: "text",
-                    text: [
-                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To execute a swap:`,
-                        ``,
-                        `  1. Say "authenticate wallet"`,
-                        `  2. Open the link in your browser and approve`,
-                        `  3. Say "check auth"`,
-                        `  4. Then retry the swap`,
-                    ].join("\n"),
-                }],
-        };
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)"),
+}, async ({ from_token, to_token, amount, slippage_percent, confirm, seed }) => {
+    // v2.1.1: seed-derived auth — no browser flow.
+    // Derive our qnk... address from the same seed apiSigned() will use, so
+    // the wallet_address in the body matches the X-Wallet-Auth signer.
+    let signerAddress;
+    try {
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
     }
-    refreshSession();
-    // Step 2: resolve tokens + decimals
+    catch (e) {
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+    }
+    // Resolve tokens + decimals
     let tokens;
     try {
         tokens = await fetchTokens();
@@ -1253,7 +1248,7 @@ server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first 
     const minOutDisplay = fromBaseUnits(q.minimum_amount_out, tOut.decimals);
     const priceImpactPct = (q.price_impact * 100).toFixed(3);
     const highImpact = q.price_impact > 0.05; // 5% impact threshold
-    // Step 4: if not confirmed, show quote and ask
+    // If not confirmed, show quote and ask
     if (!confirm) {
         return {
             content: [{
@@ -1261,7 +1256,7 @@ server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first 
                     text: [
                         `⚠️ SWAP CONFIRMATION REQUIRED`,
                         ``,
-                        `  From wallet:  ${activeWalletAddress.slice(0, 20)}...`,
+                        `  From wallet:  ${signerAddress.slice(0, 20)}...`,
                         `  Sell:         ${amount} ${tIn.symbol}`,
                         `  Receive:      ≈${outDisplay.toFixed(6)} ${tOut.symbol}`,
                         `  Min received: ${minOutDisplay.toFixed(6)} ${tOut.symbol}  (with ${slip}% slippage tolerance)`,
@@ -1275,22 +1270,24 @@ server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first 
                 }],
         };
     }
-    // Step 5: execute
+    // Execute — seed-signed X-Wallet-Auth, no vault session.
     try {
-        const res = await api("/dex/swap", "POST", {
+        const res = await apiSigned("/dex/swap", "POST", {
             from_token: tIn.symbol,
             to_token: tOut.symbol,
             amount_in: amountInBase,
             min_amount_out: q.minimum_amount_out,
-            wallet_address: activeWalletAddress,
+            wallet_address: signerAddress,
             slippage_tolerance: slip,
-            ...(authToken ? { auth_token: authToken } : {}),
-        });
+        }, { seed });
         if (res.success === false || res.ok === false) {
             return { content: [{ type: "text", text: `Swap failed: ${res.error || 'unknown error'}` }] };
         }
         const data = res.data || res;
-        const txHash = data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+        // v2.1.1: server returns `transaction_id` per memory entry
+        // first_agentic_loop_closed.md (the 2026-05-17 finding). Try that
+        // first; older variants kept for compatibility.
+        const txHash = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
         const filledOutBase = data.amount_out || q.amount_out;
         const filledOutDisplay = fromBaseUnits(String(filledOutBase), tOut.decimals);
         return {
@@ -1304,13 +1301,13 @@ server.tool("dex_swap", "Execute a DEX swap. Wallet must be authenticated first 
                         `  Tx hash:  ${txHash}`,
                         ``,
                         `The swap will be reflected in your balance within ~1 second (next block).`,
-                        `Check balance with: get_balance address=${activeWalletAddress}`,
+                        `Check balance with: get_balance address=${signerAddress}`,
                     ].join("\n"),
                 }],
         };
     }
     catch (e) {
-        return { content: [{ type: "text", text: `Swap submission failed: ${e.message}\n\nThe wallet may need re-authentication or have insufficient balance.` }] };
+        return { content: [{ type: "text", text: `Swap submission failed: ${e.message}\n\nVerify the seed file exists at ~/.claude/quillon-agent-seed (or QNK_SEED env), and that the wallet has sufficient balance for both the swap and gas.` }] };
     }
 });
 // ============================================================
