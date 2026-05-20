@@ -269,6 +269,7 @@ pub mod email_auth_verify; // ✅ v7.3.2 - Quillon Mail: SPF/DKIM/DMARC verifica
 pub mod ai_intent; // ✅ v2.3.18-beta - Safe AI intent schema (AI parses, Rust executes)
 pub mod agent_panel;
 pub mod agent_api; // v10.10.5: AFL-1 batch + single submission endpoints (scaffolded)
+pub mod qshare_api; // v10.10.7: QSHARE-1 L3 REST handlers (/api/v1/qshare/*)
 pub mod ai_intent_parser; // ✅ v2.3.18-beta - Mistral 7B intent parsing with validation
 pub mod ai_intent_executor; // ✅ v2.3.18-beta - Deterministic Rust intent execution
 pub mod ai_intent_manager; // ✅ v2.3.18-beta - Unified intent pipeline with confirmation flow
@@ -1520,6 +1521,10 @@ pub struct AppState {
 
     // QUG/QUGUSD Stablecoin System - CollateralVault for over-collateralized minting
     pub collateral_vault: Arc<RwLock<q_vm::contracts::CollateralVault>>,
+    /// v10.10.7: QSHARE-1 L3 treasury share contract — autonomous premium-arbitrage.
+    /// Initialized with QShareContract::default() at startup; persistence to
+    /// CF_CONTRACTS is a v10.10.8 follow-up.
+    pub qshare_contract: Arc<RwLock<q_vm::contracts::qshare_token::QShareContract>>,
 
     // v8.5.5: QCREDIT Yield Vault — lock QUG, mint QCREDIT 1:1, earn tiered yield
     pub qcredit_vault: Arc<RwLock<q_vm::contracts::QCreditVault>>,
@@ -3129,6 +3134,9 @@ impl AppState {
             collateral_vault,
             // v8.5.5: QCREDIT Yield Vault
             qcredit_vault,
+            // v10.10.7: QSHARE-1 L3 treasury share — default-initialized (empty
+            // treasury, zero circulating). CF_CONTRACTS persistence in v10.10.8.
+            qshare_contract: Arc::new(RwLock::new(q_vm::contracts::qshare_token::QShareContract::default())),
 
             // Quillon Bank Loan Applications - Persistent storage
             pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),
@@ -4618,6 +4626,9 @@ impl AppState {
             collateral_vault,
             // v8.5.5: QCREDIT Yield Vault
             qcredit_vault,
+            // v10.10.7: QSHARE-1 L3 treasury share — default-initialized (empty
+            // treasury, zero circulating). CF_CONTRACTS persistence in v10.10.8.
+            qshare_contract: Arc::new(RwLock::new(q_vm::contracts::qshare_token::QShareContract::default())),
 
             // Quillon Bank Loan Applications - Persistent storage
             pending_loan_applications: Arc::new(RwLock::new(pending_loan_applications_map)),

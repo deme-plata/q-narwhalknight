@@ -25100,6 +25100,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // v10.10.5: Agent Activity Panel — xAI Home Mixer-inspired scoring pipeline.
         // Per docs/agent-activity-panel-spec.md §2.
         .route("/api/v1/agent/panel/:addr", get(q_api_server::agent_panel::handler::get_agent_panel))
+        // v10.10.7: QSHARE-1 L3 REST handlers.
+        // Per docs/standards/qshare-treasury-protocol-spec.md §5.
+        .route("/api/v1/qshare/state", get(q_api_server::qshare_api::get_state))
+        .route("/api/v1/qshare/premium", get(q_api_server::qshare_api::get_premium))
+        .route("/api/v1/qshare/try_mint_signed", post(q_api_server::qshare_api::try_mint_signed))
+        .route("/api/v1/qshare/try_buyback_signed", post(q_api_server::qshare_api::try_buyback_signed))
         // v2.3.34-beta: Token Details Modal API endpoints
         .route("/api/v1/oracle/price-history/:token_id", get(handlers::get_token_price_history))
         .route("/api/v1/transactions/token/:token_id", get(handlers::get_token_transactions))
