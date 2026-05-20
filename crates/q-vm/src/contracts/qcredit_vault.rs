@@ -31,7 +31,7 @@ const SECONDS_PER_YEAR: u64 = 365 * 24 * 3600;
 
 // ============ DATA STRUCTURES ============
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CreditTier {
     Bronze,
     Silver,
