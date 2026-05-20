@@ -66,8 +66,10 @@ mod ai_transaction_assistant;
 // mod attachment_api;
 // ✅ v1.0.3-beta - Block Production Loop v2 with Comprehensive Stall Protection
 mod block_production_v2;
-// v10.10.0: Agent Activity Panel pipeline traits (Codex extends per PR #90)
-mod agent_panel;
+// v10.10.7: Agent Activity Panel lives in the LIB only (lib.rs:270 `pub mod agent_panel;`).
+// Duplicate `mod agent_panel;` here double-compiled the module in the bin context where
+// `crate::wallet_auth` doesn't resolve (E0432). main.rs only reaches it via the LIB path
+// `q_api_server::agent_panel::handler::get_agent_panel`, so the bin-side decl was dead.
 // ✅ Chat/Voice/Video signaling server — routes SDP/ICE between browser peers
 use q_api_server::signaling_server::{signaling_diag_handler, ws_signal_handler, SignalingState};
 // ⛏️  Integrated mining removed v7.1.3 - use external q-miner binary instead
