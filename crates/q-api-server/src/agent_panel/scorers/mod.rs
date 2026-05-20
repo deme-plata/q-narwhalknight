@@ -1,14 +1,18 @@
 use q_types::Transaction;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreReport {
     pub total: f64,
     pub components: Vec<ScoreComponent>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoreComponent {
-    pub name: &'static str,
+    /// v10.10.6: changed from &'static str to String for serde round-trip
+    /// (ScoreReport is now part of API responses + agent_panel TaskCandidate).
+    /// Constructors using string literals still compile via `.to_string()`.
+    pub name: String,
     pub value: f64,
     pub weight: f64,
     pub explanation: String,
@@ -72,7 +76,7 @@ impl TxScorer {
         for ((name, weight), value) in COMPONENTS.into_iter().zip(values) {
             total += value * weight;
             components.push(ScoreComponent {
-                name,
+                name: name.to_string(),
                 value,
                 weight,
                 explanation: tx_explanation(name, value),
@@ -114,7 +118,7 @@ impl SwapScorer {
         for ((name, weight), value) in COMPONENTS.into_iter().zip(values) {
             total += value * weight;
             components.push(ScoreComponent {
-                name,
+                name: name.to_string(),
                 value,
                 weight,
                 explanation: swap_explanation(name, value),

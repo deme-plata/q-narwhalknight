@@ -112,7 +112,7 @@ impl Source for MempoolTxSource {
                 task_id: hex::encode(&tx.id),
                 task_type: TaskType::MempoolTx,
                 status: TaskStatus::Executing,
-                created_at_secs: tx.timestamp as i64,
+                created_at_secs: tx.timestamp.timestamp(),
                 origin_wallet: from_hex,
                 label: format!(
                     "Tx {} {} {}",
