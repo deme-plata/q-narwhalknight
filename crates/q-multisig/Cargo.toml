@@ -1,0 +1,31 @@
+[package]
+name = "q-multisig"
+version.workspace = true
+edition.workspace = true
+description = "Post-quantum M-of-N multisig for Quillon Graph — Dilithium5 + Ed25519 hybrid, per-proposal threshold override."
+
+[dependencies]
+# Crypto: hybrid PQ + classical (mirrors q-types::ValidatorKeypair).
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-traits = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+
+# Serialization (file-based persistence + RocksDB-ready value encoding).
+serde = { workspace = true }
+serde_json = "1.0"
+postcard = { workspace = true }
+serde-big-array = { workspace = true }
+
+# Concurrency + types.
+parking_lot = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tracing = "0.1"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

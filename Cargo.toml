@@ -79,6 +79,7 @@ members = [
     "crates/q-turn",             # Custom STUN/TURN relay server — zero IP leak WebRTC
     "crates/q-ivc-verifier-wasm", # v10.9.18: WASM verifier scaffolding for browser wallets (Phase 1 placeholder; Phase 2 = real Nova)
     "crates/q-sync-optimizers",  # Scientific sync-improvement toolkit: Kalman BDP, Beta scores, CUBIC, Little's law, info-theoretic floor, Markov peer state, EWMV RTT, logistic peer-fail predictor (TODO: integrate into turbo_sync.rs)
+    "crates/q-multisig",  # v10.10.10: Post-quantum M-of-N multisig (Dilithium5 + Ed25519 hybrid, per-proposal threshold override)
 ]
 
 [workspace.package]
