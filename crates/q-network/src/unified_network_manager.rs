@@ -2381,6 +2381,50 @@ impl UnifiedNetworkManager {
             }
         }
 
+        // v10.10.8 Phase A — Tor onion listener announcement (Q_TOR_LISTEN_ONION=1).
+        //
+        // Strategy: don't try `swarm.listen_on(/onion3/...)` yet — the current
+        // Transport stack (TCP/QUIC/DNS/WSS) doesn't recognize /onion3/ multiaddrs;
+        // that requires the Tor-wrapped transport from Phase C. Instead, start the
+        // onion service via QTorClient (which hosts a real v3 hidden service in the
+        // embedded Arti) and register the /onion3/<base32>:<port> address as an
+        // EXTERNAL address. Identify then announces it to every peer. When other
+        // nodes get Phase C (Tor-aware transport), they can immediately dial us.
+        //
+        // The Arti onion service is bound to QTorClient.config.rpc_port and proxies
+        // inbound traffic to our local TCP listener at the same port. As long as
+        // rpc_port == our p2p_port, inbound .onion connections arrive at the libp2p
+        // swarm naturally.
+        if tor_policy.listen_onion {
+            if let Some(tor) = &tor_client {
+                match tor.start_onion_service().await {
+                    Ok(onion_addr) => {
+                        let bare = onion_addr.trim_end_matches(".onion");
+                        let onion_port = if p2p_port > 0 { p2p_port } else { 9001 };
+                        let multiaddr_str = format!("/onion3/{}:{}", bare, onion_port);
+                        match multiaddr_str.parse::<Multiaddr>() {
+                            Ok(onion_multiaddr) => {
+                                swarm.add_external_address(onion_multiaddr.clone());
+                                info!("🧅 [PHASE-A] ✅ Onion address registered: {}", onion_multiaddr);
+                                info!("           Announced via Identify; Tor-aware peers can dial us anonymously");
+                                info!("           Inbound .onion → Arti hidden service → local TCP:{}", onion_port);
+                            }
+                            Err(e) => {
+                                warn!("⚠️  [PHASE-A] Could not parse onion multiaddr '{}': {} — onion NOT announced",
+                                    multiaddr_str, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️  [PHASE-A] start_onion_service failed: {} — onion NOT announced", e);
+                    }
+                }
+            } else {
+                warn!("⚠️  [PHASE-A] Q_TOR_LISTEN_ONION=1 but no QTorClient available — Phase A skipped");
+                warn!("           (likely cause: main.rs:2914 tor_client never populated; see task #64)");
+            }
+        }
+
         info!("✅ Zero-Knowledge Discovery initialized successfully!");
         info!("📡 Discovery mechanisms active:");
         info!("  • mDNS (local network, <1 second)");
@@ -2391,6 +2435,9 @@ impl UnifiedNetworkManager {
         info!("🌐 Transport layers:");
         info!("  • TCP (node-to-node)");
         info!("  • WebSocket (browser clients)");
+        if tor_policy.listen_onion && tor_client.is_some() {
+            info!("  • Tor v3 hidden service (Phase A — inbound .onion)");
+        }
 
         // 🧅 v3.4.20-beta: Tor/Encryption layer initialization logging
         info!("🔐 Security layers active:");
