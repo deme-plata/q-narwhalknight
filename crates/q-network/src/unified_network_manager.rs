@@ -4997,6 +4997,7 @@ impl UnifiedNetworkManager {
             hex::encode(&match fee_gossip.fee_record.fee_token {
                 q_types::TokenType::QUG => q_types::QUG_TOKEN_ADDRESS,
                 q_types::TokenType::QUGUSD => q_types::QUGUSD_TOKEN_ADDRESS,
+                q_types::TokenType::QSHARE => q_types::QSHARE_TOKEN_ADDRESS,
                 q_types::TokenType::Custom(addr) => addr,
             }[..4])
         );
