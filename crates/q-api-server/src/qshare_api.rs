@@ -91,8 +91,9 @@ async fn read_qshare_pool(state: &AppState) -> Option<DexPoolSnapshot> {
     let pools = state.liquidity_pools.read().await;
     // Pool keys aren't stable across versions; look for any pool whose tokens
     // include QSHARE_TOKEN_ADDRESS paired with QUG (zero address or QUG sentinel).
-    let qshare_addr = q_types::QSHARE_TOKEN_ADDRESS;
-    let qug_addr = q_types::QUG_TOKEN_ADDRESS;
+    // Pool token fields are hex-encoded Strings; encode the [u8; 32] constants to match.
+    let qshare_addr = hex::encode(q_types::QSHARE_TOKEN_ADDRESS);
+    let qug_addr = hex::encode(q_types::QUG_TOKEN_ADDRESS);
     for (_pool_id, pool) in pools.iter() {
         let (token0, token1) = (pool.token0, pool.token1);
         if (token0 == qshare_addr && token1 == qug_addr) || (token0 == qug_addr && token1 == qshare_addr) {

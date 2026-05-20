@@ -108,6 +108,7 @@ impl Source for MempoolTxSource {
             if from_hex != wallet_hex && to_hex != wallet_hex {
                 continue;
             }
+            let is_outgoing = from_hex == wallet_hex;
             out.push(TaskCandidate {
                 task_id: hex::encode(&tx.id),
                 task_type: TaskType::MempoolTx,
@@ -116,7 +117,7 @@ impl Source for MempoolTxSource {
                 origin_wallet: from_hex,
                 label: format!(
                     "Tx {} {} {}",
-                    if from_hex == wallet_hex { "→" } else { "←" },
+                    if is_outgoing { "→" } else { "←" },
                     short_hex(&hex::encode(tx.to)),
                     fmt_amount(tx.amount)
                 ),
