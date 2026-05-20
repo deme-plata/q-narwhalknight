@@ -114,8 +114,8 @@ impl IoUringAdapter {
 
         #[cfg(target_os = "linux")]
         {
-            if let Ok(version_str) = std::fs::read_to_string("/proc/version") {
-                // "Linux version 5.15.0-..." — parse major.minor
+            // 1) Kernel version gate (need ≥ 5.10 for tokio_uring 0.4)
+            let kernel_ok = if let Ok(version_str) = std::fs::read_to_string("/proc/version") {
                 if let Some(ver) = version_str
                     .split_whitespace()
                     .nth(2)
@@ -128,11 +128,63 @@ impl IoUringAdapter {
                         .collect();
                     if parts.len() >= 2 {
                         let (major, minor) = (parts[0], parts[1]);
-                        return major > 5 || (major == 5 && minor >= 10);
+                        major > 5 || (major == 5 && minor >= 10)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !kernel_ok {
+                return false;
+            }
+
+            // 2) v10.10.8: seccomp filter gate.
+            // Docker's default seccomp profile blocks the io_uring_setup syscall.
+            // Because q-api-server is built with `panic = "abort"` (Cargo profile),
+            // a panic inside tokio_uring::start() terminates the whole process
+            // INSTEAD of being caught by the surrounding catch_unwind — so the
+            // wrap-in-catch_unwind comment at run_uring_thread is unfortunately
+            // optimistic. The only safe approach is to detect-and-skip before
+            // we ever call tokio_uring::start().
+            //
+            // /proc/self/status "Seccomp:" field reports:
+            //   0 = disabled, 1 = strict (deprecated), 2 = filter mode (Docker)
+            // If we see mode 2, assume io_uring is blocked. False positives
+            // (containers that explicitly allow io_uring) cost us a tokio::fs
+            // fallback that still works, just slightly slower. False negatives
+            // (uring blocked but we try anyway) would abort the process at boot.
+            // Conservative side is right.
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("Seccomp:") {
+                        let mode = rest.trim();
+                        if mode == "2" {
+                            warn!(
+                                "io_uring disabled — process is under seccomp filter mode (mode=2). \
+                                 This is the Docker default; run with `--security-opt seccomp=unconfined` \
+                                 to enable io_uring, or accept the tokio::fs fallback (no perf penalty for \
+                                 most workloads). Avoids tokio_uring::start panic + process abort."
+                            );
+                            return false;
+                        }
                     }
                 }
             }
-            false
+
+            // 3) Honor an explicit operator override.
+            if std::env::var("Q_DISABLE_IO_URING")
+                .map(|v| v == "1" || v == "true")
+                .unwrap_or(false)
+            {
+                warn!("io_uring disabled via Q_DISABLE_IO_URING=1");
+                return false;
+            }
+
+            true
         }
     }
 
