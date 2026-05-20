@@ -261,6 +261,7 @@ impl TxScorer {
         let token_score = match ctx.token_type {
             q_types::TokenType::QUG => 1.0,
             q_types::TokenType::QUGUSD => 0.95,
+            q_types::TokenType::QSHARE => 0.95,
             q_types::TokenType::Custom(_) => 0.9,
         };
         let signature_score = if tx.signature.is_empty() { 0.0 } else { 1.0 };
@@ -5170,6 +5171,12 @@ async fn send_transaction_inner(
                     info!("📤 [TX] Optimistic token balance update emitted for recipient {}", q_log_privacy::mask_addr(&hex::encode(&recipient_addr[..8])));
                 }
             }
+            q_types::TokenType::QSHARE => {
+                // v10.10.4: QSHARE optimistic balance events deferred — QSHARE is
+                // mint-on-demand via QShareContract, not sent peer-to-peer in the
+                // typical workflow. When QSHARE-to-QSHARE transfers become a thing,
+                // mirror the QUGUSD arm above but use QSHARE_TOKEN_ADDRESS.
+            }
             q_types::TokenType::QUG => {
                 // QUG native transfer — read wallet_balances, emit BalanceUpdated
                 let old_balance = {
@@ -5275,6 +5282,7 @@ async fn send_transaction_inner(
     let token_type_str = match &signed_transaction.token_type {
         q_types::TokenType::QUG => "QUG",
         q_types::TokenType::QUGUSD => "QUGUSD",
+        q_types::TokenType::QSHARE => "QSHARE",
         q_types::TokenType::Custom(_) => "CUSTOM",
     };
     let score_context = TxScoreContext {
@@ -5516,6 +5524,7 @@ pub async fn get_recent_transactions(
             let token_type_str = match &tx.token_type {
                 q_types::TokenType::QUG => "QUG",
                 q_types::TokenType::QUGUSD => "QUGUSD",
+                q_types::TokenType::QSHARE => "QSHARE",
                 q_types::TokenType::Custom(_) => "CUSTOM",
             };
             serde_json::json!({
@@ -5651,6 +5660,7 @@ pub async fn get_wallet_transaction_history(
                 let (token_symbol, token_address) = match &tx.token_type {
                     q_types::TokenType::QUG => (Some("QUG".to_string()), None),
                     q_types::TokenType::QUGUSD => (Some("QUGUSD".to_string()), None),
+                    q_types::TokenType::QSHARE => (Some("QSHARE".to_string()), None),
                     q_types::TokenType::Custom(addr) => {
                         (Some("TOKEN".to_string()), Some(hex::encode(addr)))
                     }
@@ -8978,6 +8988,7 @@ pub async fn send_private_transaction(
     let mixer_token_type_str = match &signed_transaction.token_type {
         q_types::TokenType::QUG => "QUG",
         q_types::TokenType::QUGUSD => "QUGUSD",
+        q_types::TokenType::QSHARE => "QSHARE",
         q_types::TokenType::Custom(_) => "CUSTOM",
     };
     let response = serde_json::json!({
