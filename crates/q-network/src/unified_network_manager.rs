@@ -5944,6 +5944,11 @@ impl UnifiedNetworkManager {
 
                         // Update atomic counter (thread-safe)
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+                        // v10.10.10: also update the Prometheus gauge. The dead-code run()
+                        // path at line 3469 had this; run_once() didn't, so qnk_peers_connected
+                        // was always 0 in production despite real peer connections — making
+                        // every fork_detector "0 peers" warning + every dashboard read a lie.
+                        self.metrics.peers_connected.set(peer_count as i64);
 
                         info!(
                             "🔗 Connected to peer: {} (total connections: {}, new: {})",
@@ -5951,7 +5956,7 @@ impl UnifiedNetworkManager {
                         );
                         info!("📊 Total discovered peers: {} (atomic counter updated)", peer_count);
                     }
-                    SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                    SwarmEvent::ConnectionClosed { peer_id, cause, num_established, endpoint, .. } => {
                         // Remove peer from discovered set
                         let mut peers = self.discovered_peers.write().await;
                         peers.remove(&peer_id);
@@ -5960,6 +5965,8 @@ impl UnifiedNetworkManager {
 
                         // Update atomic counter
                         self.connected_peer_count.store(peer_count, std::sync::atomic::Ordering::SeqCst);
+                        // v10.10.10: keep the Prometheus gauge in sync.
+                        self.metrics.peers_connected.set(peer_count as i64);
 
                         // v10.0.4: Remove WebSocket peer from explicit gossipsub peers
                         if self.websocket_peers.remove(&peer_id) {
@@ -5967,7 +5974,26 @@ impl UnifiedNetworkManager {
                             info!("🌐 [BROWSER CLIENT] Removed explicit gossipsub peer: {}", peer_id);
                         }
 
-                        info!("👋 Connection closed: {} (remaining peers: {})", peer_id, peer_count);
+                        // v10.10.10: log the disconnect cause so we can diagnose WHY a peer
+                        // dropped (TCP reset, Identify timeout, gossipsub score, application
+                        // kick, memory limit). Mirrors the v10.9.27 diagnostic that lived in
+                        // the dead-code run() path. Suppress noise when graceful AND other
+                        // transports to the same peer remain (multi-transport redundancy).
+                        let cause_label = match &cause {
+                            None => "graceful".to_string(),
+                            Some(e) => format!("{}", e).chars().take(120).collect::<String>(),
+                        };
+                        if !(cause.is_none() && num_established > 0) {
+                            warn!(
+                                "👋 [DISCONNECT] peer={} cause={} remaining={} endpoint={:?}",
+                                peer_id, cause_label, peer_count, endpoint
+                            );
+                        } else {
+                            info!(
+                                "👋 [DISCONNECT-redundant] peer={} (still {} other transport(s) open)",
+                                peer_id, num_established
+                            );
+                        }
 
                         // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
                         let bootstrap_peers = self.bootstrap_peers.read().await;
