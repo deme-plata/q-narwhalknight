@@ -6461,15 +6461,41 @@ impl UnifiedNetworkManager {
                 info!("🦈 [SHARKGOD] DIRECT publish tx {} ({} bytes) to {} peers via topic: {}",
                       &tx_hash[..16.min(tx_hash.len())], data.len(), peer_count, topic);
 
-                let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
-                match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
-                    Ok(msg_id) => {
-                        info!("🦈 [SHARKGOD] ✅ Direct publish SUCCESS: tx={} msg_id={:?} peers={}",
-                              &tx_hash[..16.min(tx_hash.len())], msg_id, peer_count);
+                // v10.10.9 Phase B — route TX stem through Tor circuits if Q_TOR_STEM=1.
+                // Falls back to clearnet gossipsub on any failure (graceful degradation).
+                // QTorClient.broadcast_message uses DandelionProtocol (stem) when enabled
+                // in TorConfig, else direct circuit broadcast. Either way the TX leaves
+                // the local node via Tor first; gossipsub fluff still happens downstream
+                // when the next hop drops it back into the open mesh.
+                let mut sent_via_tor = false;
+                if self.tor_policy.stem_via_tor {
+                    if let Some(tor) = &self.tor_client {
+                        match tor.broadcast_message(&data, &topic).await {
+                            Ok(_) => {
+                                info!("🧅 [PHASE-B] ✅ tx {} stem sent via Tor (topic={})",
+                                      &tx_hash[..16.min(tx_hash.len())], topic);
+                                sent_via_tor = true;
+                            }
+                            Err(e) => {
+                                warn!("🧅 [PHASE-B] Tor stem failed: {} — falling back to gossipsub", e);
+                            }
+                        }
+                    } else {
+                        warn!("🧅 [PHASE-B] Q_TOR_STEM=1 but no QTorClient — falling back to gossipsub");
                     }
-                    Err(e) => {
-                        warn!("🦈 [SHARKGOD] ❌ Direct publish FAILED: tx={} error={:?}",
-                              &tx_hash[..16.min(tx_hash.len())], e);
+                }
+
+                if !sent_via_tor {
+                    let ident_topic = libp2p::gossipsub::IdentTopic::new(&topic);
+                    match self.swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
+                        Ok(msg_id) => {
+                            info!("🦈 [SHARKGOD] ✅ Direct publish SUCCESS: tx={} msg_id={:?} peers={}",
+                                  &tx_hash[..16.min(tx_hash.len())], msg_id, peer_count);
+                        }
+                        Err(e) => {
+                            warn!("🦈 [SHARKGOD] ❌ Direct publish FAILED: tx={} error={:?}",
+                                  &tx_hash[..16.min(tx_hash.len())], e);
+                        }
                     }
                 }
             }

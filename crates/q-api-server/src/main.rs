@@ -2937,9 +2937,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             bootstrap_secs
         );
         let tor_config = q_tor_client::TorConfig::default();
+        // v10.10.9: use new_with_embedded_arti — the plain new() defaults to
+        // SOCKS5 external-proxy mode at 127.0.0.1:9050, which expects an external
+        // Tor daemon. Docker containers don't have one, so bootstrap times out.
+        // The embedded-Arti variant runs Tor in-process. lib.rs:429.
         match tokio::time::timeout(
             std::time::Duration::from_secs(bootstrap_secs),
-            q_tor_client::QTorClient::new(tor_config, node_id, q_types::Phase::Phase1),
+            q_tor_client::QTorClient::new_with_embedded_arti(tor_config, node_id, q_types::Phase::Phase1),
         )
         .await
         {
