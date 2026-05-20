@@ -18,6 +18,7 @@ pub mod water_bot;
 pub mod dark_knight;
 pub mod btc_advantage;
 pub mod qcredit_dca; // QSHARE-1 Phase 1 — yield-bearing DCA into QCREDIT Platinum tier
+pub mod qshare_premium_arbitrage; // QSHARE-1 Phase 2 — autonomous mint/buyback on premium/discount
 
 // Re-export DEX activity components for easy access
 pub use dex_activity::{
@@ -31,3 +32,7 @@ pub use water_bot::{TunnelingOctopusBot, WaterBotConfig};
 pub use dark_knight::{DarkKnightBot, DarkKnightConfig};
 pub use btc_advantage::{BtcAdvantageBot, BtcAdvantageConfig};
 pub use qcredit_dca::{QcreditDcaBot, QcreditDcaConfig, LockCycleResult};
+pub use qshare_premium_arbitrage::{
+    CycleDecision, QSharePremiumConfig, QShareStateSnapshot,
+    decide_cycle, run_qshare_premium_arbitrage,
+};

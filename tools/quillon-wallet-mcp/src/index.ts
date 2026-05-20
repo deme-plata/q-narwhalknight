@@ -1614,6 +1614,92 @@ server.tool(
 );
 
 // ============================================================
+// QSHARE-1 TOOLS — L3 autonomous treasury share
+// Per docs/standards/qshare-treasury-protocol-spec.md
+// Phase 2 scaffolding: tools work against the on-chain contract
+// once the REST API exposes /api/v1/qshare/* endpoints.
+// ============================================================
+
+server.tool(
+  "qshare_nav",
+  "Read the current NAV (net asset value) per QSHARE token in QUG units. NAV = total QUG-equivalent treasury / circulating QSHARE supply. Returns nav_per_qshare (raw u128 with decimals=24), total_treasury_qug_equivalent, circulating_qshare, and the block height at which NAV was computed. Use this to compare against market price (qshare_premium_ratio) for arbitrage decisions.",
+  {
+    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
+  },
+  async ({ api_url }) => {
+    const base = (api_url || "https://quillon.xyz/api/v1").replace(/\/$/, "");
+    try {
+      const res = await fetch(`${base}/qshare/state`, { redirect: "error" });
+      if (!res.ok) {
+        return { content: [{ type: "text", text: `qshare/state endpoint returned HTTP ${res.status}. The /api/v1/qshare/* endpoints are spec'd but not yet exposed by q-api-server. See docs/standards/qshare-treasury-protocol-spec.md §5 for the expected shape.` }] };
+      }
+      const data = await res.json();
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Network error: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "qshare_premium_ratio",
+  "Read the current QSHARE/QUG premium ratio (×1000 basis points). Premium ratio = market_price_twap / nav_per_qshare. Above 1500 means a mint trigger is available; below 950 means a buyback trigger is available; between is the neutral zone. Returns premium_ratio_bps, nav_per_qshare, market_price_twap, and the eligibility window (next_mint_eligible_at_height, next_buyback_eligible_at_height).",
+  {
+    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
+  },
+  async ({ api_url }) => {
+    const base = (api_url || "https://quillon.xyz/api/v1").replace(/\/$/, "");
+    try {
+      const res = await fetch(`${base}/qshare/premium`, { redirect: "error" });
+      if (!res.ok) {
+        return { content: [{ type: "text", text: `qshare/premium endpoint returned HTTP ${res.status}. The /api/v1/qshare/* endpoints are spec'd but not yet exposed by q-api-server. See docs/standards/qshare-treasury-protocol-spec.md §5.` }] };
+      }
+      const data = await res.json();
+      const ratio_x1000 = data.premium_ratio_bps || 0;
+      const human = (ratio_x1000 / 1000).toFixed(3);
+      let zone = "neutral";
+      if (ratio_x1000 >= 1500) zone = "MINT eligible (premium ≥ 1.5×)";
+      else if (ratio_x1000 <= 950) zone = "BUYBACK eligible (discount ≤ 0.95×)";
+      return { content: [{ type: "text", text: `Premium ratio: ${human}× (${ratio_x1000} bps) — zone: ${zone}\n\n${JSON.stringify(data, null, 2)}` }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Network error: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "qshare_mint",
+  "Attempt to trigger an autonomous QSHARE mint. Permissionless — anyone can call. The contract enforces premium threshold (≥ 1.5×), cooldown (360 blocks default), and pool depth gates. If the trigger succeeds, the caller receives a bounty (default 0.5% of accumulated QUG, capped at 1 QUG). Requires X-Wallet-Auth signing. The trigger fee (0.01 QUG) is refunded + bounty added on success. Use qshare_premium_ratio first to check eligibility.",
+  {
+    seed: z.string().describe("Wallet seed used to sign the X-Wallet-Auth header"),
+    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
+    dry_run: z.boolean().optional().describe("If true, return what would be done without submitting"),
+  },
+  async ({ seed, api_url, dry_run }) => {
+    if (dry_run) {
+      return { content: [{ type: "text", text: `[DRY RUN] Would call POST ${api_url || "https://quillon.xyz/api/v1"}/qshare/try_mint_signed with X-Wallet-Auth(seed=<redacted>). The contract gates the mint by premium ≥ 1.5×, cooldown ≥ 360 blocks since last mint, and pool depth ≥ 1000 QUG. If accepted, bounty arrives as a coinbase-style payout in the next block.` }] };
+    }
+    return { content: [{ type: "text", text: `qshare_mint not yet wired to /api/v1/qshare/try_mint_signed. The endpoint is spec'd at docs/standards/qshare-treasury-protocol-spec.md §5. Phase 2 wire-up: implement qshare_api.rs in q-api-server that calls QShareContract::try_autonomous_mint and routes the result. The contract and the signing path are already complete on agent/cross-shard-simd-validation as of v10.10.x.` }] };
+  }
+);
+
+server.tool(
+  "qshare_buyback",
+  "Attempt to trigger a QSHARE buyback. Permissionless — anyone can call. The contract gates by discount threshold (≤ 0.95×), cooldown (720 blocks default), pool depth, AND available accrued yield (buybacks never spend treasury principal). Tighter pool cap than mint (0.1% vs 0.5%) to prevent gaming. Same auth shape as qshare_mint.",
+  {
+    seed: z.string().describe("Wallet seed used to sign the X-Wallet-Auth header"),
+    api_url: z.string().optional().describe("Quillon API base URL (default: https://quillon.xyz/api/v1)"),
+    dry_run: z.boolean().optional().describe("If true, return what would be done without submitting"),
+  },
+  async ({ seed, api_url, dry_run }) => {
+    if (dry_run) {
+      return { content: [{ type: "text", text: `[DRY RUN] Would call POST ${api_url || "https://quillon.xyz/api/v1"}/qshare/try_buyback_signed. The contract gates by discount ≤ 0.95×, cooldown ≥ 720 blocks, pool depth, and accrued-yield availability. Buybacks burn QSHARE; principal is never touched.` }] };
+    }
+    return { content: [{ type: "text", text: `qshare_buyback not yet wired to /api/v1/qshare/try_buyback_signed. The endpoint is spec'd at docs/standards/qshare-treasury-protocol-spec.md §5. Phase 2 wire-up: implement qshare_api.rs in q-api-server. The contract method QShareContract::try_buyback is already complete on agent/cross-shard-simd-validation as of v10.10.x.` }] };
+  }
+);
+
+// ============================================================
 // START SERVER
 // ============================================================
 
