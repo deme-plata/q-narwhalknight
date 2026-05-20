@@ -25143,6 +25143,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // v10.10.5: Agent Activity Panel — xAI Home Mixer-inspired scoring pipeline.
         // Per docs/agent-activity-panel-spec.md §2.
         .route("/api/v1/agent/panel/:addr", get(q_api_server::agent_panel::handler::get_agent_panel))
+        // v10.10.10: score history endpoint — owner-only, returns the
+        // in-memory ScoreHistory for the wallet. `?view=summary` returns
+        // the calibration-friendly aggregate stats; default returns the
+        // raw entries newest-first.
+        .route("/api/v1/agent/score-history/:addr", get(q_api_server::agent_panel::handler::get_score_history))
         // v10.10.7: QSHARE-1 L3 REST handlers.
         // Per docs/standards/qshare-treasury-protocol-spec.md §5.
         .route("/api/v1/qshare/state", get(q_api_server::qshare_api::get_state))

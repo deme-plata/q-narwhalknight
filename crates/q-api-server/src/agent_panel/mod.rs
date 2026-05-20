@@ -27,3 +27,14 @@ pub mod concrete;
 
 /// v10.10.5: GET /api/v1/agent/panel/:addr REST handler.
 pub mod handler;
+
+/// v10.10.10: per-wallet "tasks already shown" tracker so polling agents
+/// don't see the same task forever. Mirrors xAI's
+/// `home-mixer/filters/previously_seen_posts_filter.rs`.
+pub mod seen_tracker;
+
+/// v10.10.10: in-memory `ScoreReport` history per wallet so we can run
+/// calibration audits + future hard-negative mining without re-running
+/// the pipeline against past chain state. The "killer next move" from
+/// docs/x-algorithm-deeper-dive-2026-05-20.md §2.6.
+pub mod score_history;

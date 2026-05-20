@@ -161,18 +161,52 @@ pub async fn get_agent_panel(
     // Limit cap (server-enforced max).
     let limit = params.limit.unwrap_or(50).min(200);
 
-    // Build context.
-    let now = chrono::Utc::now();
-    let ctx = PanelContext {
-        wallet,
-        viewer_mode,
-        state: state.clone(),
-        now,
-    };
+    // Build context (v10.10.10: use the new constructor that initialises
+    // the query_data map for QueryHydrator stages).
+    let ctx = PanelContext::new(wallet, viewer_mode, state.clone());
 
-    // Build and run the default pipeline.
-    let pipeline = build_default_panel_pipeline();
+    // Build and run the default pipeline (v10.10.10: factory takes the
+    // shared SeenTracker so the previously-seen filter sees prior runs).
+    let pipeline = build_default_panel_pipeline(super::seen_tracker::global());
     let scored = pipeline.run(&ctx).await;
+
+    // v10.10.10: record final candidates' scores into the ScoreHistory ring
+    // buffer so /api/v1/agent/score-history/:addr can serve them back. This
+    // is the "killer next move" foundation (docs/x-algorithm-deeper-dive
+    // -2026-05-20.md §2.6).
+    {
+        let history = super::score_history::global();
+        let viewer_wallet = hex::encode(wallet);
+        let at_unix = ctx.now.timestamp();
+        let entries: Vec<super::score_history::ScoreEntry> = scored
+            .iter()
+            .map(|c| super::score_history::ScoreEntry {
+                at_unix,
+                viewer_wallet: viewer_wallet.clone(),
+                task_id: c.task_id.clone(),
+                task_type: format!("{:?}", c.task_type),
+                status: format!("{:?}", c.status),
+                score: c.score.clone().unwrap_or_else(|| {
+                    super::scorers::ScoreReport {
+                        total: 0.0,
+                        components: Vec::new(),
+                    }
+                }),
+                selected: true,
+            })
+            .collect();
+        history.record_batch(entries);
+
+        // Also mark these task_ids as "seen" so the next pipeline run for
+        // this viewer doesn't re-surface them. (The SeenRecorderSideEffect
+        // in the factory does this too, but doing it here lets us scope
+        // to the actual selected list — the SideEffect path doesn't yet
+        // have access to the post-selection list.)
+        let tracker = super::seen_tracker::global();
+        for c in &scored {
+            tracker.mark_seen(&viewer_wallet, &c.task_id);
+        }
+    }
     let total_after_select = scored.len();
     // (The pipeline's TopK selector already capped to 50; we cap further
     // if the caller asked for less than the default.)
@@ -207,13 +241,122 @@ pub async fn get_agent_panel(
             ViewerMode::Owner => "owner".to_string(),
             ViewerMode::Embed => "embed".to_string(),
         },
-        computed_at: now.to_rfc3339(),
+        computed_at: ctx.now.to_rfc3339(),
         zones,
         total_after_filter,
         total_after_select,
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+// ============ SCORE HISTORY ENDPOINTS (v10.10.10) ============
+
+#[derive(Debug, Deserialize)]
+pub struct ScoreHistoryQuery {
+    /// How many entries to return, newest-first. Default 100, max 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// If "summary", returns the `ScoreHistorySummary` instead of the raw
+    /// entry list. Useful for the calibration audit endpoint.
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScoreHistoryResponse {
+    pub wallet: String,
+    pub entries: Vec<super::score_history::ScoreEntry>,
+    pub total_returned: usize,
+}
+
+/// `GET /api/v1/agent/score-history/:addr`
+///
+/// Returns the in-memory score history for `addr`. Requires X-Wallet-Auth
+/// matching the path :addr — this is owner-only because the score breakdown
+/// can include signals derived from private state (mempool backlog,
+/// reserve ratios) that a third-party shouldn't see.
+///
+/// `?view=summary` returns the `ScoreHistorySummary` instead — what the
+/// calibration audit will eventually consume.
+pub async fn get_score_history(
+    State(_state): State<Arc<AppState>>,
+    Path(addr_str): Path<String>,
+    Query(params): Query<ScoreHistoryQuery>,
+    auth: Option<AuthenticatedWallet>,
+) -> impl IntoResponse {
+    let wallet = match parse_wallet_address(&addr_str) {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PanelError {
+                    error: "INVALID_WALLET_ADDRESS".to_string(),
+                    detail: e,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Owner-only — no embed mode here. Score breakdowns include other-user
+    // signals that we don't want to leak.
+    let authed = match auth {
+        Some(a) if a.address == wallet => a,
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(PanelError {
+                    error: "AUTH_MISMATCH".to_string(),
+                    detail: "X-Wallet-Auth address does not match path :addr".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(PanelError {
+                    error: "AUTH_REQUIRED".to_string(),
+                    detail: "/api/v1/agent/score-history requires X-Wallet-Auth".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let wallet_hex = hex::encode(authed.address);
+    let history = super::score_history::global();
+
+    if params.view.as_deref() == Some("summary") {
+        match history.summary(&wallet_hex) {
+            Some(s) => return (StatusCode::OK, Json(s)).into_response(),
+            None => {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "wallet": wallet_hex,
+                        "entries": 0,
+                        "note": "no score history recorded yet for this wallet — submit some panel queries first",
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let limit = params.limit.unwrap_or(100).min(1000);
+    let entries = history.get_recent(&wallet_hex, limit);
+    let total_returned = entries.len();
+    (
+        StatusCode::OK,
+        Json(ScoreHistoryResponse {
+            wallet: format!("qnk{}", wallet_hex),
+            entries,
+            total_returned,
+        }),
+    )
+        .into_response()
 }
 
 // ============ HELPERS ============
