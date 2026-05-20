@@ -27,6 +27,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -149,6 +150,176 @@ static GLOBAL_HISTORY: OnceLock<Arc<ScoreHistory>> = OnceLock::new();
 
 pub fn global() -> Arc<ScoreHistory> {
     GLOBAL_HISTORY.get_or_init(|| Arc::new(ScoreHistory::new())).clone()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v10.10.10: file-based persistence
+//
+// Persists ScoreHistory state to a JSON file in the chain's data directory
+// (resolved from `Q_DB_PATH` env var, falling back to `./data-mainnet-genesis`
+// to match the systemd defaults).
+//
+// Why file + not RocksDB CF: hot_db is private inside q-storage and we don't
+// want to widen its API (or do a schema migration for a new CF) in v10.10.10.
+// A flat JSON file under the data-dir lives next to the chain data, gets
+// included in backups automatically, and is debuggable via `jq`. v10.10.11
+// will promote this to a CF_SCORE_HISTORY column family once we can do the
+// migration properly.
+//
+// Persist policy: on every record_batch the handler spawns a background task
+// that overwrites the file (write-once-per-pipeline-run, not write-per-entry,
+// so disk I/O cost stays bounded). The full per-wallet rings (up to 1000 each)
+// are dumped — at ~500 bytes per entry × 1000 × 10 active wallets = ~5 MB,
+// well under any reasonable disk budget.
+// ════════════════════════════════════════════════════════════════════════════
+
+impl ScoreHistory {
+    /// Resolve the persistence file path: `$Q_DB_PATH/agent_panel_score_history.json`.
+    /// Falls back to `./data-mainnet-genesis/...` if the env var is unset, matching
+    /// the default in the systemd service file.
+    pub fn persist_path() -> PathBuf {
+        let base = std::env::var("Q_DB_PATH")
+            .unwrap_or_else(|_| "./data-mainnet-genesis".to_string());
+        PathBuf::from(base).join("agent_panel_score_history.json")
+    }
+
+    /// Snapshot the full state as a single JSON blob. Used by persist().
+    fn export_all(&self) -> SerializedScoreHistory {
+        let map = self.by_wallet.read();
+        let mut by_wallet = HashMap::with_capacity(map.len());
+        for (wallet, q) in map.iter() {
+            by_wallet.insert(wallet.clone(), q.iter().cloned().collect::<Vec<_>>());
+        }
+        SerializedScoreHistory {
+            version: 1,
+            max_per_wallet: self.max_per_wallet,
+            by_wallet,
+        }
+    }
+
+    /// Persist the full ring to disk as a single JSON file. Atomically renames
+    /// a temp file over the target so a crash mid-write doesn't leave a torn
+    /// file. Async — uses tokio::fs.
+    pub async fn persist_to_file(&self) -> Result<usize, String> {
+        let payload = self.export_all();
+        let n = payload.by_wallet.values().map(|v| v.len()).sum();
+        let path = Self::persist_path();
+        let tmp = path.with_extension("json.tmp");
+
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|e| format!("encode: {}", e))?;
+
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("create_dir_all: {}", e))?;
+            }
+        }
+        tokio::fs::write(&tmp, &bytes)
+            .await
+            .map_err(|e| format!("write tmp: {}", e))?;
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| format!("rename: {}", e))?;
+        tracing::debug!(
+            entries = n,
+            wallets = payload.by_wallet.len(),
+            path = %path.display(),
+            "score_history persisted",
+        );
+        Ok(n)
+    }
+
+    /// Convenience wrapper that spawns a tokio task so the caller doesn't block.
+    /// Used by the panel handler after record_batch so the request returns
+    /// immediately while the disk write happens in the background.
+    pub fn spawn_persist(self: Arc<Self>) {
+        tokio::spawn(async move {
+            if let Err(e) = self.persist_to_file().await {
+                tracing::warn!(error = %e, "score_history persist_to_file failed");
+            }
+        });
+    }
+
+    /// Load score history from disk on startup. If the file doesn't exist or
+    /// is malformed, returns 0 (treated as "nothing to load"). Counts the
+    /// total entries loaded across all wallets.
+    pub async fn load_from_file(&self) -> usize {
+        let path = Self::persist_path();
+        if !path.exists() {
+            tracing::debug!(
+                path = %path.display(),
+                "score_history persist file not found (first boot or fresh DB)",
+            );
+            return 0;
+        }
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "score_history file read failed");
+                return 0;
+            }
+        };
+        let payload: SerializedScoreHistory = match serde_json::from_slice(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "score_history file parse failed (schema mismatch?)");
+                return 0;
+            }
+        };
+        if payload.version != 1 {
+            tracing::warn!(
+                version = payload.version,
+                "score_history file version unknown — refusing to load",
+            );
+            return 0;
+        }
+        let mut total = 0usize;
+        let mut map = self.by_wallet.write();
+        for (wallet, entries) in payload.by_wallet {
+            // Sort by at_unix ascending so newest ends up at the back of
+            // the VecDeque (matches the live insertion order).
+            let mut sorted = entries;
+            sorted.sort_by_key(|e| e.at_unix);
+            let q: VecDeque<ScoreEntry> = sorted.into_iter().collect();
+            total += q.len();
+            map.insert(wallet, q);
+        }
+        tracing::info!(
+            total,
+            wallets = map.len(),
+            path = %path.display(),
+            "score_history loaded from disk",
+        );
+        total
+    }
+
+    /// Spawn a periodic background task that persists every `interval_secs`.
+    /// Useful as a fallback so we don't lose more than `interval_secs` of
+    /// data on hard kill. handler.rs already calls spawn_persist after every
+    /// pipeline run; this is belt-and-suspenders for periods of low traffic.
+    pub fn spawn_periodic_persist(self: Arc<Self>, interval_secs: u64) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // Skip the immediate first tick — startup already loaded from disk.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                if let Err(e) = self.persist_to_file().await {
+                    tracing::warn!(error = %e, "score_history periodic persist failed");
+                }
+            }
+        });
+    }
+}
+
+/// On-disk schema. Versioned so we can evolve later without losing data.
+#[derive(Serialize, Deserialize)]
+struct SerializedScoreHistory {
+    version: u32,
+    max_per_wallet: usize,
+    by_wallet: HashMap<String, Vec<ScoreEntry>>,
 }
 
 /// Summary statistics over a wallet's score history — what a calibration

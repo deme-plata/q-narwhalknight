@@ -17,7 +17,9 @@
 //! that's 320 MB — bounded.
 
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -141,6 +143,160 @@ static GLOBAL_TRACKER: OnceLock<Arc<SeenTracker>> = OnceLock::new();
 
 pub fn global() -> Arc<SeenTracker> {
     GLOBAL_TRACKER.get_or_init(|| Arc::new(SeenTracker::new())).clone()
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v10.10.10: file-based persistence
+//
+// Same pragma as score_history: persist to a JSON file under Q_DB_PATH so
+// the agent's "seen" set survives restarts. Without persistence, every
+// node restart would resurface every previously-shown task to every polling
+// agent — defeating the entire point of the filter.
+//
+// Persist trigger: handler.rs spawns persistence after each pipeline run.
+// Also periodic auto-persist every 60s as belt-and-suspenders.
+// ════════════════════════════════════════════════════════════════════════════
+
+impl SeenTracker {
+    /// Resolve the persistence file path: `$Q_DB_PATH/agent_panel_seen_tracker.json`.
+    pub fn persist_path() -> PathBuf {
+        let base = std::env::var("Q_DB_PATH")
+            .unwrap_or_else(|_| "./data-mainnet-genesis".to_string());
+        PathBuf::from(base).join("agent_panel_seen_tracker.json")
+    }
+
+    /// Snapshot internal state to a serialisable form.
+    fn export_all(&self) -> SerializedSeenTracker {
+        let map = self.by_wallet.read();
+        let mut by_wallet = HashMap::with_capacity(map.len());
+        for (wallet, set) in map.iter() {
+            // Preserve insertion order via `order` so the LRU semantics
+            // survive restart (oldest task_ids will be evicted first
+            // after restart, matching pre-restart behaviour).
+            by_wallet.insert(
+                wallet.clone(),
+                set.order.iter().cloned().collect::<Vec<_>>(),
+            );
+        }
+        SerializedSeenTracker {
+            version: 1,
+            max_per_wallet: self.max_per_wallet,
+            by_wallet,
+        }
+    }
+
+    /// Persist to JSON file via atomic rename. Async.
+    pub async fn persist_to_file(&self) -> Result<usize, String> {
+        let payload = self.export_all();
+        let n = payload.by_wallet.values().map(|v| v.len()).sum();
+        let path = Self::persist_path();
+        let tmp = path.with_extension("json.tmp");
+
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|e| format!("encode: {}", e))?;
+
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("create_dir_all: {}", e))?;
+            }
+        }
+        tokio::fs::write(&tmp, &bytes)
+            .await
+            .map_err(|e| format!("write tmp: {}", e))?;
+        tokio::fs::rename(&tmp, &path)
+            .await
+            .map_err(|e| format!("rename: {}", e))?;
+        tracing::debug!(
+            entries = n,
+            wallets = payload.by_wallet.len(),
+            path = %path.display(),
+            "seen_tracker persisted",
+        );
+        Ok(n)
+    }
+
+    /// Spawn a fire-and-forget persist. Used by the panel handler.
+    pub fn spawn_persist(self: Arc<Self>) {
+        tokio::spawn(async move {
+            if let Err(e) = self.persist_to_file().await {
+                tracing::warn!(error = %e, "seen_tracker persist_to_file failed");
+            }
+        });
+    }
+
+    /// Load from disk on startup. Returns total entries loaded.
+    pub async fn load_from_file(&self) -> usize {
+        let path = Self::persist_path();
+        if !path.exists() {
+            tracing::debug!(
+                path = %path.display(),
+                "seen_tracker persist file not found (first boot)",
+            );
+            return 0;
+        }
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "seen_tracker file read failed");
+                return 0;
+            }
+        };
+        let payload: SerializedSeenTracker = match serde_json::from_slice(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "seen_tracker file parse failed (schema mismatch?)");
+                return 0;
+            }
+        };
+        if payload.version != 1 {
+            tracing::warn!(
+                version = payload.version,
+                "seen_tracker file version unknown — refusing to load",
+            );
+            return 0;
+        }
+        let mut total = 0usize;
+        let mut map = self.by_wallet.write();
+        for (wallet, task_ids) in payload.by_wallet {
+            let mut set = WalletSeenSet::new();
+            for tid in &task_ids {
+                set.insert(tid.clone(), self.max_per_wallet);
+            }
+            total += set.set.len();
+            map.insert(wallet, set);
+        }
+        tracing::info!(
+            total,
+            wallets = map.len(),
+            path = %path.display(),
+            "seen_tracker loaded from disk",
+        );
+        total
+    }
+
+    /// Spawn a periodic background persist (every `interval_secs`).
+    pub fn spawn_periodic_persist(self: Arc<Self>, interval_secs: u64) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            tick.tick().await; // skip first tick
+            loop {
+                tick.tick().await;
+                if let Err(e) = self.persist_to_file().await {
+                    tracing::warn!(error = %e, "seen_tracker periodic persist failed");
+                }
+            }
+        });
+    }
+}
+
+/// On-disk schema. Versioned for forward-compat.
+#[derive(Serialize, Deserialize)]
+struct SerializedSeenTracker {
+    version: u32,
+    max_per_wallet: usize,
+    by_wallet: HashMap<String, Vec<String>>,
 }
 
 #[cfg(test)]

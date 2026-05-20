@@ -9243,6 +9243,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     let app_state = Arc::new(state);
 
+    // v10.10.10: load agent-panel in-memory rings from disk + spawn periodic
+    // auto-persist tasks. Files live at
+    //   $Q_DB_PATH/agent_panel_score_history.json
+    //   $Q_DB_PATH/agent_panel_seen_tracker.json
+    // Without persistence: every restart wipes the score-history endpoint's
+    // data + resurfaces every previously-shown task to polling agents.
+    {
+        let score_history = q_api_server::agent_panel::score_history::global();
+        let seen_tracker = q_api_server::agent_panel::seen_tracker::global();
+
+        let sh_loaded = score_history.load_from_file().await;
+        let st_loaded = seen_tracker.load_from_file().await;
+        info!(
+            "📊 [AGENT-PANEL] persistence loaded: score_history={} entries, seen_tracker={} entries",
+            sh_loaded, st_loaded,
+        );
+
+        // 60s periodic persist as belt-and-suspenders. The panel handler
+        // already persists after every pipeline run, but periods of low
+        // traffic could leave new data unflushed.
+        score_history.spawn_periodic_persist(60);
+        seen_tracker.spawn_periodic_persist(60);
+    }
+
     // v7.3.5: Bootstrap bounty campaign OAuth2 client (persisted to RocksDB on first boot)
     // Third-party clients use POST /api/v1/oauth2/register — no rebuild needed
     {

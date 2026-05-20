@@ -206,6 +206,14 @@ pub async fn get_agent_panel(
         for c in &scored {
             tracker.mark_seen(&viewer_wallet, &c.task_id);
         }
+
+        // v10.10.10 persistence: fire-and-forget — spawn background tasks
+        // that flush the in-memory rings to disk. Not awaited because the
+        // request-response path shouldn't block on I/O. The persist files
+        // overwrite atomically via rename so a crash mid-write doesn't
+        // corrupt anything.
+        history.clone().spawn_persist();
+        tracker.clone().spawn_persist();
     }
     let total_after_select = scored.len();
     // (The pipeline's TopK selector already capped to 50; we cap further
