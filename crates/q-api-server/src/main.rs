@@ -25106,6 +25106,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/qshare/premium", get(q_api_server::qshare_api::get_premium))
         .route("/api/v1/qshare/try_mint_signed", post(q_api_server::qshare_api::try_mint_signed))
         .route("/api/v1/qshare/try_buyback_signed", post(q_api_server::qshare_api::try_buyback_signed))
+        .route("/api/v1/qshare/bootstrap_pool", post(q_api_server::qshare_api::bootstrap_pool))
         // v2.3.34-beta: Token Details Modal API endpoints
         .route("/api/v1/oracle/price-history/:token_id", get(handlers::get_token_price_history))
         .route("/api/v1/transactions/token/:token_id", get(handlers::get_token_transactions))

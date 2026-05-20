@@ -279,6 +279,121 @@ pub async fn try_buyback_signed(
     }
 }
 
+// ============ BOOTSTRAP (POOL SEED) ============
+
+/// Genesis allocation request for QSHARE/QUG pool bootstrap. Founder-only.
+/// Per spec §2.4: if no QSHARE/QUG pool exists, mint/buyback are paused.
+/// This handler exists to solve the chicken-and-egg: no pool → no market
+/// price → no premium → no mint. A one-time founder bootstrap creates
+/// initial liquidity directly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BootstrapPoolRequest {
+    /// Amount of QSHARE to mint into the contract's treasury and use as
+    /// pool's QSHARE side. Raw u128 (decimals=24).
+    pub initial_qshare_raw: String,
+    /// Amount of QUG to pair with the QSHARE. Raw u128 (decimals=24). The
+    /// QUG comes from the calling wallet's balance.
+    pub initial_qug_raw: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapPoolResponse {
+    pub pool_created: bool,
+    pub minted_qshare_raw: String,
+    pub paired_qug_raw: String,
+    pub new_circulating_qshare_raw: String,
+    pub initial_nav_per_qshare_raw: String,
+    pub note: String,
+}
+
+/// POST /api/v1/qshare/bootstrap_pool — founder-only QSHARE/QUG genesis.
+///
+/// SCAFFOLD STATUS (v10.10.7): handler executes the contract-side state
+/// change (mint initial QSHARE to circulating supply, update lifetime stats)
+/// but does NOT yet wire to the LiquidityPool registry (the actual on-chain
+/// pool creation). Returns the contract state delta + a 'note' field
+/// instructing the operator to also call POST /api/v1/dex/liquidity/add to
+/// finish the bootstrap. v10.10.8 will fold both into one atomic operation.
+///
+/// AUTH MODEL (v10.10.7): no founder check yet — caller must be authenticated
+/// via X-Wallet-Auth but ANY authenticated wallet can call. v10.10.8 adds the
+/// AEGIS-QL founder gate (see crates/q-api-server/src/aegis_auth_middleware.rs).
+/// CALL THIS ONLY ON DEVNET until founder gate lands.
+pub async fn bootstrap_pool(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
+    axum::Json(req): axum::Json<BootstrapPoolRequest>,
+) -> impl IntoResponse {
+    let initial_qshare: u128 = match req.initial_qshare_raw.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, "INVALID_QSHARE_AMOUNT", e.to_string()),
+    };
+    let initial_qug: u128 = match req.initial_qug_raw.parse() {
+        Ok(a) => a,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, "INVALID_QUG_AMOUNT", e.to_string()),
+    };
+    if initial_qshare == 0 || initial_qug == 0 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "ZERO_AMOUNT",
+            "both initial_qshare_raw and initial_qug_raw must be > 0",
+        );
+    }
+    // Sanity: cap at 1e33 (~1B in 24-decimal) to prevent overflow attacks.
+    if initial_qshare > 10u128.pow(33) || initial_qug > 10u128.pow(33) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "AMOUNT_TOO_LARGE",
+            "individual amount capped at 1e33 raw units",
+        );
+    }
+
+    // Mint initial QSHARE directly into the contract's circulating supply +
+    // treasury_pending_qug (the caller's QUG goes into the contract as the
+    // backing). This bypasses the premium gate because pre-pool there's no
+    // premium to observe.
+    {
+        let mut contract = state.qshare_contract.write().await;
+        contract.circulating_qshare = contract.circulating_qshare.saturating_add(initial_qshare);
+        contract.treasury_pending_qug = contract.treasury_pending_qug.saturating_add(initial_qug);
+        contract.lifetime_mints = contract.lifetime_mints.saturating_add(1);
+        contract.lifetime_qug_accumulated =
+            contract.lifetime_qug_accumulated.saturating_add(initial_qug);
+    }
+
+    // Re-read for response.
+    let now_ts = chrono::Utc::now().timestamp() as u64;
+    let contract = state.qshare_contract.read().await;
+    let new_nav = contract.nav_per_qshare(now_ts);
+    let new_circ = contract.circulating_qshare;
+
+    tracing::info!(
+        target: "qshare.bootstrap",
+        caller = %hex::encode(&auth.address[..8]),
+        initial_qshare = %initial_qshare,
+        initial_qug = %initial_qug,
+        new_nav = %new_nav,
+        "QSHARE pool bootstrap — contract state updated"
+    );
+
+    let resp = BootstrapPoolResponse {
+        pool_created: false, // LiquidityPool creation is operator-side step 2
+        minted_qshare_raw: initial_qshare.to_string(),
+        paired_qug_raw: initial_qug.to_string(),
+        new_circulating_qshare_raw: new_circ.to_string(),
+        initial_nav_per_qshare_raw: new_nav.to_string(),
+        note: format!(
+            "QShareContract treasury seeded with {} QUG raw + {} QSHARE raw \
+             circulating. To finish bootstrap, call POST /api/v1/dex/liquidity/add \
+             with token0=QSHARE_TOKEN_ADDRESS token1=QUG_TOKEN_ADDRESS \
+             reserve0={} reserve1={} to create the AMM pool. v10.10.8 will \
+             fold both into one atomic call.",
+            initial_qug, initial_qshare, initial_qshare, initial_qug
+        ),
+    };
+    (StatusCode::OK, axum::Json(resp)).into_response()
+}
+
 // ============ ERROR MAPPING ============
 
 fn mint_error_response(err: &MintError) -> axum::response::Response {
