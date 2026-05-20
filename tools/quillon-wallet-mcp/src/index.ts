@@ -1842,9 +1842,13 @@ server.tool(
     try {
       const { seed: s, source } = loadSeed({ seedArg: seed });
       const { address } = deriveKeys(s);
-      // Pull status (no auth) + balance (signed) in parallel
-      const [status, balance] = await Promise.all([
+      // Pull status + engine pulse + balance in parallel.
+      // engine_pulse.sync.current_height is the LIVE tip; status.upgrades.current_height
+      // is the upgrade-evaluation height which lags by minutes-to-hours and was misleading
+      // in early v2.0.0 (showed h=18,131,330 while real tip was h=18,224,847).
+      const [status, pulse, balance] = await Promise.all([
         api("/status").catch(() => null) as Promise<any>,
+        api("/engine/pulse").catch(() => null) as Promise<any>,
         apiSigned(`/wallets/${address}/balance`, "GET", undefined, { seed }).catch(() => null) as Promise<any>,
       ]);
       const lines: string[] = [
@@ -1855,12 +1859,15 @@ server.tool(
       if (status?.data) {
         lines.push(`server status: ${status.data.status ?? "?"}`);
         lines.push(`network_id:    ${status.data.network_id ?? "?"}`);
-        const upgrades = status.data.upgrades;
-        if (upgrades?.current_height !== undefined) {
-          lines.push(`tip height:    ${upgrades.current_height}`);
-        }
       } else {
         lines.push(`server status: UNREACHABLE`);
+      }
+      if (pulse?.data?.sync?.current_height !== undefined) {
+        lines.push(`tip height:    ${pulse.data.sync.current_height}`);
+        if (pulse.data.version) lines.push(`server version: ${pulse.data.version}`);
+      } else if (status?.data?.upgrades?.current_height !== undefined) {
+        // Fallback if engine/pulse unavailable; this number is older.
+        lines.push(`tip height:    ${status.data.upgrades.current_height} (upgrade-eval, may be stale)`);
       }
       if (balance?.data) {
         lines.push(`balance:       ${balance.data.balance_qnk ?? balance.data.balance_qug ?? "?"} QUG`);
