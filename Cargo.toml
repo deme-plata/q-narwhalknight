@@ -82,7 +82,7 @@ members = [
 ]
 
 [workspace.package]
-version = "10.9.57"  # v10.9.57: peer-ID refresh (Beta/Gamma/Delta live IDs from 2026-05-19 discovery)
+version = "10.9.58"  # v10.9.58: security cherry-picks — PR #66 (save_wallet_balance max-wins, CLAUDE.md Rule 1), #67 (AEGIS local-admin fail-closed), #68 (ProductionMempool real validation)
 edition = "2021"
 description = "Quantum-Enhanced DAG-BFT Consensus System with Distributed AI"
 homepage = "https://quillon.xyz"
