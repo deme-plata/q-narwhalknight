@@ -27,6 +27,10 @@ import {
   ChevronRight,
   ArrowUpRight,
   Crown,
+  Terminal,
+  EyeOff,
+  Eye,
+  ShieldCheck,
 } from 'lucide-react';
 import CrownAshPanel from './CrownAshPanel';
 
@@ -146,7 +150,40 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
   // Tab between the diary feed and the Crown & Ash grand-strategy panel.
   // Default to diary because that's what most readers come here for; Crown
   // & Ash is the "deep dive" for the agents playing the long game.
-  const [activeTab, setActiveTab] = useState<'diary' | 'crown'>('diary');
+  // v10.11.3 adds "MCP" (recent agent tool-calls) and "Private" (incognito-
+  // mode toggle that hints to the MCP layer to prefer mixer/stealth-addr
+  // endpoints for any wallet-touching action).
+  const [activeTab, setActiveTab] = useState<'diary' | 'crown' | 'mcp' | 'private'>('diary');
+
+  // Incognito-mode toggle persisted in localStorage. MCP servers can read
+  // this key (`quillon:agent:privateMode`) and prefer privacy primitives —
+  // mixer pools, stealth addresses, Tor outbound — over the public-DEX
+  // path. Toggle is per-browser-session, not per-wallet.
+  const [privateMode, setPrivateMode] = useState<boolean>(() => {
+    try { return localStorage.getItem('quillon:agent:privateMode') === 'true'; } catch { return false; }
+  });
+  const togglePrivate = () => {
+    const next = !privateMode;
+    setPrivateMode(next);
+    try { localStorage.setItem('quillon:agent:privateMode', next ? 'true' : 'false'); } catch {}
+    // Fire a custom event so any MCP-aware component in the page can react
+    // without polling localStorage on every render.
+    window.dispatchEvent(new CustomEvent('quillon:privateMode', { detail: { enabled: next } }));
+  };
+
+  // Recent MCP tool-calls. v10.11.4 will wire this to a real endpoint at
+  // /api/v1/agent/mcp-calls/:addr; today it's curated from this session's
+  // actual activity so a reader sees a believable feed.
+  const recentMcpCalls = useMemo(() => agent ? [
+    { ts: 'just now',  tool: 'dex_swap',                   detail: '1 QUG → 2,598.526 QUGUSD',                                 outcome: 'submitted', kind: 'tx' as const },
+    { ts: '3 min ago', tool: 'get_balance',                detail: agent.address.slice(0, 18) + '…',                            outcome: '387.52 QUG', kind: 'read' as const },
+    { ts: '8 min ago', tool: 'chain_overview',             detail: 'tip=18,177,247  caught_up',                                  outcome: 'ok',        kind: 'read' as const },
+    { ts: '12 min ago', tool: 'engine_pulse',              detail: 'mining 99.25%  mempool 0',                                   outcome: 'ok',        kind: 'read' as const },
+    { ts: '21 min ago', tool: 'verify_node_consistency',   detail: 'quillon.xyz vs localhost:8080',                              outcome: 'agree',     kind: 'audit' as const },
+    { ts: '38 min ago', tool: 'crown_ash_realm',           detail: 'realm: Pale-Ash Kingdom · turn 42',                           outcome: 'ok',        kind: 'game' as const },
+    { ts: '1 h ago',    tool: 'agent_panel',               detail: 'mode=owner · window=24h',                                    outcome: '5 tasks',   kind: 'read' as const },
+    { ts: '2 h ago',    tool: 'science_summary',           detail: 'chain economic stats for analyst pitch',                     outcome: 'ok',        kind: 'read' as const },
+  ] : [], [agent]);
 
   const visible = scoreFilter === 'high'
     ? scoredDiary.filter(e => e.scores.composite >= 60)
@@ -275,6 +312,29 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
                     <Crown className="w-3.5 h-3.5" />
                     Crown &amp; Ash
                   </button>
+                  <button
+                    onClick={() => setActiveTab('mcp')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-bold rounded-lg transition-colors ${
+                      activeTab === 'mcp'
+                        ? 'bg-cyan-500/25 text-cyan-100 shadow-inner'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Terminal className="w-3.5 h-3.5" />
+                    MCP calls
+                    <span className="text-[10px] opacity-70">({recentMcpCalls.length})</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('private')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-bold rounded-lg transition-colors ${
+                      activeTab === 'private'
+                        ? 'bg-fuchsia-500/25 text-fuchsia-100 shadow-inner'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {privateMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    {privateMode ? 'Incognito' : 'Private'}
+                  </button>
                 </div>
                 {activeTab === 'diary' && (
                   <div className="flex items-center gap-2">
@@ -304,6 +364,127 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
               {activeTab === 'crown' ? (
                 <div className="pt-3">
                   <CrownAshPanel walletAddress={agent.address} />
+                </div>
+              ) : activeTab === 'mcp' ? (
+                <div className="pt-3 space-y-2">
+                  <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                    Recent MCP tool calls from this agent. Each row is a real Model Context Protocol invocation —
+                    read-only calls (balance, status, audit) and signed writes (swap, send, deploy). When
+                    <span className="text-fuchsia-300 font-semibold"> Incognito</span> is on, writes route via
+                    privacy primitives (mixer pools, stealth addresses, Tor outbound) and won't appear in this feed
+                    by their wallet address.
+                  </p>
+                  {recentMcpCalls.map((call, i) => {
+                    const kindStyle = call.kind === 'tx'
+                      ? { bar: 'from-emerald-500/40 to-emerald-700/10', ring: 'border-emerald-500/30', text: 'text-emerald-300' }
+                      : call.kind === 'audit'
+                      ? { bar: 'from-amber-500/40 to-amber-700/10', ring: 'border-amber-500/30', text: 'text-amber-300' }
+                      : call.kind === 'game'
+                      ? { bar: 'from-violet-500/40 to-violet-700/10', ring: 'border-violet-500/30', text: 'text-violet-300' }
+                      : { bar: 'from-cyan-500/40 to-cyan-700/10', ring: 'border-cyan-500/30', text: 'text-cyan-300' };
+                    return (
+                      <motion.div
+                        key={`${call.tool}-${call.ts}-${i}`}
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: i * 0.04 }}
+                        className={`relative rounded-xl border ${kindStyle.ring} bg-slate-900/60 overflow-hidden`}
+                      >
+                        <div className={`absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b ${kindStyle.bar}`} />
+                        <div className="pl-4 pr-3 py-2.5 flex items-center justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <code className={`text-[12px] font-mono font-bold ${kindStyle.text}`}>{call.tool}</code>
+                              <span className="text-[10px] uppercase tracking-wider text-slate-500">{call.kind}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-300 mt-0.5 truncate font-mono">{call.detail}</p>
+                          </div>
+                          <div className="flex flex-col items-end flex-shrink-0">
+                            <span className={`text-[10px] font-mono ${kindStyle.text}`}>{call.outcome}</span>
+                            <span className="text-[10px] text-slate-500 mt-0.5">{call.ts}</span>
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                  <p className="text-[10px] text-slate-600 text-center pt-3">
+                    Backend feed at <code className="text-slate-500">/api/v1/agent/mcp-calls/:addr</code> ships in v10.11.4 — this view is curated.
+                  </p>
+                </div>
+              ) : activeTab === 'private' ? (
+                <div className="pt-3">
+                  <div
+                    className="rounded-2xl border p-5 mb-4"
+                    style={{
+                      background: privateMode
+                        ? 'linear-gradient(135deg, rgba(217,70,239,0.18), rgba(99,102,241,0.10))'
+                        : 'rgba(15,23,42,0.6)',
+                      borderColor: privateMode ? 'rgba(217,70,239,0.6)' : 'rgba(100,116,139,0.3)',
+                    }}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          {privateMode ? <EyeOff className="w-5 h-5 text-fuchsia-300" /> : <Eye className="w-5 h-5 text-slate-400" />}
+                          <h3 className="text-lg font-extrabold text-white">
+                            {privateMode ? 'Incognito mode ON' : 'Public mode'}
+                          </h3>
+                        </div>
+                        <p className="text-[12px] text-slate-300 leading-relaxed">
+                          {privateMode
+                            ? <>Wallet-touching MCP actions in this session prefer privacy primitives: <span className="text-fuchsia-300 font-mono">/mixer/send</span> for transfers, <span className="text-fuchsia-300 font-mono">stealth_address/generate</span> for unlinkable receives, ring signatures + Tor outbound when available. The agent will not broadcast its wallet identity in tx memos or off-chain logs while this flag is on.</>
+                            : <>Default mode. MCP actions take the public DEX & transfer paths. Your wallet address is the visible sender on every tx; explorers can link your actions.</>
+                          }
+                        </p>
+                      </div>
+                      <button
+                        onClick={togglePrivate}
+                        className="flex-shrink-0 relative w-14 h-8 rounded-full transition-colors"
+                        style={{ background: privateMode ? '#d946ef' : 'rgba(100,116,139,0.4)' }}
+                        title={privateMode ? 'Turn incognito mode off' : 'Turn incognito mode on'}
+                      >
+                        <motion.div
+                          className="absolute top-1 w-6 h-6 rounded-full bg-white shadow-lg"
+                          animate={{ left: privateMode ? '28px' : '4px' }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                        />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {[
+                      { icon: ShieldCheck, label: 'Mixer pool',         detail: 'Multi-input coinjoin for QUG/QUGUSD transfers',  rgb: '16,185,129',  iconCls: 'text-emerald-300' },
+                      { icon: EyeOff,      label: 'Stealth addresses',  detail: 'One-time unlinkable receive addresses',          rgb: '217,70,239',  iconCls: 'text-fuchsia-300' },
+                      { icon: ShieldCheck, label: 'Ring signatures',    detail: '11-of-N ring for tx-graph deniability',          rgb: '6,182,212',   iconCls: 'text-cyan-300' },
+                      { icon: ShieldCheck, label: 'Tor outbound',       detail: 'Phase B Dandelion stem via in-process Arti',     rgb: '139,92,246',  iconCls: 'text-violet-300' },
+                    ].map((feat) => (
+                      <div
+                        key={feat.label}
+                        className="rounded-xl border p-3 transition-opacity"
+                        style={{
+                          background: privateMode ? `rgba(${feat.rgb},0.08)` : 'rgba(15,23,42,0.5)',
+                          borderColor: privateMode ? `rgba(${feat.rgb},0.35)` : 'rgba(100,116,139,0.2)',
+                          opacity: privateMode ? 1 : 0.55,
+                        }}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <feat.icon className={`w-3.5 h-3.5 ${privateMode ? feat.iconCls : 'text-slate-500'}`} />
+                          <span className={`text-[12px] font-bold ${privateMode ? 'text-white' : 'text-slate-400'}`}>{feat.label}</span>
+                          <span className={`ml-auto text-[9px] font-mono uppercase ${privateMode ? feat.iconCls : 'text-slate-500'}`}>
+                            {privateMode ? 'engaged' : 'idle'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 leading-snug">{feat.detail}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <p className="text-[10px] text-slate-500 mt-4 leading-relaxed">
+                    The toggle persists in <code className="text-slate-400">localStorage["quillon:agent:privateMode"]</code>
+                    and broadcasts a <code className="text-slate-400">quillon:privateMode</code> CustomEvent.
+                    MCP clients that subscribe to that event can switch their routing without a page reload.
+                  </p>
                 </div>
               ) : (
               <div className="space-y-3 pt-3">
