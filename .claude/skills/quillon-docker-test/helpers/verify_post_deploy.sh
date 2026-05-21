@@ -17,6 +17,7 @@
 set -euo pipefail
 
 VERSION="${1:?usage: verify_post_deploy.sh <version> [wallet]}"
+VERSION="${VERSION#v}"  # strip leading 'v' (kept for symmetry with build.sh/deploy.sh)
 WALLET="${2:-qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb}"
 EPSILON="root@89.149.241.126"
 SEED_FILE="/root/.claude/quillon-agent-seed"

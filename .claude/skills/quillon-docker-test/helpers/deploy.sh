@@ -16,9 +16,27 @@
 set -euo pipefail
 
 VERSION="${1:?usage: deploy.sh <version>}"
+VERSION="${VERSION#v}"  # strip leading 'v' (else container becomes q-sync-test-vv...)
 EPSILON="root@89.149.241.126"
 DELTA="root@5.79.79.158"
 BINARY="/home/orobit/target-debian12/release/q-api-server"
+
+# Port-collision pre-check: a stale container from a previous run can hold 8085/8086.
+# docker run will fail with "port already allocated"; surface it early with context.
+EPSILON_PORT_HOLDER=$(ssh -o ConnectTimeout=5 "$EPSILON" \
+  "docker ps --filter 'publish=8085' --format '{{.Names}}'" 2>/dev/null | head -1)
+if [ -n "$EPSILON_PORT_HOLDER" ] && [ "$EPSILON_PORT_HOLDER" != "q-sync-test-v${VERSION}-epsilon" ]; then
+  echo "[deploy.sh] ABORT: port 8085 on Epsilon held by $EPSILON_PORT_HOLDER" >&2
+  echo "[deploy.sh] Remove it first: ssh $EPSILON 'docker rm -f $EPSILON_PORT_HOLDER'" >&2
+  exit 3
+fi
+DELTA_PORT_HOLDER=$(ssh -o ConnectTimeout=5 "$DELTA" \
+  "docker ps --filter 'publish=8086' --format '{{.Names}}'" 2>/dev/null | head -1)
+if [ -n "$DELTA_PORT_HOLDER" ] && [ "$DELTA_PORT_HOLDER" != "q-sync-test-v${VERSION}-delta" ]; then
+  echo "[deploy.sh] ABORT: port 8086 on Delta held by $DELTA_PORT_HOLDER" >&2
+  echo "[deploy.sh] Remove it first: ssh $DELTA 'docker rm -f $DELTA_PORT_HOLDER'" >&2
+  exit 3
+fi
 
 # --- Epsilon ---
 echo "[deploy.sh] deploying to Epsilon container q-sync-test-v${VERSION}-epsilon"
@@ -46,7 +64,7 @@ ssh "$EPSILON" "
       cp /opt/q-api-server /usr/local/bin/q-api-server && \
       chmod +x /usr/local/bin/q-api-server && \
       echo \"\$(date +%s)\" > /data/sync_start_epoch.txt && \
-      exec /usr/local/bin/q-api-server --port 8080 2>&1
+      exec /usr/local/bin/q-api-server --port 8080 --admin-wallet qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb 2>&1
     '
   echo '[deploy.sh][epsilon] container started'
 "
@@ -85,7 +103,7 @@ ssh "$DELTA" "
       cp /opt/q-api-server /usr/local/bin/q-api-server && \
       chmod +x /usr/local/bin/q-api-server && \
       echo \"\$(date +%s)\" > /data/sync_start_epoch.txt && \
-      exec /usr/local/bin/q-api-server --port 8080 2>&1
+      exec /usr/local/bin/q-api-server --port 8080 --admin-wallet qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb 2>&1
     '
   echo '[deploy.sh][delta] container started'
 "

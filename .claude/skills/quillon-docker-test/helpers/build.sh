@@ -12,10 +12,21 @@
 set -euo pipefail
 
 VERSION="${1:-latest}"
+VERSION="${VERSION#v}"  # strip leading 'v' (else log becomes build-vv10.11.x.log)
 EPSILON="root@89.149.241.126"
 SRC="/home/orobit/q-narwhalknight-src"
 LOG="/home/orobit/tmp/build-v${VERSION}.log"
 CACHE="/home/orobit/target-debian12"
+
+# Concurrent-build guard: building twice against the same target dir races on cargo
+# git-submodule locks (cutlass, candle) and the second build sits stuck for 30+ min.
+EXISTING_BUILD=$(ssh -o ConnectTimeout=5 "$EPSILON" "docker ps --filter 'name=qnk-build-' --format '{{.Names}}'" 2>/dev/null | head -1)
+if [ -n "$EXISTING_BUILD" ]; then
+  echo "[build.sh] ABORT: another build container is running: $EXISTING_BUILD" >&2
+  echo "[build.sh] Either wait for it (ssh $EPSILON 'docker logs -f $EXISTING_BUILD')" >&2
+  echo "[build.sh] or kill it (ssh $EPSILON 'docker kill $EXISTING_BUILD')." >&2
+  exit 3
+fi
 
 echo "[build.sh] target version: v${VERSION}"
 echo "[build.sh] log: ${LOG}"
