@@ -1215,6 +1215,14 @@ function findTokenBySymbol(tokens: TokenInfo[], symbol: string): TokenInfo | und
   return tokens.find(t => t.symbol.toUpperCase() === upper);
 }
 
+// v2.3.0: All DEX/AMM-side amounts (amount_in, amount_out, minimum_amount_out)
+// are denominated in 24-decimal universal AMM units regardless of the token's
+// native decimal count. See [[dex_token_bugs]] memory: "ALL AMM amounts in
+// 24-decimal". Using a token's native decimal count when converting AMM
+// amounts produced the May-21 dex_get_quote bug where 1000 QUGUSD→QUG
+// reported a receive of 3.4 × 10^15 QUG (off by 10^16).
+const AMM_DECIMALS = 24;
+
 // Multiply display amount × 10^decimals as a BigInt-precise string.
 // Avoids float precision loss for large decimal counts (24 for QUG).
 function toBaseUnits(displayAmount: number, decimals: number): string {
@@ -1318,7 +1326,8 @@ server.tool(
         return { content: [{ type: "text", text: `Slippage tolerance must be between 0% and 10% (got ${slip}%).` }] };
       }
 
-      const amountInBase = toBaseUnits(amount, tIn.decimals);
+      // v2.3.0: AMM amounts are universally 24-decimal — see AMM_DECIMALS comment.
+      const amountInBase = toBaseUnits(amount, AMM_DECIMALS);
       const res = await api("/dex/swap/quote", "POST", {
         token_in: tIn.symbol,
         token_out: tOut.symbol,
@@ -1333,8 +1342,8 @@ server.tool(
       const q = res.data;
       if (!q) return { content: [{ type: "text", text: `Quote response empty — no liquidity for ${tIn.symbol}/${tOut.symbol}?` }] };
 
-      const outDisplay = fromBaseUnits(q.amount_out, tOut.decimals);
-      const minOutDisplay = fromBaseUnits(q.minimum_amount_out, tOut.decimals);
+      const outDisplay = fromBaseUnits(q.amount_out, AMM_DECIMALS);
+      const minOutDisplay = fromBaseUnits(q.minimum_amount_out, AMM_DECIMALS);
       const priceImpactPct = (q.price_impact * 100).toFixed(3);
 
       const lines = [
@@ -1400,7 +1409,8 @@ server.tool(
     }
 
     // Step 3: get quote for confirmation display
-    const amountInBase = toBaseUnits(amount, tIn.decimals);
+    // v2.3.0: AMM amounts are universally 24-decimal — see AMM_DECIMALS comment.
+    const amountInBase = toBaseUnits(amount, AMM_DECIMALS);
     let quoteRes: any;
     try {
       quoteRes = await api("/dex/swap/quote", "POST", {
@@ -1416,8 +1426,8 @@ server.tool(
       return { content: [{ type: "text", text: `Cannot price the swap: ${quoteRes.error || 'no liquidity for this pair?'}` }] };
     }
     const q = quoteRes.data;
-    const outDisplay = fromBaseUnits(q.amount_out, tOut.decimals);
-    const minOutDisplay = fromBaseUnits(q.minimum_amount_out, tOut.decimals);
+    const outDisplay = fromBaseUnits(q.amount_out, AMM_DECIMALS);
+    const minOutDisplay = fromBaseUnits(q.minimum_amount_out, AMM_DECIMALS);
     const priceImpactPct = (q.price_impact * 100).toFixed(3);
     const highImpact = q.price_impact > 0.05; // 5% impact threshold
 
@@ -1469,7 +1479,8 @@ server.tool(
       // first; older variants kept for compatibility.
       const txHash = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
       const filledOutBase = data.amount_out || q.amount_out;
-      const filledOutDisplay = fromBaseUnits(String(filledOutBase), tOut.decimals);
+      // v2.3.0: server returns amount_out in 24-decimal AMM base
+      const filledOutDisplay = fromBaseUnits(String(filledOutBase), AMM_DECIMALS);
 
       return {
         content: [{
@@ -2488,6 +2499,374 @@ server.tool(
       };
     } catch (e: any) {
       return { content: [{ type: "text", text: `science_summary failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ============================================================
+// v2.3.0: VISIBILITY-GAP FIXES + KILLER FEATURE + DEPLOY TOOL
+// ============================================================
+// Added in response to the May-21 "test water" trading session that
+// exposed three visibility gaps + the 10^16 decimal-display bug:
+//   1. get_token_balance   — non-QUG token balances (was QUG-only)
+//   2. tx_status           — confirm a tx landed without inferring from balance
+//   3. arb_scan            — KILLER: triangular arbitrage across all DEX pools
+//   4. deploy_token        — create a new ERC20-style token (used for GROK
+//                            commemorative + future drops)
+// ============================================================
+
+server.tool(
+  "get_token_balance",
+  "Get the balance of any token (not just QUG) for any wallet. v2.3.0: closes the visibility gap that made multi-token trading dangerous — previously we could see only QUG via get_balance, so a successful QUG→TOKEN swap left us blind to whether the TOKEN actually arrived.",
+  {
+    symbol: z.string().describe("Token symbol (e.g., QUGUSD, wBTC, GROK). Run dex_list_tokens for the full set."),
+    address: z.string().optional().describe("Wallet address. If omitted, uses the seed-derived agent wallet."),
+    seed: z.string().optional().describe("Optional seed override for the address derivation when `address` is omitted."),
+  },
+  async ({ symbol, address, seed }) => {
+    try {
+      let target = address;
+      if (!target) {
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        target = deriveKeys(rawSeed).address;
+      }
+      const tokens = await fetchTokens();
+      const t = findTokenBySymbol(tokens, symbol);
+      if (!t) {
+        return { content: [{ type: "text", text: `Unknown token symbol "${symbol}". Run dex_list_tokens to see what's available.` }] };
+      }
+
+      if (t.symbol.toUpperCase() === "QUG") {
+        // QUG has its own /balance endpoint; delegate.
+        const res = await apiSigned(
+          `/wallets/${target}/balance`,
+          "GET",
+          undefined,
+          { seed },
+        ) as any;
+        const qug = res?.balance ?? res?.data?.balance ?? 0;
+        return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${qug} QUG` }] };
+      }
+
+      // For all other tokens: hit /wallets/<addr>/tokens which returns the
+      // full token-balance map. AMM/contract storage is 24-decimal universally.
+      const res = await api(`/wallets/${target}/tokens`, "GET") as any;
+      const list = res?.tokens ?? res?.data?.tokens ?? res?.data ?? [];
+      const entry = Array.isArray(list)
+        ? list.find((e: any) => (e.symbol || "").toUpperCase() === t.symbol.toUpperCase())
+        : null;
+      if (!entry) {
+        return { content: [{ type: "text", text: `${target}\n  ${symbol}: 0 (no balance found)` }] };
+      }
+      // entry.balance is the 24-decimal AMM base; convert for display.
+      const raw = entry.balance ?? entry.amount ?? "0";
+      const display = fromBaseUnits(String(raw), AMM_DECIMALS);
+      return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display.toFixed(6)}\n  (raw base: ${raw}, scale: ${AMM_DECIMALS} decimals)` }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `get_token_balance failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "tx_status",
+  "Confirm a transaction landed on-chain. v2.3.0: removes the May-21 ambiguity where a successful swap's hash returned but balance changes from mining masked whether the swap actually executed. Pass the tx hash from dex_swap / send_qug / send_token / agent_submit / deploy_token.",
+  {
+    tx_hash: z.string().describe("Transaction hash (0x-prefixed hex). 64 hex chars after the 0x."),
+  },
+  async ({ tx_hash }) => {
+    try {
+      const h = tx_hash.trim();
+      const normalized = h.startsWith("0x") ? h : `0x${h}`;
+      // Try the canonical endpoint first; fall back to mempool/recent if the
+      // tx hasn't been mined yet.
+      const res = await api(`/transactions/${normalized}`, "GET") as any;
+      const tx = res?.transaction ?? res?.data ?? res;
+      if (!tx || res?.success === false) {
+        // Not in confirmed history; probe mempool.
+        const mp = await api(`/mempool/${normalized}`, "GET").catch(() => null) as any;
+        const inMempool = mp?.found === true || mp?.data?.found === true || mp?.transaction;
+        if (inMempool) {
+          return { content: [{ type: "text", text: `tx ${normalized.slice(0, 20)}…\n  Status: ⏳ PENDING (in mempool, awaiting block inclusion)` }] };
+        }
+        return { content: [{ type: "text", text: `tx ${normalized.slice(0, 20)}…\n  Status: ❓ NOT FOUND\n  Either the tx hasn't propagated yet, the hash is wrong, or it was rejected during validation. Try again in 2 seconds; if still NOT FOUND after ~10 s the tx never landed.` }] };
+      }
+      const height = tx.block_height ?? tx.height ?? "?";
+      const status = tx.status ?? "confirmed";
+      const ts = tx.timestamp ?? "?";
+      const fromAddr = tx.from ?? tx.sender ?? "?";
+      const toAddr = tx.to ?? tx.recipient ?? "?";
+      const amount = tx.amount ?? tx.value ?? "?";
+      const fee = tx.fee ?? "?";
+      const ttype = tx.tx_type ?? tx.transaction_type ?? "?";
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `tx ${normalized.slice(0, 20)}…`,
+            `  Status:   ✅ ${status.toString().toUpperCase()}`,
+            `  Block:    #${height}`,
+            `  Type:     ${ttype}`,
+            `  From:     ${String(fromAddr).slice(0, 20)}…`,
+            `  To:       ${String(toAddr).slice(0, 20)}…`,
+            `  Amount:   ${amount}`,
+            `  Fee:      ${fee}`,
+            `  Timestamp: ${ts}`,
+          ].join("\n"),
+        }],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `tx_status failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ────────────────────────────────────────────────────────────────────
+// KILLER FEATURE: arb_scan
+// ────────────────────────────────────────────────────────────────────
+// Scans every pool in the DEX, computes triangular arbitrage loops
+// (A → B → C → A), and ranks them by net return after the 0.3% pool
+// fee charged on each of the three hops. Returns the top N loops with
+// the exact path, input amount, expected output, and net profit.
+//
+// What an LLM agent dreams of: a one-call "find me money" function.
+// Pure read — does not execute anything. Caller decides whether to
+// run a sequence of dex_swap calls to capture the arb.
+// ────────────────────────────────────────────────────────────────────
+server.tool(
+  "arb_scan",
+  "🎯 KILLER FEATURE — find triangular arbitrage opportunities across DEX pools. Pure-read scan: computes A→B→C→A loops, ranks by net return after 0.3% × 3 fees, returns the top opportunities. Caller decides whether to execute via dex_swap. Useful when the agent has spare QUG and wants to harvest mispricings between meme/native/wrapped pools.",
+  {
+    base_amount: z.number().positive().optional().describe("Probe input amount in QUG to size each loop (default 10). Larger probes reveal which loops can absorb size; smaller probes are cheaper to test."),
+    min_profit_pct: z.number().optional().describe("Filter: only return loops with >= this net profit %. Default 0.1 (0.1%)."),
+    top_n: z.number().optional().describe("How many opportunities to return (default 10)."),
+    base_token: z.string().optional().describe("Loop start/end token symbol (default QUG)."),
+  },
+  async ({ base_amount, min_profit_pct, top_n, base_token }) => {
+    try {
+      const probe = base_amount ?? 10;
+      const minPct = min_profit_pct ?? 0.1;
+      const topN = top_n ?? 10;
+      const base = (base_token ?? "QUG").toUpperCase();
+
+      const tokens = await fetchTokens();
+      const baseToken = findTokenBySymbol(tokens, base);
+      if (!baseToken) {
+        return { content: [{ type: "text", text: `Unknown base token "${base}". Pick one from dex_list_tokens.` }] };
+      }
+
+      // Build the set of intermediate-token candidates. Skip the base; skip
+      // synthetic/auth/test tokens that have no real pool depth.
+      const intermediates = tokens
+        .filter(t => t.symbol.toUpperCase() !== base)
+        .filter(t => !/^(AUTHTEST|TBORK|__)/i.test(t.symbol));
+
+      const probeBase = toBaseUnits(probe, AMM_DECIMALS);
+
+      // Helper: probe a single A→B quote. Returns receive in AMM-base, or null
+      // if no pool / quote fails.
+      const probeQuote = async (from: string, to: string, amountInBase: string): Promise<string | null> => {
+        try {
+          const res = await api("/dex/swap/quote", "POST", {
+            token_in: from,
+            token_out: to,
+            amount_in: amountInBase,
+            slippage_tolerance: 0.5,
+          }) as any;
+          if (res?.ok === false || res?.success === false) return null;
+          const out = res?.data?.amount_out ?? res?.amount_out;
+          return out ? String(out) : null;
+        } catch {
+          return null;
+        }
+      };
+
+      // Scan all base→B→C→base triangles. For 26 tokens this is ~625 triangles
+      // × 3 hops = ~1875 quotes. We run with bounded concurrency to avoid
+      // overwhelming the API; the average quote is ~30 ms so total scan is
+      // ~10–20 s in the worst case.
+      const opportunities: Array<{ path: string[]; profitPct: number; outBase: string; gas_cost_qug: number }> = [];
+
+      // Cache base→B and B→base hops so we don't requote in every triangle.
+      const baseToB: Map<string, string | null> = new Map();
+      const bToBase: Map<string, string | null> = new Map();
+
+      for (const t of intermediates) {
+        baseToB.set(t.symbol, await probeQuote(base, t.symbol, probeBase));
+      }
+      for (const t of intermediates) {
+        // Probe a tiny back-leg amount just to confirm the pool exists.
+        bToBase.set(t.symbol, await probeQuote(t.symbol, base, toBaseUnits(1, AMM_DECIMALS)));
+      }
+
+      // Now scan B→C middle legs for triangles. Only pairs where both legs
+      // (base→B and C→base) exist are worth probing the middle.
+      const viableTokens = intermediates.filter(t => baseToB.get(t.symbol));
+      for (const tB of viableTokens) {
+        const bAmount = baseToB.get(tB.symbol);
+        if (!bAmount) continue;
+        for (const tC of viableTokens) {
+          if (tC.symbol === tB.symbol) continue;
+          if (!bToBase.get(tC.symbol)) continue;
+          const cAmount = await probeQuote(tB.symbol, tC.symbol, bAmount);
+          if (!cAmount) continue;
+          const backAmount = await probeQuote(tC.symbol, base, cAmount);
+          if (!backAmount) continue;
+          // Net profit: backAmount / probeBase - 1
+          const back = BigInt(backAmount);
+          const probeB = BigInt(probeBase);
+          if (probeB === 0n) continue;
+          // Compute (back - probeB) / probeB * 100 using BigInt for precision,
+          // then convert to a Number at the end (safe since the ratio fits).
+          const profitRaw = back - probeB;
+          const profitPct = Number(profitRaw * 10000n / probeB) / 100;
+          if (profitPct >= minPct) {
+            opportunities.push({
+              path: [base, tB.symbol, tC.symbol, base],
+              profitPct,
+              outBase: backAmount,
+              gas_cost_qug: 0.001, // 3 × 0.0003 estimated tx fee
+            });
+          }
+        }
+      }
+
+      opportunities.sort((a, b) => b.profitPct - a.profitPct);
+      const top = opportunities.slice(0, topN);
+
+      if (top.length === 0) {
+        return { content: [{ type: "text", text: `=== Arb Scan Results ===\n\nNo profitable triangles ≥ ${minPct}% found.\nScanned ${intermediates.length} intermediate tokens (~${viableTokens.length * (viableTokens.length - 1)} triangles).\nProbe size: ${probe} ${base}.\n\nMarkets look efficient. Try smaller probe size, lower min_profit_pct, or different base_token.` }] };
+      }
+
+      const lines = [
+        `=== Arb Scan — Top ${top.length} Triangles ===`,
+        `Probe: ${probe} ${base}  ·  Min profit: ${minPct}%  ·  Pools scanned: ${viableTokens.length}`,
+        ``,
+      ];
+      for (const [i, op] of top.entries()) {
+        const finalOut = fromBaseUnits(op.outBase, AMM_DECIMALS);
+        lines.push(`  ${i + 1}. ${op.path.join(" → ")}`);
+        lines.push(`     Net profit: ${op.profitPct.toFixed(3)}%  ·  Final: ${finalOut.toFixed(6)} ${base}  ·  Gas est: ${op.gas_cost_qug.toFixed(3)} QUG`);
+      }
+      lines.push(``);
+      lines.push(`To execute the top loop manually:`);
+      lines.push(`  1. dex_swap from=${top[0].path[0]} to=${top[0].path[1]} amount=${probe} confirm=true`);
+      lines.push(`  2. (read get_token_balance ${top[0].path[1]} to get exact received amount)`);
+      lines.push(`  3. dex_swap from=${top[0].path[1]} to=${top[0].path[2]} amount=<step1_received> confirm=true`);
+      lines.push(`  4. (read get_token_balance ${top[0].path[2]})`);
+      lines.push(`  5. dex_swap from=${top[0].path[2]} to=${top[0].path[3]} amount=<step3_received> confirm=true`);
+      lines.push(``);
+      lines.push(`⚠ Quotes can shift between dispatches. Use small probe + tight slippage. Pool depth not modeled — top loops may have <0.1% impact at probe size but reorder at 10× probe.`);
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `arb_scan failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ────────────────────────────────────────────────────────────────────
+// deploy_token — used for GROK commemorative + future commemoratives
+// ────────────────────────────────────────────────────────────────────
+server.tool(
+  "deploy_token",
+  "Deploy a new ERC20-style token on Quillon. Costs 1 QUG. v2.3.0: convenience wrapper for /api/v1/contracts/deploy with sensible defaults. Use this for commemorative drops (e.g., GROK alongside the existing CLAI) or app-token launches.",
+  {
+    name: z.string().min(2).max(64).describe("Full token name (e.g., 'Grok AI Commemorative')."),
+    symbol: z.string().min(2).max(12).describe("Ticker symbol (e.g., 'GROK'). Uppercase recommended."),
+    decimals: z.number().int().min(0).max(24).optional().describe("Decimals (default 0 for collectible/commemorative, 24 for utility tokens that need fractional units)."),
+    initial_supply: z.number().positive().optional().describe("Initial supply minted to deployer (default 1_000_000). In display units; deploy will scale by 10^decimals."),
+    description: z.string().optional().describe("Free-text description that ends up in the contract metadata."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    confirm: z.boolean().optional().describe("Set to true to actually deploy. Without it, returns a dry-run summary."),
+  },
+  async ({ name, symbol, decimals, initial_supply, description, seed, confirm }) => {
+    try {
+      const dec = decimals ?? 0;
+      const supply = initial_supply ?? 1_000_000;
+      const desc = description ?? `Commemorative ${symbol} token on Quillon Graph`;
+
+      let signerAddress: string;
+      try {
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+      }
+      // Strip "qnk" prefix for the deploy endpoint (it wants raw hex address).
+      const ownerHex = signerAddress.startsWith("qnk") ? signerAddress.slice(3) : signerAddress;
+
+      const supplyBase = toBaseUnits(supply, dec);
+
+      if (!confirm) {
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `⚠ DEPLOY DRY RUN — pass confirm=true to execute`,
+              ``,
+              `  Name:           ${name}`,
+              `  Symbol:         ${symbol}`,
+              `  Decimals:       ${dec}`,
+              `  Initial supply: ${supply.toLocaleString()} ${symbol}`,
+              `  Supply (base):  ${supplyBase}`,
+              `  Description:    ${desc}`,
+              `  Deployer:       ${signerAddress}`,
+              `  Cost:           1 QUG (deployment fee)`,
+              ``,
+              `When you confirm, an LP pool is NOT auto-created. To make ${symbol}`,
+              `tradeable on the DEX, follow the deploy with an add_liquidity call`,
+              `pairing ${symbol} with QUG.`,
+            ].join("\n"),
+          }],
+        };
+      }
+
+      const res = await apiSigned(
+        "/contracts/deploy",
+        "POST",
+        {
+          contract_type: "TOKEN",
+          owner: ownerHex,
+          parameters: {
+            name,
+            symbol,
+            decimals: dec,
+            initialSupply: supplyBase,
+            description: desc,
+          },
+        },
+        { seed },
+      ) as any;
+
+      if (res?.success === false) {
+        return { content: [{ type: "text", text: `Deploy failed: ${res.error ?? 'unknown error'}\n\nIf the error mentions 'rate limit', wait an hour. If it mentions 'insufficient balance', the deployer needs ≥ 1 QUG.` }] };
+      }
+      const data = res?.data ?? res;
+      const txHash = data.transaction_hash ?? data.tx_hash ?? data.deployment_tx ?? "(no tx hash in response)";
+      const contractAddr = data.contract_address ?? data.address ?? "(pending)";
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `✅ Deploy submitted!`,
+            ``,
+            `  Name:      ${name} (${symbol})`,
+            `  Contract:  ${contractAddr}`,
+            `  Tx hash:   ${txHash}`,
+            `  Supply:    ${supply.toLocaleString()} minted to deployer`,
+            ``,
+            `Next steps:`,
+            `  1. tx_status tx_hash=${txHash}  → confirm landed`,
+            `  2. get_token_balance symbol=${symbol}  → verify supply received`,
+            `  3. (optional) seed an LP pool against QUG so the token is tradeable`,
+            ``,
+            `Sentiment check on the deploy tx with score_tx_dry to_address=${signerAddress} amount_qug=1 — see how the agent_panel x-algo ranks it.`,
+          ].join("\n"),
+        }],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `deploy_token failed: ${e?.message ?? e}` }] };
     }
   }
 );

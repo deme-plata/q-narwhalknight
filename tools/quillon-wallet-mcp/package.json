@@ -1,7 +1,7 @@
 {
   "name": "quillon-wallet-mcp",
-  "version": "2.2.0",
-  "description": "Quillon Wallet, Mining, DEX, Agent-Panel & QSHARE MCP server — every signed tool just works against production via the X-Wallet-Auth seed-derived signing path (file-first then env). Talk to Claude Code about wallets, mining, swaps, agent activity, QSHARE-1 treasury.",
+  "version": "2.3.0",
+  "description": "Quillon Wallet, Mining, DEX, Agent-Panel & QSHARE MCP server — every signed tool just works against production via the X-Wallet-Auth seed-derived signing path (file-first then env). v2.3.0 adds get_token_balance + tx_status + arb_scan (triangular arb across all DEX pools) + deploy_token, fixes the 10^16 decimal-display bug in dex_get_quote/dex_swap, and supports commemorative drops (GROK + future).",
   "type": "module",
   "main": "build/index.js",
   "scripts": {
