@@ -5719,14 +5719,21 @@ pub async fn send_transactions_batch(
     );
 
     // ─── 3. Pre-fetch sender balance ONCE ─────────────────────────────
-    // get_consensus_balance takes a hex string ("qnk"-less). It returns u128
-    // raw units (24-decimal). One read per batch — savings of N-1 RocksDB
-    // hits is the load-bearing win of this endpoint.
-    let from_hex = hex::encode(from_address);
+    // v10.11.1 FIX: use load_wallet_balance (CF_MANIFEST `wallet_balance_<hex>`)
+    // NOT get_consensus_balance (CF `"balances"`). The two stores diverged —
+    // wallet_balance_* is the canonical path that `/api/v1/wallets/<addr>/balance`
+    // reads and that all writes (save_wallet_balances + max-wins guard) use.
+    // The `"balances"` CF was the older BalanceConsensusEngine output and is
+    // empty for most wallets, which caused this handler to return "have 0"
+    // for any wallet whose consensus-balance write never landed.
+    //
+    // One read per batch — same O(1) savings as before. Returns
+    // `Option<u128>` because absent keys are valid (= 0 balance).
     let starting_balance: u128 = state
         .storage_engine
-        .get_consensus_balance(&from_hex)
+        .load_wallet_balance(&from_address)
         .await
+        .unwrap_or(None)
         .unwrap_or(0);
 
     let mut running_balance = starting_balance;
