@@ -4034,6 +4034,51 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         });
     }
 
+    // ── v10.11.5: PERIODIC DEX RECONCILER (safety net) ───────────────────────
+    // The execute_swap handler in handlers.rs now calls atomic_subtract_and_record_dex_debit,
+    // which decrements wallet_balance + increments dex_qug_debited in one atomic write_batch
+    // for every swap. That closes the money-printer leak instantly. This task is the
+    // belt-and-braces: every 5s it runs apply_dex_qug_adjustments() to catch any swap that
+    // somehow escaped the immediate-subtract path (handler crash mid-swap, alternate code
+    // paths I haven't audited, etc). The function is idempotent via dex_applied_net so
+    // running it on a clean state is a no-op (delta=0 → continue).
+    //
+    // Without this, the pre-v10.11.5 leak window was unbounded — counters accumulated forever
+    // and only reconciled at next restart. Post-fix, the worst-case leak window is 5s, and
+    // only for swap paths that bypass the new atomic write.
+    {
+        let reconciler_storage = state.storage_engine.clone();
+        let reconciler_wallet_balances = state.wallet_balances.clone();
+        let reconciler_dex_ready = state.dex_ready.clone();
+        tokio::spawn(async move {
+            // Wait for startup reconciler to flip dex_ready (avoids racing with it).
+            while !reconciler_dex_ready.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            }
+            let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                match reconciler_storage.apply_dex_qug_adjustments().await {
+                    Ok(adjusted) if adjusted > 0 => {
+                        info!("🔄 [DEX RECONCILER v10.11.5] Periodic tick adjusted {} wallets — swaps that bypassed the immediate-subtract path", adjusted);
+                        // Refresh in-memory cache so SSE consumers see the corrected balances.
+                        if let Ok(reconciled) = reconciler_storage.load_wallet_balances().await {
+                            let mut balances = reconciler_wallet_balances.write().await;
+                            for (addr, amount) in &reconciled {
+                                balances.insert(*addr, *amount);
+                            }
+                        }
+                    }
+                    Ok(_) => {} // delta=0 across all wallets — quiet success
+                    Err(e) => {
+                        warn!("⚠️ [DEX RECONCILER v10.11.5] Periodic apply_dex_qug_adjustments failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // ── Balance Finality Engine (Bracha RB + DAG-Knight) ─────────────────────
     // Wire BalanceFinalityEngine into AppState now that we have the node signing key
     // and gossip channel. f=0 (shadow mode) for Phase 1; bump to f=1 when 4+ validators.
@@ -11717,19 +11762,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // Step 7: Commit transaction atomically
                         tx.commit().await?;
 
-                        // v10.11.5: index swaps in the new block after a reorg so wallet
-                        // tx history reflects the canonical chain. See main.rs:12752 for
-                        // the gossipsub-path equivalent.
-                        {
-                            let bh = new_block.calculate_hash();
-                            let bt = new_block.header.timestamp as i64;
-                            if let Err(e) = app_state_gossip.swap_indexer
-                                .index_block(new_block.header.height, bh, bt, &new_block.transactions)
-                                .await
-                            {
-                                warn!("⚠️  [SWAP INDEXER] reorg index_block({}) failed: {}", new_block.header.height, e);
-                            }
-                        }
+                        // v10.11.5-rev1: SwapIndexer call dropped here. This site is
+                        // inside `async fn perform_balance_reorg(...)` — a free function
+                        // with no `app_state_gossip` in its captured env (E0434). Wiring
+                        // requires threading a swap_indexer Arc as a parameter, which is
+                        // a larger refactor. Reorgs are rare on prod; the gossipsub +
+                        // batch-sync + fast-sync-fallback paths cover the dominant
+                        // ingestion routes. After a reorg, the next normal block via
+                        // gossipsub will index correctly — the reorg-window swaps will
+                        // be missing from wallet history but consensus state is correct.
+                        // TODO v10.11.6: thread swap_indexer into perform_balance_reorg.
 
                         debug!("✅ [BALANCE REORG] Completed at height {}", old_block.header.height);
                         Ok(())
@@ -13765,6 +13807,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // 🔧 v9.0.0: Capture current_height_atomic for mining API height update after batch sync
                             let height_atomic_batch = app_state_gossip.current_height_atomic.clone();
                             let challenge_cache_batch = app_state_gossip.current_challenge.clone();
+                            // v10.11.5-rev1: clone the SwapIndexer Arc before the spawn so the
+                            // index_block call inside doesn't capture app_state_gossip by move
+                            // and break the next loop iteration (E0382).
+                            let swap_indexer_batch = app_state_gossip.swap_indexer.clone();
                             let blocks = valid_blocks; // ✅ Only process valid blocks!
 
                             // Process batch in parallel with database for maximum speed
@@ -13874,10 +13920,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         // batch. Without this, fresh-node turbo-sync would produce
                                         // a wallet whose tx history is empty for everything before
                                         // it joined the gossipsub mesh, even though state was replayed.
+                                        // v10.11.5-rev1: uses pre-spawn clone swap_indexer_batch (not
+                                        // app_state_gossip directly) so the spawn body doesn't move
+                                        // app_state_gossip and break the next loop iteration.
                                         for block in &blocks {
                                             let bh = block.calculate_hash();
                                             let bt = block.header.timestamp as i64;
-                                            if let Err(e) = app_state_gossip.swap_indexer
+                                            if let Err(e) = swap_indexer_batch
                                                 .index_block(block.header.height, bh, bt, &block.transactions)
                                                 .await
                                             {

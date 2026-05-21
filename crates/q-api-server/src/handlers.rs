@@ -13006,22 +13006,31 @@ pub async fn execute_swap(
             // to the mempool. When the block is produced, balance_consensus processes it
             // and calls subtract_balance() ONCE (the only deduction).
             //
-            // DEX counter still recorded for historical tracking (does NOT modify balance):
-            if let Err(e) = state.storage_engine.record_dex_qug_debit(&wallet_hex, request.amount_in as u128).await {
-                warn!("⚠️ [SWAP v10.3.2] Failed to record DEX debit counter: {} — continuing (counter only, not balance)", e);
+            // v10.11.5 (2026-05-21 money-printer fix #2): use the ATOMIC variant that
+            // both increments the debit counter AND decrements wallet_balance in a single
+            // RocksDB write_batch. The previous record_dex_qug_debit (counter-only) was
+            // relying on balance_consensus to materialize the debit when the Swap tx
+            // landed in a block — but balance_consensus never does so for DEX swaps
+            // (see the v9.0.5 comment higher up), so the QUG side was permanently
+            // off-chain and only reconciled by apply_dex_qug_adjustments at startup.
+            // Net: the user's QUG balance never decreased, while the QUGUSD output
+            // landed immediately — a complete money printer until restart.
+            //
+            // The atomic variant uses write_batch directly (bypasses save_wallet_balance's
+            // max-wins guard, which would refuse a legitimate debit). It also updates
+            // dex_applied_net so apply_dex_qug_adjustments stays idempotent — if the
+            // periodic reconciler also runs, it'll see delta=0 and skip.
+            match state.storage_engine.atomic_subtract_and_record_dex_debit(&wallet_hex, request.amount_in as u128).await {
+                Ok(new_balance) => {
+                    info!("💸 [SWAP v10.11.5] Atomic QUG debit applied: wallet={}… new_balance={}",
+                          &wallet_hex[..16.min(wallet_hex.len())], new_balance);
+                    // Sync in-memory cache with what we just wrote to RocksDB.
+                    state.wallet_balances.write().await.insert(wallet_addr, new_balance);
+                }
+                Err(e) => {
+                    warn!("⚠️ [SWAP v10.11.5] atomic_subtract_and_record_dex_debit failed: {} — swap will leave wallet_balance untouched until apply_dex_qug_adjustments reconciles", e);
+                }
             }
-
-            // v10.3.8: IMMEDIATELY update in-memory balance so SSE doesn't bounce back
-            {
-                let mut wallet_balances = state.wallet_balances.write().await;
-                let rocks_balance = state.storage_engine
-                    .get_balance(&wallet_hex).await.unwrap_or(0);
-                let deducted = rocks_balance.saturating_sub(request.amount_in as u128);
-                wallet_balances.insert(wallet_addr, deducted);
-                info!("💸 [SWAP] In-memory balance synced for swap. Block consensus will confirm.");
-            }
-
-            info!("💸 [SWAP v10.3.2] QUG debit will be applied by balance_consensus when Swap tx is included in block (no direct deduction)");
 
             token_balances = state.token_balances.write().await;
         } else if from_is_qugusd {
