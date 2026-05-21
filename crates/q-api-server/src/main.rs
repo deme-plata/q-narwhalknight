@@ -24630,8 +24630,55 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         tokio::spawn(async move {
             info!("⚔️  [CROWN-ASH] Game tick scheduler started (1 turn every {} blocks)", crown_ash_types::BLOCKS_PER_TURN);
 
-            let mut last_turn: u64 = 0;
-            let mut world_initialized = false;
+            // v10.11.4: persistence wiring — restore game state from CF_MANIFEST
+            // on startup so faction claims, treaties, province control, queued
+            // actions, and turn counter survive `systemctl restart q-api-server`.
+            // Pre-v10.11.4 the AppState was constructed with CrownAshGameState::
+            // empty() at lib.rs:3373 and never loaded; every restart wiped the
+            // entire game world to turn 0 / no players. Persistence keys live
+            // in CF_MANIFEST under the `crown_ash:*` prefix — no existing
+            // CF_MANIFEST schema touched.
+            let kv = crown_ash_storage.get_kv();
+            match crown_ash_api::persistence::load_game_state(&kv).await {
+                Ok(Some(loaded)) => {
+                    let provinces = loaded.world.provinces.len();
+                    let factions = loaded.world.factions.len();
+                    let turn = loaded.world.meta.turn;
+                    let pending_actions = loaded.action_queue.len();
+                    *crown_ash_state.write().await = loaded;
+                    info!(
+                        "⚔️  [CROWN-ASH] Restored world from CF_MANIFEST: turn {} · {} provinces · {} factions · {} pending actions",
+                        turn, provinces, factions, pending_actions
+                    );
+                }
+                Ok(None) => {
+                    info!("⚔️  [CROWN-ASH] No persisted world — will lazy-init on first tick");
+                }
+                Err(e) => {
+                    warn!("⚔️  [CROWN-ASH] Failed to load persisted world ({}); starting fresh", e);
+                }
+            }
+
+            // Sync `last_turn` to whatever the loaded world is at, so we don't
+            // re-run already-ticked turns from a stale starting point.
+            let mut last_turn: u64 = {
+                let g = crown_ash_state.read().await;
+                g.world.meta.turn as u64
+            };
+            // World is "initialized" if either the loader populated it OR we
+            // need to skip the lazy-init path. Both are encoded in the meta
+            // flag inside the state.
+            let mut world_initialized = {
+                let g = crown_ash_state.read().await;
+                g.world.meta.initialized
+            };
+
+            // Persistence cadence: save every N ticks. 30 ticks ≈ 30s with the
+            // 1-tick-per-second sim, bounding worst-case data loss on hard
+            // crash to one persistence window. Adjust upward if RocksDB write
+            // pressure becomes a concern at higher tick rates.
+            let mut ticks_since_save: u32 = 0;
+            const SAVE_EVERY_N_TICKS: u32 = 30;
 
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -24737,6 +24784,39 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 };
 
                 last_turn = tick_turn;
+
+                // v10.11.4: periodic persistence to CF_MANIFEST. Save every
+                // SAVE_EVERY_N_TICKS turns so node restarts don't wipe the
+                // game world. Bounded worst-case data loss: one save window
+                // (~30s) of action_queue + last few ticks of turn_history.
+                ticks_since_save += 1;
+                if ticks_since_save >= SAVE_EVERY_N_TICKS {
+                    let snapshot = {
+                        let g = crown_ash_state.read().await;
+                        // Clone is necessary because save_game_state takes
+                        // ownership for its bincode encoding loop and we
+                        // can't hold the read lock across the await.
+                        crown_ash_api::CrownAshGameState {
+                            world: g.world.clone(),
+                            action_queue: g.action_queue.clone(),
+                            turn_history: g.turn_history.clone(),
+                        }
+                    };
+                    match crown_ash_api::persistence::save_game_state(&kv, &snapshot).await {
+                        Ok(()) => {
+                            debug!(
+                                "⚔️  [CROWN-ASH] Persisted world to CF_MANIFEST at turn {} ({} provinces, {} actions queued)",
+                                snapshot.world.meta.turn,
+                                snapshot.world.provinces.len(),
+                                snapshot.action_queue.len()
+                            );
+                        }
+                        Err(e) => {
+                            warn!("⚔️  [CROWN-ASH] persist failed: {} (continuing)", e);
+                        }
+                    }
+                    ticks_since_save = 0;
+                }
 
                 let event_count = tick_result.events.len();
                 let turn_number = tick_result.turn;
