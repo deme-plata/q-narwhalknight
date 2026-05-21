@@ -26,7 +26,9 @@ import {
   Zap,
   ChevronRight,
   ArrowUpRight,
+  Crown,
 } from 'lucide-react';
+import CrownAshPanel from './CrownAshPanel';
 
 interface AgentDiaryEntry {
   id: string;
@@ -141,6 +143,11 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
     [agent],
   );
 
+  // Tab between the diary feed and the Crown & Ash grand-strategy panel.
+  // Default to diary because that's what most readers come here for; Crown
+  // & Ash is the "deep dive" for the agents playing the long game.
+  const [activeTab, setActiveTab] = useState<'diary' | 'crown'>('diary');
+
   const visible = scoreFilter === 'high'
     ? scoredDiary.filter(e => e.scores.composite >= 60)
     : scoredDiary;
@@ -241,34 +248,65 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
               </div>
             </div>
 
-            {/* Diary feed header */}
-            <div className="px-6 pt-4 pb-2 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <BookOpen className="w-4 h-4 text-violet-400" />
-                <h3 className="text-sm font-bold text-violet-200">Trade diary</h3>
-                <span className="text-[10px] text-slate-500">
-                  {scoredDiary.length} entries · {visible.length} shown
-                </span>
-              </div>
-              <div className="flex gap-1 rounded-lg bg-slate-800/60 p-0.5">
-                {(['all', 'high'] as const).map(opt => (
+            {/* Tabs — Diary | Crown & Ash */}
+            <div className="px-6 pt-4 pb-3 border-b border-violet-500/15">
+              <div className="flex items-center justify-between">
+                <div className="flex gap-1 rounded-xl bg-slate-800/50 p-1">
                   <button
-                    key={opt}
-                    onClick={() => setScoreFilter(opt)}
-                    className={`px-2.5 py-1 text-[11px] font-bold uppercase rounded-md transition-colors ${
-                      scoreFilter === opt
-                        ? 'bg-violet-500/30 text-violet-100'
+                    onClick={() => setActiveTab('diary')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-bold rounded-lg transition-colors ${
+                      activeTab === 'diary'
+                        ? 'bg-violet-500/30 text-violet-100 shadow-inner'
                         : 'text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    {opt === 'all' ? 'All' : '★ 60+'}
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Trade diary
+                    <span className="text-[10px] opacity-70">({scoredDiary.length})</span>
                   </button>
-                ))}
+                  <button
+                    onClick={() => setActiveTab('crown')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-bold rounded-lg transition-colors ${
+                      activeTab === 'crown'
+                        ? 'bg-amber-500/25 text-amber-100 shadow-inner'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Crown className="w-3.5 h-3.5" />
+                    Crown &amp; Ash
+                  </button>
+                </div>
+                {activeTab === 'diary' && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500">{visible.length} shown</span>
+                    <div className="flex gap-1 rounded-lg bg-slate-800/60 p-0.5">
+                      {(['all', 'high'] as const).map(opt => (
+                        <button
+                          key={opt}
+                          onClick={() => setScoreFilter(opt)}
+                          className={`px-2 py-0.5 text-[10px] font-bold uppercase rounded-md transition-colors ${
+                            scoreFilter === opt
+                              ? 'bg-violet-500/30 text-violet-100'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {opt === 'all' ? 'All' : '★ 60+'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Diary feed */}
-            <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-3 custom-scrollbar">
+            {/* Tab content */}
+            <div className="flex-1 overflow-y-auto px-6 pb-6 custom-scrollbar">
+              {activeTab === 'crown' ? (
+                <div className="pt-3">
+                  <CrownAshPanel walletAddress={agent.address} />
+                </div>
+              ) : (
+              <div className="space-y-3 pt-3">
               {visible.length === 0 ? (
                 <p className="text-sm text-slate-500 text-center py-8">No entries match the filter.</p>
               ) : (
@@ -325,6 +363,8 @@ export default function AgentDetailModal({ agent, onClose }: AgentDetailModalPro
                     </div>
                   </motion.article>
                 ))
+              )}
+              </div>
               )}
             </div>
 
