@@ -24,6 +24,11 @@ q-network = { path = "../q-network" }
 # Cryptography and serialization for real benchmarks
 ed25519-dalek = { workspace = true }
 bincode = { workspace = true }
+rand = { version = "0.8" }
+num_cpus = "1"
+
+# TR-2026-004 Phase 4 (sync_pipeline) bench: needs the parallel verifier
+q-crypto-simd = { path = "../q-crypto-simd" }
 
 # Performance monitoring
 sysinfo = "0.29"
@@ -50,5 +55,14 @@ name = "network_benchmark"
 harness = false
 
 [[bench]]
-name = "sharding_benchmark" 
+name = "sharding_benchmark"
+harness = false
+
+# TR-2026-004 Phase 4 — sync_pipeline tx-sig batch-verify vs sequential
+# Decides whether wiring SyncPipeline into the block-pack receive path is
+# worth the surgery. See docs/starship-endgame/technical-reviews/
+# TR-2026-004-dagknight-simd-iouring-optimization.md and
+# crates/q-storage/src/sync_pipeline.rs::validation_stage for the live caller.
+[[bench]]
+name = "sync_pipeline_tx_verify"
 harness = false
