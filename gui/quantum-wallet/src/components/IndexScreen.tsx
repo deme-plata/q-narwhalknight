@@ -80,21 +80,30 @@ const DEMO_INDEX_FUNDS: IndexFund[] = [
   },
   {
     id: 'defi5',
-    name: 'DeFi Leaders 5',
+    name: 'Stable Yield Index — Quillon Edition',
     symbol: 'DEFI5',
-    navPerShare: 0.9823,
-    navChange24h: -1.25,
+    navPerShare: 5788.0, // 2× QUG @ ~$2894 (matches backend handlers.rs:11578 NAV multiplier)
+    navChange24h: 0.85,
     totalSupply: 500000,
-    tvl: 491150,
+    tvl: 2894000,
+    // v10.10.13: real Quillon-native yield basket (was placeholder QAAVE/QCOMP/etc).
+    // Backing tokens that actually exist on-chain and accrue real yield:
+    //   QUGUSD — stablecoin floor, 1:1 USD peg via QUG-collateralized CDP
+    //   QCREDIT — L2 yield vault (5-25% APY across Bronze→Platinum tiers)
+    //   QSHARE — L3 treasury share with autonomous premium-arbitrage minting
+    //   QUG — base asset, mining-secured proof-of-work emission
+    //   wBTC — Bitcoin-bridge wrapped, external real-world floor exposure
+    // Backend NAV currently uses 2× QUG multiplier (handlers.rs:11578) — moving
+    // to a real basket-weighted NAV is a follow-up (TODO v10.11.x: index_nav.rs
+    // computes weight-sum of reserves from the 5 underlying pools).
     components: [
-      { symbol: 'QAAVE', name: 'Quantum Aave', weight: 22.5, targetWeight: 20, price: 95.00, priceChange24h: -0.8, holdings: 1163.5, value: 110532.5 },
-      { symbol: 'QCOMP', name: 'Quantum Compound', weight: 19.8, targetWeight: 20, price: 55.00, priceChange24h: -1.5, holdings: 1767.5, value: 97212.5 },
-      { symbol: 'QMKR', name: 'Quantum Maker', weight: 21.2, targetWeight: 20, price: 1500.00, priceChange24h: 0.5, holdings: 69.4, value: 104100 },
-      { symbol: 'QCRV', name: 'Quantum Curve', weight: 18.3, targetWeight: 20, price: 0.75, priceChange24h: -2.3, holdings: 119869, value: 89901.75 },
-      { symbol: 'QSNX', name: 'Quantum Synthetix', weight: 18.2, targetWeight: 20, price: 3.20, priceChange24h: -1.0, holdings: 27947.0, value: 89430.4 },
+      { symbol: 'QUGUSD', name: 'Quillon USD',     weight: 30, targetWeight: 30, price: 1.00,    priceChange24h:  0.0, holdings: 868200,    value: 868200 },
+      { symbol: 'QCREDIT', name: 'Quillon Credit', weight: 25, targetWeight: 25, price: 1.12,    priceChange24h:  0.4, holdings: 645982.14, value: 723500 },
+      { symbol: 'QSHARE',  name: 'Quillon Share',  weight: 20, targetWeight: 20, price: 100.00,  priceChange24h:  1.2, holdings: 5788,      value: 578800 },
+      { symbol: 'QUG',     name: 'Quillon',        weight: 15, targetWeight: 15, price: 2894.00, priceChange24h:  0.5, holdings: 150,       value: 434100 },
+      { symbol: 'wBTC',    name: 'Wrapped Bitcoin',weight: 10, targetWeight: 10, price: 100000,  priceChange24h: -0.3, holdings: 2.894,     value: 289400 },
     ],
-    managementFee: 0.75,
-    methodology: 'equal-weight',
+    managementFee: 0.10, // 0.1% mint/redeem fee (matches handlers.rs:11586 fee_rate=0.999)
     lastRebalance: Date.now() - 14 * 24 * 60 * 60 * 1000,
     nextRebalance: Date.now() + 0.5 * 24 * 60 * 60 * 1000,
     myShares: 0,

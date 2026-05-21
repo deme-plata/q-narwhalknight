@@ -1554,24 +1554,38 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
           console.error('Failed to fetch network supply:', error);
         }
 
-        // v2.3.8-beta: Fetch REAL QUGUSD vault stats (circulating supply + holders count)
+        // v10.10.13: Fetch REAL QUGUSD vault stats (circulating supply + CDP positions)
         let qugusdCirculatingSupply = 0; // Fallback: no QUGUSD minted yet
         let qugusdTotalSupply = 0; // Total minted = circulating for stablecoin
-        let qugusdHolders = 0; // Fallback
+        let qugusdHolders = 0; // Number of unique wallets holding QUGUSD (separate from CDP count)
+        let qugusdCdpPositions = 0; // Number of open CDP minting positions
         let qugusdCollateralRatio = 150; // Default collateralization %
         try {
           const vaultResponse = await qnkAPI.getVaultStats();
           if (vaultResponse.success && vaultResponse.data) {
-            // Convert from base units (1e8) to human-readable
-            qugusdCirculatingSupply = (vaultResponse.data.total_qugusd_minted || 0) / 1e8;
+            // BUGFIX v10.10.13: QUGUSD has 24 decimals, NOT 8. Pre-fix divided by 1e8
+            // which displayed 1.23 sextillion QUGUSD instead of the real ~123K. The
+            // vault returns minted total in 24-decimal AMM base units.
+            qugusdCirculatingSupply = (vaultResponse.data.total_qugusd_minted || 0) / 1e24;
             qugusdTotalSupply = qugusdCirculatingSupply; // Stablecoin: minted = supply
-            qugusdHolders = vaultResponse.data.num_positions || 0;
+            // BUGFIX v10.10.13: num_positions is the count of OPEN CDP MINTING POSITIONS,
+            // not the count of QUGUSD token holders. They're different by construction —
+            // a single CDP can mint and distribute QUGUSD to thousands of wallets. Real
+            // holder count needs a new endpoint that scans CF_BALANCES filtered by token.
+            // Until that ships (TODO v10.10.14: GET /api/v1/dex/tokens/:symbol/holders),
+            // show CDP positions as a proxy with the honest label.
+            qugusdCdpPositions = vaultResponse.data.num_positions || 0;
+            qugusdHolders = qugusdCdpPositions; // proxy — see TODO above
             qugusdCollateralRatio = (vaultResponse.data.global_collateral_ratio || 1.5) * 100;
             console.log('✅ Fetched REAL vault stats:', {
               circulating: qugusdCirculatingSupply,
-              holders: qugusdHolders,
+              cdpPositions: qugusdCdpPositions,
+              holders: qugusdHolders + ' (proxy — see GET /tokens/:symbol/holders TODO)',
               collateralRatio: qugusdCollateralRatio.toFixed(2) + '%'
             });
+            if (qugusdCollateralRatio < 150) {
+              console.warn(`⚠ QUGUSD vault collateralization at ${qugusdCollateralRatio.toFixed(1)}% — below 150% min. Liquidation risk if QUG drops further.`);
+            }
           }
         } catch (error) {
           console.error('Failed to fetch vault stats:', error);
