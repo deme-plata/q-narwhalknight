@@ -24873,6 +24873,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             post(handlers::send_transaction_signed),
         ) // v10.9.46: X-Wallet-Auth-only mode (no mnemonic, no vault) — for client-managed wallets
         .route(
+            "/api/v1/transactions/send_batch",
+            post(handlers::send_transactions_batch),
+        ) // v10.11.0 Tier 3: O(1) HTTP/auth/balance/nonce cost across N txs from same sender
+        .route(
             "/api/v1/transactions/estimate-fee",
             post(handlers::estimate_fee),
         ) // v1.4.5-beta: Fee estimation API
@@ -25221,6 +25225,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route(
             "/api/v1/payment/convert-to-qugusd",
             post(payment_api::convert_usd_to_qugusd),
+        )
+        .route(
+            // Inverse direction: burn QUGUSD, credit USD.
+            // Middle leg of QUG → DKK cashout pipeline (task #50).
+            "/api/v1/payment/convert-from-qugusd",
+            post(payment_api::convert_qugusd_to_usd),
         )
         .route("/api/v1/payment/transfer", post(payment_api::transfer_usd))
         .route("/api/v1/payment/webhook", post(payment_api::handle_stripe_webhook))
