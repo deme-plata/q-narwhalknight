@@ -155,6 +155,7 @@ fn main() {
         app.set_settings_update_channel(cfg.effective_update_channel().into());
         app.set_settings_autostart(cfg.is_autostart_enabled());
         app.set_settings_session_minutes(cfg.session_persistence_minutes() as i32);
+        app.set_settings_auto_login(cfg.is_auto_login_enabled());
 
         app.on_set_rpc_url(|u| {
             config::set_rpc_url(u.to_string());
@@ -232,6 +233,27 @@ fn main() {
         app.on_set_session_persistence_pref(|m| {
             config::set_session_persistence_minutes(m as u32);
             eprintln!("[CONFIG] session_persistence_minutes → {}", m);
+        });
+
+        app.on_set_auto_login_pref(|enabled| {
+            config::set_auto_login_enabled(enabled);
+            eprintln!("[CONFIG] auto_login → {}", enabled);
+        });
+
+        // Log out: return to login screen (screen 0). Cached session
+        // material lives in the encrypted wallet vault on disk; this
+        // signals the UI to forget the in-memory unlocked seed.
+        // (Vault clear-on-logout enhancement lands in v1.4 with the
+        // password-change modal flow.)
+        let app_weak_logout = app.as_weak();
+        app.on_log_out(move || {
+            eprintln!("[SETTINGS] log_out — returning to login screen");
+            if let Some(app) = app_weak_logout.upgrade() {
+                app.set_active_screen(0);
+                app.set_wallet_address("".into());
+                app.set_qug_balance("0.00".into());
+                app.set_qug_value_usd("$0.00".into());
+            }
         });
     }
     {

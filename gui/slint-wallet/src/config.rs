@@ -50,6 +50,9 @@ pub struct SettingsConfig {
     /// Disable the quantum-particle background on the home screen for
     /// low-power devices (Pi). Default false (particles on).
     pub disable_particle_bg: Option<bool>,
+    /// v1.3.0: skip the password prompt at launch when on. Less secure;
+    /// users opt in via Settings explicitly. Default false.
+    pub auto_login_enabled: Option<bool>,
 }
 
 impl WalletConfig {
@@ -110,6 +113,10 @@ impl WalletConfig {
 
     pub fn particle_bg_enabled(&self) -> bool {
         !self.settings.disable_particle_bg.unwrap_or(false)
+    }
+
+    pub fn is_auto_login_enabled(&self) -> bool {
+        self.settings.auto_login_enabled.unwrap_or(false)
     }
 }
 
@@ -204,5 +211,11 @@ pub fn set_session_persistence_minutes(minutes: u32) {
 pub fn set_disable_particle_bg(disabled: bool) {
     let mut cfg = load();
     cfg.settings.disable_particle_bg = Some(disabled);
+    let _ = save(&cfg);
+}
+
+pub fn set_auto_login_enabled(enabled: bool) {
+    let mut cfg = load();
+    cfg.settings.auto_login_enabled = Some(enabled);
     let _ = save(&cfg);
 }

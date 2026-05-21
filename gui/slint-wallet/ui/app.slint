@@ -102,6 +102,7 @@ export component AppWindow inherits Window {
     in property <string> settings-last-update-check: "never";
     in-out property <bool> settings-autostart: true;
     in-out property <int> settings-session-minutes: 0;
+    in-out property <bool> settings-auto-login: false;
     in-out property <string> settings-revealed-secret: "";
     in property <int> settings-reveal-countdown: 0;
 
@@ -118,6 +119,8 @@ export component AppWindow inherits Window {
     callback reveal-private-key();
     callback hide-revealed-secret();
     callback set-session-persistence-pref(int);
+    callback set-auto-login-pref(bool);
+    callback log-out();
 
     // v11.4.0: Quantum Mixer toggle on Send screen — main.rs reads via get_use_mixer()
     in-out property <bool> use-mixer: false;
@@ -444,6 +447,7 @@ export component AppWindow inherits Window {
                 last-update-check: root.settings-last-update-check;
                 autostart-enabled <=> root.settings-autostart;
                 session-persistence-minutes <=> root.settings-session-minutes;
+                auto-login-enabled <=> root.settings-auto-login;
                 revealed-secret <=> root.settings-revealed-secret;
                 reveal-countdown-secs: root.settings-reveal-countdown;
 
@@ -462,6 +466,8 @@ export component AppWindow inherits Window {
                 reveal-private-key => { root.reveal-private-key(); }
                 hide-revealed-secret => { root.hide-revealed-secret(); }
                 set-session-persistence(m) => { root.set-session-persistence-pref(m); }
+                set-auto-login(b) => { root.set-auto-login-pref(b); }
+                log-out => { root.log-out(); }
                 go-back => { root.active-screen = 1; }
             }
         }

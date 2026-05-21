@@ -153,6 +153,11 @@ export component SettingsScreen inherits Rectangle {
     in-out property <int> session-persistence-minutes: 0;
     callback set-session-persistence(int);
 
+    // ── Auto-login + Log out (v1.3.0 additions) ─────────────────────
+    in-out property <bool> auto-login-enabled: false;
+    callback set-auto-login(bool);
+    callback log-out();
+
     // Common
     callback go-back();
 
@@ -560,21 +565,46 @@ export component SettingsScreen inherits Rectangle {
 
                 // ── 8. SESSION PERSISTENCE ──────────────────────────
                 Card {
-                    height: 170px;
+                    height: 230px;
                     VerticalLayout {
                         padding: Theme.spacing-md;
                         spacing: Theme.spacing-sm;
                         SectionHeader {
                             title: "Session persistence";
-                            subtitle: "Remember unlock for N minutes";
+                            subtitle: "Remember unlock + skip password at launch";
                             section-icon: @image-url("icons/clock.svg");
                             accent: Theme.accent-purple;
                         }
+                        // Auto-login on cold start
+                        HorizontalLayout {
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 2px;
+                                Text {
+                                    text: "Auto-login on app launch";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                }
+                                Text {
+                                    text: "Skip password prompt at startup (less secure)";
+                                    color: Theme.text-muted;
+                                    font-size: Theme.font-xs;
+                                }
+                            }
+                            ToggleSwitch {
+                                checked: root.auto-login-enabled;
+                                toggled(v) => {
+                                    root.auto-login-enabled = v;
+                                    root.set-auto-login(v);
+                                }
+                            }
+                        }
+                        // Stay-unlocked-for-N-minutes after close
                         HorizontalLayout {
                             Text {
                                 text: root.session-persistence-minutes == 0 ?
-                                    "Off — password every launch"
-                                    : "Stay unlocked for " + root.session-persistence-minutes + " min";
+                                    "Re-lock on app close"
+                                    : "Stay unlocked " + root.session-persistence-minutes + " min after close";
                                 color: Theme.text-secondary;
                                 font-size: Theme.font-sm;
                                 horizontal-stretch: 1;
@@ -589,6 +619,26 @@ export component SettingsScreen inherits Rectangle {
                                 root.session-persistence-minutes = self.value;
                                 root.set-session-persistence(self.value);
                             }
+                        }
+                    }
+                }
+
+                // ── 9. LOG OUT ──────────────────────────────────────
+                Card {
+                    height: 130px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Log out";
+                            subtitle: "Clear cached unlock + return to login screen";
+                            section-icon: @image-url("icons/arrow-left.svg");
+                            accent: Theme.accent-red;
+                        }
+                        QButton {
+                            label: "Log out now";
+                            button-color: Theme.accent-red.darker(15%);
+                            clicked => { root.log-out(); }
                         }
                     }
                 }
