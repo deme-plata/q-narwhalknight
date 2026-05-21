@@ -1595,12 +1595,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               <span className="text-violet-400/50 text-[9px] font-semibold uppercase tracking-wider">Net Power</span>
             </motion.div>
 
-            {/* Miners count — always visible */}
+            {/* Miners count — always visible, opens the same NetworkPowerModal
+                (which already includes the miner list as its primary content). */}
             <motion.div
-              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[60px]"
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[60px] cursor-pointer"
               style={{ background: 'rgba(249,115,22,0.08)', border: '1px solid rgba(249,115,22,0.25)' }}
               animate={{ borderColor: networkMiners > 0 ? 'rgba(249,115,22,0.4)' : 'rgba(249,115,22,0.18)' }}
-              title="Active Miners on Network"
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              title="Active Miners on Network — click for full miner list + hashrate history"
+              onClick={() => setShowNetworkPowerModal(true)}
             >
               <span className="flex items-center gap-1 text-orange-200 text-sm font-bold leading-tight">
                 <Pickaxe className="w-3 h-3 text-orange-400" />
