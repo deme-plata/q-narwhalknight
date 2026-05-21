@@ -260,6 +260,7 @@ pub mod binary_protocol; // High-performance binary ingestion for 1M+ TPS
 pub mod cdp_simple; // Simple CDP system for QUGUSD minting (fallback, can be removed)
 pub mod chat_api; // ✅ ENABLED - AI chat API with privacy-first distributed inference
 pub mod chat_persistence; // P2P peer-to-peer chat message persistence
+pub mod dex_analytics_persist; // v10.10.15: volume_tracker + swap_history → CF_MANIFEST snapshot/restore
 pub mod group_chat_api; // ✅ ENABLED - Discord-like server-backed group chat
 pub mod email_api; // ✅ v7.3.2 - Quillon Mail: decentralized email with crypto transfers
 pub mod email_smtp; // ✅ v7.3.2 - Quillon Mail: SMTP server for inbound/outbound
