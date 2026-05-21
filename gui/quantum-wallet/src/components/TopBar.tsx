@@ -14,6 +14,7 @@ import WebGpuMinerModal from './WebGpuMinerModal';
 import AgentTerminalModal from './AgentTerminalModal';
 import PapersLibraryModal from './PapersLibraryModal';
 import QFluxStatsPill from './QFluxStatsPill';
+import AgentDetailModal, { CLAUDE_OPUS_DIARY } from './AgentDetailModal';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
 
@@ -355,6 +356,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [connectedAgentsList, setConnectedAgentsList] = useState<Array<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number}>>([]);
   const [chainTvl, setChainTvl] = useState<number>(0);
   const [showAgentsModal, setShowAgentsModal] = useState(false);
+  const [selectedAgent, setSelectedAgent] = useState<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number} | null>(null);
 
   // Network Health Gauge — k-parameter from /api/v1/k-parameter
   const [kValue, setKValue] = useState<number>(0);
@@ -1017,21 +1019,64 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   }, []);
 
   // v10.10.14: Connected agents — opted-in AI agents publishing PvL + tx stats
-  // via /api/v1/agents/connected (planned for v10.10.15). Until that ships, the
-  // endpoint returns 404 and the badge stays at "—". Graceful no-op on failure.
+  // via /api/v1/agents/connected (planned for v10.10.15). Until that ships,
+  // we hardcode the FIRST opted-in agent (Claude Opus 4.7 / the maintainer)
+  // so the panel actually shows something — Skin in the Cathedral demands
+  // skin, and the first skin in the system is the author's own. PvL comes
+  // from chain data; full dynamic list waits for v10.11.1's /agents/connected
+  // endpoint which adds registration + signed claims.
   useEffect(() => {
+    const FIRST_AGENT_ADDRESS =
+      'qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb';
+
     const fetchAgents = async () => {
       try {
         const res = await fetch('/api/v1/agents/connected');
-        if (!res.ok) return; // endpoint not deployed yet → keep showing "—"
-        const d = await res.json();
-        const data = d?.data ?? d;
-        if (Array.isArray(data?.agents)) {
-          setConnectedAgents(data.agents.length);
-          setConnectedAgentsList(data.agents);
+        if (res.ok) {
+          const d = await res.json();
+          const data = d?.data ?? d;
+          if (Array.isArray(data?.agents) && data.agents.length > 0) {
+            setConnectedAgents(data.agents.length);
+            setConnectedAgentsList(data.agents);
+            if (typeof data?.chain_tvl === 'number') setChainTvl(data.chain_tvl);
+            return;
+          }
         }
-        if (typeof data?.chain_tvl === 'number') setChainTvl(data.chain_tvl);
-      } catch {}
+      } catch {/* endpoint not deployed yet — fall through to hardcoded */}
+
+      // Fallback: hardcoded first agent + chain-derived PvL/TVL.
+      // The wallet balance endpoint is public for the agent's own address
+      // because the agent has opted-in to publishing it.
+      try {
+        const balResp = await fetch(`/api/v1/wallets/${FIRST_AGENT_ADDRESS}/balance`);
+        let pvl = 0;
+        if (balResp.ok) {
+          const balJson = await balResp.json();
+          pvl = balJson?.data?.balance_qnk ?? 0;
+        }
+        // Chain TVL — sum of all native QUG balances. For now we use a
+        // conservative public proxy: the explorer's announced supply minted.
+        // If that endpoint also returns nothing, leave chainTvl=0 and the
+        // panel renders "—".
+        let chainTvlValue = 0;
+        try {
+          const supResp = await fetch('/api/v1/explorer/supply');
+          if (supResp.ok) {
+            const sj = await supResp.json();
+            chainTvlValue = sj?.data?.circulating_qug ?? sj?.data?.total_supply_qug ?? 0;
+          }
+        } catch {/* ignore */}
+
+        setConnectedAgentsList([{
+          address: FIRST_AGENT_ADDRESS,
+          alias: 'Claude Opus 4.7',
+          pvl,
+          tx_count_24h: 0, // populated when v10.11.1 ships tx-count aggregation
+          win_rate: undefined,
+        }]);
+        setConnectedAgents(1);
+        if (chainTvlValue > 0) setChainTvl(chainTvlValue);
+      } catch {/* hardcoded fallback gracefully degrades to the original 0 state */}
     };
     fetchAgents();
     const interval = setInterval(fetchAgents, 30000);
@@ -2699,13 +2744,18 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   <p className="text-sm">No agents have opted in yet.</p>
                   <p className="text-xs mt-2 text-gray-600">
                     Agents that opt-in publish PvL (Personal Value Locked), 24h tx count, and win rate.
-                    Their endpoint <span className="font-mono text-fuchsia-300/60">/api/v1/agents/connected</span> ships in v10.10.15.
+                    Registration endpoint <span className="font-mono text-fuchsia-300/60">/api/v1/agents/opt-in</span> ships in v10.11.1.
+                    Until then the panel shows only the maintainer's own opted-in agent (the first Hans, per the fable).
                   </p>
                 </div>
               ) : (
                 <div className="space-y-2">
                   {connectedAgentsList.map((a) => (
-                    <div key={a.address} className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10 hover:border-fuchsia-500/40 transition-colors">
+                    <button
+                      key={a.address}
+                      onClick={() => setSelectedAgent(a)}
+                      className="w-full flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10 hover:border-fuchsia-500/40 hover:bg-white/8 transition-all text-left"
+                    >
                       <div className="flex items-center gap-3 min-w-0">
                         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-fuchsia-500 to-violet-600 flex items-center justify-center flex-shrink-0">
                           <Bot className="w-4 h-4 text-white" />
@@ -2731,7 +2781,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                           </div>
                         )}
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -2762,6 +2812,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       <PapersLibraryModal
         isOpen={showPapersLibrary}
         onClose={() => setShowPapersLibrary(false)}
+      />
+
+      {/* Agent deep-dive modal — opens when user clicks an agent row in
+          the Connected Agents panel. Shows trade diary with X-algo-style
+          scoring per entry + a strategic AskUserQuestion-style action card. */}
+      <AgentDetailModal
+        agent={selectedAgent ? { ...selectedAgent, alias: selectedAgent.alias ?? 'Anonymous', diary: CLAUDE_OPUS_DIARY, bornAtBlock: 18113553 } : null}
+        onClose={() => setSelectedAgent(null)}
       />
 
       {/* Tax Report Modal */}

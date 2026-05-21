@@ -997,11 +997,11 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                   </p>
                 </div>
               ) : (
-                {/* v10.10.13: REDESIGNED — scannable row with USD-value anchor.
-                    Was a wall of dense text; now a clean grid: avatar | identity | data | actions.
-                    Portfolio-share bar shows relative weight visually so largest holdings pop.
-                    Token category drives the left-stripe color (Core / Stable / Wrapped / RWA / Yield / Meme).
-                    Address becomes click-to-copy chip — no longer a full row. */}
+                // v10.10.13: REDESIGNED — scannable row with USD-value anchor.
+                // Was a wall of dense text; now a clean grid: avatar | identity | data | actions.
+                // Portfolio-share bar shows relative weight visually so largest holdings pop.
+                // Token category drives the left-stripe color (Core / Stable / Wrapped / RWA / Yield / Meme).
+                // Address becomes click-to-copy chip — no longer a full row.
                 <div className="space-y-2">
                   <AnimatePresence mode="popLayout" initial={false}>
                   {tokensWithBalance.map((token) => {

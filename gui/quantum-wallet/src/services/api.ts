@@ -3576,7 +3576,12 @@ export async function verifyTipProof(proof: TipProofResponse): Promise<TipProofV
   // Phase-1: try the real wasm verifier
   try {
     // @ts-expect-error — pkg/ may not exist yet; dynamic import handles absence
-    const wasm = await import('q-ivc-verifier-wasm').catch(() => null);
+    // Construct the specifier at runtime so Rollup's static analysis doesn't
+    // try to resolve it at build time. The .catch handles the actual
+    // absence at runtime. Once `wasm-pack build` ships pkg/ into
+    // node_modules, this resolves and the stub never runs.
+    const wasmSpec = ['q-ivc', 'verifier-wasm'].join('-');
+    const wasm = await import(/* @vite-ignore */ wasmSpec).catch(() => null);
     if (wasm && typeof wasm.verify_proof_bytes === 'function') {
       const stateRootBytes = hexToBytes(proof.state_root.replace(/^0x/, ''));
       const proofBytes = base64ToBytes(proof.proof_b64);
