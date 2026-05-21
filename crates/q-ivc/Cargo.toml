@@ -19,7 +19,10 @@ ark-relations = { workspace = true }
 ark-snark = { workspace = true }
 blake3 = { workspace = true }
 sha3 = { workspace = true }
-rand = { workspace = true }
+# Pinned to 0.8 (not workspace 0.9) because q-lattice-guard's prover
+# signatures bound on rand 0.8 / rand_core 0.6 traits. Bumping to 0.9
+# breaks the lattice_folder.rs R1CS bridge.
+rand = "0.8"
 hex = { workspace = true }
 # tokio is feature-gated to the `runtime` feature so q-ivc-verifier-wasm
 # (and any other wasm32 consumer) can pull q-ivc with `default-features =

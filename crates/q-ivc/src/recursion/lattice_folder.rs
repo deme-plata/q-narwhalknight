@@ -45,7 +45,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use ark_ff::PrimeField;
+use ark_ff::{BigInteger, PrimeField};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     OptimizationGoal, SynthesisError,
