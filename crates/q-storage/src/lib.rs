@@ -573,6 +573,29 @@ pub const CF_CALENDAR_SCHEDULED_TX: &str = "cf_calendar_scheduled_tx";
 /// Community events shared via P2P: key = event_id, value = CalendarEvent (JSON)
 pub const CF_CALENDAR_COMMUNITY: &str = "cf_calendar_community";
 
+// ========== v10.10.12: Agent Panel State (X-algorithm v2) ==========
+/// Wallet block list for `NegativeFeedbackScorer`.
+/// Key format: `[blocker_addr || blocked_addr]` (concatenated raw address bytes —
+/// callers in `crates/q-api-server/src/agent_panel/concrete.rs` pass whatever
+/// `Address`-shape they use; storage layer treats as opaque).
+/// Value format: `bincode(WalletBlockEntry { ts_secs: u64, reason: String })`.
+pub const CF_AGENT_WALLET_BLOCKS: &str = "cf_agent_wallet_blocks";
+
+/// Per-wallet score history for `agent_panel::score_history`, replacing the
+/// JSON file at `$Q_DB_PATH/agent_panel_score_history.json` (the v10.10.10
+/// implementation). Key format: `[wallet_addr || inverted_ts_u64_be]` so a
+/// prefix scan iterates newest-first. Value is opaque bytes from the
+/// agent_panel layer (bincode-encoded `ScoreHistoryEntry`).
+/// Bounded eviction (1000 entries/wallet) handled by the agent_panel layer
+/// during periodic compaction.
+pub const CF_AGENT_SCORE_HISTORY: &str = "cf_agent_score_history";
+
+/// `PreviouslySeenFilter` state — viewer wallet → seen `task_id`s, replacing
+/// the JSON file at `$Q_DB_PATH/agent_panel_seen_tracker.json`. Key format:
+/// `[viewer_addr || task_id]`. Value: `ts_u64_le` (8 bytes) for FIFO eviction
+/// when wallet's seen set exceeds 5000.
+pub const CF_AGENT_SEEN_TRACKER: &str = "cf_agent_seen_tracker";
+
 /// All column families for state sync (for database initialization)
 pub const STATE_SYNC_COLUMN_FAMILIES: &[&str] = &[
     CF_TOKEN_BALANCES,
@@ -11529,6 +11552,192 @@ impl QStorage {
             }
         }
         Ok(count)
+    }
+}
+
+// ========== v10.10.12: Agent Panel State (X-algorithm v2) ==========
+//
+// Raw byte-level accessors for `CF_AGENT_WALLET_BLOCKS`, `CF_AGENT_SCORE_HISTORY`,
+// and `CF_AGENT_SEEN_TRACKER`. The agent_panel layer owns the typed
+// serialization (bincode of its own `WalletBlockEntry`, `ScoreHistoryEntry`,
+// etc.); this layer just deals with composite keys and opaque values so the
+// crate stays free of `q-api-server` deps.
+//
+// Key layouts (also documented at each CF constant):
+//   - WALLET_BLOCKS:   key = [blocker_addr || blocked_addr], value = bincode(WalletBlockEntry)
+//   - SCORE_HISTORY:   key = [wallet_addr || inverted_ts_u64_be], value = caller-defined
+//   - SEEN_TRACKER:    key = [viewer_addr || task_id], value = ts_u64_le (8 bytes)
+
+impl QStorage {
+    /// Record a wallet block. `entry_bytes` is opaque (callers typically
+    /// store `bincode(WalletBlockEntry { ts_secs, reason })`).
+    pub async fn agent_block_wallet(
+        &self,
+        blocker: &[u8],
+        blocked: &[u8],
+        entry_bytes: &[u8],
+    ) -> Result<()> {
+        let key = [blocker, blocked].concat();
+        self.hot_db.put(CF_AGENT_WALLET_BLOCKS, &key, entry_bytes).await
+    }
+
+    /// Remove a wallet block entry. No-op if the pair was never blocked.
+    pub async fn agent_unblock_wallet(&self, blocker: &[u8], blocked: &[u8]) -> Result<()> {
+        let key = [blocker, blocked].concat();
+        self.hot_db.delete(CF_AGENT_WALLET_BLOCKS, &key).await
+    }
+
+    /// Fast scorer-path check. Returns true iff `blocker` has an entry for
+    /// `blocked` in the wallet-block CF.
+    pub async fn agent_is_wallet_blocked(
+        &self,
+        blocker: &[u8],
+        blocked: &[u8],
+    ) -> Result<bool> {
+        let key = [blocker, blocked].concat();
+        Ok(self.hot_db.get(CF_AGENT_WALLET_BLOCKS, &key).await?.is_some())
+    }
+
+    /// List all wallets blocked by `blocker`. Returns `(blocked_addr_bytes,
+    /// entry_bytes)` pairs. The address length is whatever the caller used at
+    /// store time — agent_panel knows its own `Address` shape.
+    pub async fn agent_list_blocked(
+        &self,
+        blocker: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let raw = self.hot_db.scan_prefix(CF_AGENT_WALLET_BLOCKS, blocker).await?;
+        let blocker_len = blocker.len();
+        Ok(raw
+            .into_iter()
+            .filter_map(|(k, v)| {
+                if k.len() > blocker_len {
+                    Some((k[blocker_len..].to_vec(), v))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Append a score-history entry for `wallet` at `ts_secs`. Uses an
+    /// inverted-timestamp suffix in the key so prefix-scans iterate
+    /// newest-first naturally.
+    pub async fn agent_record_score(
+        &self,
+        wallet: &[u8],
+        ts_secs: u64,
+        entry_bytes: &[u8],
+    ) -> Result<()> {
+        let inverted = (u64::MAX - ts_secs).to_be_bytes();
+        let mut key = Vec::with_capacity(wallet.len() + 8);
+        key.extend_from_slice(wallet);
+        key.extend_from_slice(&inverted);
+        self.hot_db.put(CF_AGENT_SCORE_HISTORY, &key, entry_bytes).await
+    }
+
+    /// Read newest-first score-history entries for `wallet`. Returns up to
+    /// `limit` pairs of `(ts_secs, entry_bytes)`. Entries older than the
+    /// 1000-entry retention bound may be evicted by periodic compaction.
+    pub async fn agent_list_score_history(
+        &self,
+        wallet: &[u8],
+        limit: usize,
+    ) -> Result<Vec<(u64, Vec<u8>)>> {
+        let raw = self.hot_db.scan_prefix(CF_AGENT_SCORE_HISTORY, wallet).await?;
+        let wallet_len = wallet.len();
+        Ok(raw
+            .into_iter()
+            .take(limit)
+            .filter_map(|(k, v)| {
+                if k.len() == wallet_len + 8 {
+                    let mut ts_be = [0u8; 8];
+                    ts_be.copy_from_slice(&k[wallet_len..]);
+                    let inverted = u64::from_be_bytes(ts_be);
+                    let ts = u64::MAX - inverted;
+                    Some((ts, v))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Count score-history entries for `wallet`. Linear scan; callers
+    /// should cache the count in memory if hot.
+    pub async fn agent_count_score_history(&self, wallet: &[u8]) -> Result<usize> {
+        Ok(self.hot_db.scan_prefix(CF_AGENT_SCORE_HISTORY, wallet).await?.len())
+    }
+
+    /// Mark a task as seen by `viewer` at `ts_secs`. Idempotent: re-marking
+    /// updates the timestamp.
+    pub async fn agent_mark_seen(
+        &self,
+        viewer: &[u8],
+        task_id: &[u8],
+        ts_secs: u64,
+    ) -> Result<()> {
+        let mut key = Vec::with_capacity(viewer.len() + task_id.len());
+        key.extend_from_slice(viewer);
+        key.extend_from_slice(task_id);
+        self.hot_db.put(CF_AGENT_SEEN_TRACKER, &key, &ts_secs.to_le_bytes()).await
+    }
+
+    /// List all task_ids seen by `viewer` along with their timestamps.
+    /// Returns `(task_id_bytes, ts_secs)` pairs. Order is RocksDB's natural
+    /// lex order over `task_id`, not chronological — callers that need
+    /// chronological order should sort by `ts_secs` themselves.
+    pub async fn agent_list_seen(
+        &self,
+        viewer: &[u8],
+    ) -> Result<Vec<(Vec<u8>, u64)>> {
+        let raw = self.hot_db.scan_prefix(CF_AGENT_SEEN_TRACKER, viewer).await?;
+        let viewer_len = viewer.len();
+        Ok(raw
+            .into_iter()
+            .filter_map(|(k, v)| {
+                if k.len() > viewer_len && v.len() == 8 {
+                    let mut ts_le = [0u8; 8];
+                    ts_le.copy_from_slice(&v);
+                    Some((k[viewer_len..].to_vec(), u64::from_le_bytes(ts_le)))
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Count seen entries for `viewer`. Used by `PreviouslySeenFilter` to
+    /// decide when to trigger eviction.
+    pub async fn agent_count_seen(&self, viewer: &[u8]) -> Result<usize> {
+        Ok(self.hot_db.scan_prefix(CF_AGENT_SEEN_TRACKER, viewer).await?.len())
+    }
+
+    /// Evict the oldest seen entries for `viewer` until at most
+    /// `target_count` remain. Returns the number of entries deleted.
+    /// Called periodically by the agent_panel layer when the wallet's
+    /// seen-set exceeds the 5000-entry cap.
+    pub async fn agent_evict_oldest_seen(
+        &self,
+        viewer: &[u8],
+        target_count: usize,
+    ) -> Result<usize> {
+        let mut entries = self.agent_list_seen(viewer).await?;
+        if entries.len() <= target_count {
+            return Ok(0);
+        }
+        // Sort by timestamp ascending → oldest first.
+        entries.sort_by_key(|(_, ts)| *ts);
+        let evict_n = entries.len() - target_count;
+        let viewer_len = viewer.len();
+        let mut evicted = 0;
+        for (task_id, _ts) in entries.into_iter().take(evict_n) {
+            let mut key = Vec::with_capacity(viewer_len + task_id.len());
+            key.extend_from_slice(viewer);
+            key.extend_from_slice(&task_id);
+            self.hot_db.delete(CF_AGENT_SEEN_TRACKER, &key).await?;
+            evicted += 1;
+        }
+        Ok(evicted)
     }
 }
 

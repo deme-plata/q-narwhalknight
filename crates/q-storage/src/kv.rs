@@ -503,6 +503,10 @@ impl RocksDBKV {
             // hot DB so SMT updates can be batched atomically with wallet
             // balance writes (see crates/q-storage/src/balance_smt.rs).
             Self::create_balance_smt_cf(&block_cache),
+            // ========== v10.10.12: Agent Panel State (X-algorithm v2) ==========
+            Self::create_agent_wallet_blocks_cf(&block_cache),
+            Self::create_agent_score_history_cf(&block_cache),
+            Self::create_agent_seen_tracker_cf(&block_cache),
         ];
 
         let mut kv = Self::open_with_cfs(path, opts, cfs).await?;
@@ -1318,6 +1322,37 @@ impl RocksDBKV {
         opts.set_max_write_buffer_number(2);
         Self::apply_shared_block_cache(&mut opts, cache);
         ColumnFamilyDescriptor::new(crate::CF_DEATH_CERTIFICATES, opts)
+    }
+
+    // ========== v10.10.12: Agent Panel State (X-algorithm v2) ==========
+    fn create_agent_wallet_blocks_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        opts.set_write_buffer_size(Self::scale_write_buffer(4)); // 4MB — low write volume
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_AGENT_WALLET_BLOCKS, opts)
+    }
+
+    fn create_agent_score_history_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Higher write rate — every panel poll appends one entry.
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_AGENT_SCORE_HISTORY, opts)
+    }
+
+    fn create_agent_seen_tracker_cf(cache: &rocksdb::Cache) -> ColumnFamilyDescriptor {
+        let mut opts = Options::default();
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+        // Per-candidate write on every panel poll, but values are 8 bytes —
+        // total volume is small per wallet.
+        opts.set_write_buffer_size(Self::scale_write_buffer(8));
+        opts.set_max_write_buffer_number(2);
+        Self::apply_shared_block_cache(&mut opts, cache);
+        ColumnFamilyDescriptor::new(crate::CF_AGENT_SEEN_TRACKER, opts)
     }
 
     // v7.3.1: Quantum metadata stored separately for lazy loading
