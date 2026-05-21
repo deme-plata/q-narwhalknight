@@ -640,21 +640,9 @@ export default function RecentActivityPanel({
                       <div className="text-[10px] text-white/30">{tx.tokenSymbol || TICKER_SYMBOL}</div>
                     </div>
                   </div>
-                  {/* Memo — full-width row so it never truncates aggressively */}
+                  {/* Memo — compact preview; rich memos get a sparkles icon hint */}
                   {tx.memo && (
-                    <div
-                      className="flex items-start gap-1.5 ml-11 mr-1 pl-2 pr-1.5 py-1 rounded-md"
-                      style={{
-                        background: 'rgba(212,175,55,0.05)',
-                        border: '1px solid rgba(212,175,55,0.12)',
-                      }}
-                      title={tx.memo}
-                    >
-                      <MessageSquare className="w-3 h-3 text-amber-300/70 flex-shrink-0 mt-[1px]" />
-                      <span className="text-[10.5px] italic text-amber-100/85 leading-tight break-words">
-                        {tx.memo.length > 140 ? `${tx.memo.slice(0, 140)}…` : tx.memo}
-                      </span>
-                    </div>
+                    <MemoRender memo={tx.memo} mode="compact" className="ml-11 mr-1" />
                   )}
                 </motion.div>
               );

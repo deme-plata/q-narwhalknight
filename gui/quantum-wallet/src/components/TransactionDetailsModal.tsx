@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Copy, ExternalLink, Clock, Hash, Wallet, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Check, Coins, Code, MessageSquare } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import ScoreBreakdown, { type ScoreData } from './ScoreBreakdown';
+import MemoRender from './MemoRender';
 
 interface Transaction {
   id: string;
@@ -328,22 +329,9 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 </div>
               )}
 
-              {/* Memo */}
+              {/* Memo — LaTeX-quality rendering for rich memos */}
               {(transaction as any).memo && (
-                <div className="rounded-xl p-4"
-                  style={{
-                    background: 'linear-gradient(135deg, rgba(212,175,55,0.1), rgba(255,215,0,0.06))',
-                    border: '1px solid rgba(212,175,55,0.3)'
-                  }}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <MessageSquare className="w-4 h-4 text-amber-400" />
-                    <span className="text-sm text-amber-200">Message</span>
-                  </div>
-                  <p className="text-sm text-amber-100 leading-relaxed break-words">
-                    {(transaction as any).memo}
-                  </p>
-                </div>
+                <MemoRender memo={(transaction as any).memo} mode="full" />
               )}
 
               {/* Timestamp */}

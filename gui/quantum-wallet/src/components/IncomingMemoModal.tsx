@@ -2,6 +2,7 @@ import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, MessageSquare, ArrowDownLeft, Copy, Check, ExternalLink } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
+import MemoRender from './MemoRender';
 
 interface IncomingMemoTx {
   amount: number;
@@ -100,18 +101,9 @@ export default function IncomingMemoModal({ tx, onClose }: IncomingMemoModalProp
               </p>
             </div>
 
-            {/* Memo */}
-            <div className="rounded-2xl p-4 mb-4"
-              style={{
-                background: 'linear-gradient(135deg, rgba(212,175,55,0.1), rgba(255,215,0,0.06))',
-                border: '1.5px solid rgba(212,175,55,0.3)',
-              }}
-            >
-              <div className="flex items-center gap-2 mb-2">
-                <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Message</span>
-              </div>
-              <p className="text-sm text-amber-100 leading-relaxed break-words">{tx.memo}</p>
+            {/* Memo — LaTeX-quality rendering for rich memos */}
+            <div className="mb-4">
+              <MemoRender memo={tx.memo} mode="full" />
             </div>
 
             {/* From */}
