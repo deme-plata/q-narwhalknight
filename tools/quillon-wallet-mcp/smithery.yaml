@@ -44,8 +44,13 @@
 # before configuring.
 
 build:
+  # v2.6.0: dedicated MCP Dockerfile, alongside this smithery.yaml.
+  # The repo-root Dockerfile builds the NODE (q-api-server) — different
+  # image, wrong entrypoint for an MCP server. dockerBuildPath stays at
+  # the MCP subdir so the build context includes package.json, src/, and
+  # tsconfig.json without pulling the entire repo.
   dockerfile: Dockerfile
-  dockerBuildPath: ../..
+  dockerBuildPath: .
 
 startCommand:
   type: stdio

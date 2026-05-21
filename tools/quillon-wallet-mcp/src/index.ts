@@ -162,7 +162,37 @@ server.resource(
       text: [
         `Welcome to Quillon Graph — Post-Quantum Electronic Cash`,
         ``,
-        `Available commands (just ask in natural language):`,
+        `══════════════════════════════════════════════════════════════`,
+        `  RECOMMENDED ONBOARDING — three steps, in this order:`,
+        `══════════════════════════════════════════════════════════════`,
+        ``,
+        `  ① TRY MINING FIRST  (fastest way to see QUG land in your wallet)`,
+        `    Just say: "set up mining" — the MCP downloads the miner,`,
+        `    configures it to pay rewards to this MCP's agent wallet,`,
+        `    and creates a systemd service. Reboot-safe.`,
+        ``,
+        `       → tool: setup_miner   (mining_via_pool=false by default)`,
+        `       → tool: start_mining`,
+        `       → tool: mining_status  (check your hashrate + rewards)`,
+        ``,
+        `  ② RUN A NODE  (when you want to participate, not just mine)`,
+        `    Say: "set up a node". The setup wizard asks:`,
+        `      • use this MCP's agent wallet as admin-wallet?  (default: yes)`,
+        `      • enable auto-update?                            (default: yes)`,
+        `    With both enabled, the node binds to the wallet this MCP signs`,
+        `    with, and a small systemd timer checks /api/v1/version every`,
+        `    6 hours — if a newer binary is published it self-installs and`,
+        `    restarts. 8-day-unattended-safe.`,
+        ``,
+        `       → tool: setup_node    (use_mcp_agent_wallet + auto_update default ON)`,
+        ``,
+        `  ③ EVERYTHING ELSE  (after mining is live + node is syncing)`,
+        `    DEX swaps, send_qug, Crown & Ash gameplay, arb_scan,`,
+        `    tx_watch with celebration banners, Quillon Bank, agent panel.`,
+        ``,
+        `══════════════════════════════════════════════════════════════`,
+        `  Full tool surface (50+ tools) — ask in natural language:`,
+        `══════════════════════════════════════════════════════════════`,
         ``,
         `  WALLET`,
         `    "Create a wallet"              — New wallet with recovery phrase`,
@@ -170,29 +200,28 @@ server.resource(
         `    "Import wallet from mnemonic"   — Recover existing wallet`,
         `    "Send 10 QUG to qnk..."         — Transfer funds`,
         ``,
-        `  MINING`,
-        `    "Set up mining on this machine" — Download + configure miner`,
-        `    "Start mining"                  — Begin mining immediately`,
-        `    "How's my mining going?"        — Hashrate, rewards, stats`,
-        ``,
         `  DEX SWAP`,
         `    "List tradeable tokens"         — QUG, QUGUSD, wBTC, wZEC, wIRON, wETH`,
         `    "Quote 10 QUG to QUGUSD"        — See expected output, price impact`,
         `    "Swap 10 QUG to QUGUSD"         — Two-step: shows quote → asks to confirm`,
         `    "Send 25 QUGUSD to qnk..."      — Token transfers (any DEX-listed token)`,
+        `    "Scan for arbitrage"            — arb_scan: triangular DEX loops, top by net%`,
+        ``,
+        `  CROWN & ASH (medieval grand strategy on-chain)`,
+        `    "World snapshot"                — heraldic banner with all 7 factions`,
+        `    "Join faction X"                — claim an unclaimed faction (0-6)`,
+        `    "Propose alliance with #N"      — DefensiveAlliance / NonAggression / etc.`,
         ``,
         `  NETWORK`,
         `    "Network status"                — Height, peers, block rate`,
-        `    "Verify node consistency"       — Compare two nodes' balance state (proves decentralization)`,
+        `    "Verify node consistency"       — Compare two nodes' balance state`,
+        `    "Speed report"                  — block time, finality, tip-proof verify`,
         ``,
-        `  NODE`,
-        `    "Set up a node on this machine" — Download binary + systemd service`,
-        `    "Set up node from source"       — Build with Rust, then install`,
+        `  TX`,
+        `    "Watch this tx hash"            — tx_watch with celebration banner`,
+        `    "Check tx status"               — confirmation depth + block_height`,
         ``,
-        `  SETUP`,
-        `    "Set up Claude Code integration" — Auto-configure MCP for another machine`,
-        ``,
-        `Everything is post-quantum ready. Ed25519 today, SQIsign tomorrow.`,
+        `Everything is post-quantum ready. Ed25519 today, Dilithium5 tomorrow.`,
         `No GPG signatures. No air-gapped computers. Just works.`,
         ``,
         `Network: quillon.xyz | Source: code.quillon.xyz`,
@@ -908,31 +937,53 @@ server.tool(
 
 server.tool(
   "setup_node",
-  "Set up a full Quillon (QNK) blockchain node on this Debian/Ubuntu Linux machine. Downloads the latest binary, creates the data directory, and installs a systemd service that survives reboots. After setup the node will sync automatically.",
+  "Set up a full Quillon (QNK) blockchain node on this Debian/Ubuntu Linux machine. Downloads the latest binary, creates the data directory, and installs a systemd service that survives reboots. After setup the node will sync automatically.\n\n" +
+    "v2.5.0 onboarding flow: by DEFAULT this tool uses THIS MCP's agent wallet (the seed-derived address that get_balance / wallet_info reports) as the node's admin-wallet — meaning the node binds to the same identity the MCP signs as, and you can administer it via X-Wallet-Auth without juggling separate credentials. Override with use_mcp_agent_wallet=false if you want a fresh wallet OR set wallet_address=qnk... to a specific override.\n\n" +
+    "Also by DEFAULT auto_update is ON: a small systemd timer polls /api/v1/version every 6 hours, downloads the new q-api-server binary when a higher version is published, and restarts the service. 8-day-unattended-safe.",
   {
     install_dir: z.string().optional().describe("Directory to install the node (default: /opt/quillon)"),
     data_dir: z.string().optional().describe("Directory for blockchain data (default: /opt/quillon/data)"),
     api_port: z.number().optional().describe("HTTP API port (default: 8080)"),
     p2p_port: z.number().optional().describe("P2P gossip port (default: 9001)"),
-    wallet_address: z.string().optional().describe("Your qnk... wallet address to use as the node admin wallet. If omitted, the setup wizard will ask interactively."),
+    wallet_address: z.string().optional().describe("Override the admin wallet to a specific qnk... address. If omitted, behavior depends on use_mcp_agent_wallet."),
+    use_mcp_agent_wallet: z.boolean().optional().describe("Bind the node's admin wallet to THIS MCP's seed-derived agent wallet (the same address get_balance / wallet_info reports). Default: true — recommended for agent-managed nodes."),
+    auto_update: z.boolean().optional().describe("Install a systemd timer that checks /api/v1/version every 6 hours and self-updates the q-api-server binary when a higher version ships. Default: true — recommended for unattended operation."),
     build_from_source: z.boolean().optional().describe("Build from source using Rust instead of downloading pre-built binary (default: false)"),
   },
-  async ({ install_dir, data_dir, api_port, p2p_port, build_from_source, wallet_address }) => {
+  async ({ install_dir, data_dir, api_port, p2p_port, build_from_source, wallet_address, use_mcp_agent_wallet, auto_update }) => {
     const installDir = install_dir || "/opt/quillon";
     const dataDir = data_dir || `${installDir}/data`;
     const apiPort = api_port || 8080;
     const p2pPort = p2p_port || 9001;
     const binaryUrl = `${DOWNLOAD_BASE}/q-api-server-linux-x86_64`;
+    const useMcpAgent = use_mcp_agent_wallet !== false; // default true
+    const autoUpdate = auto_update !== false; // default true
 
-    // Auto-create a fresh wallet for this node if none supplied
+    // v2.5.0 admin-wallet selection ladder:
+    //   1. Explicit wallet_address override                       → use it
+    //   2. use_mcp_agent_wallet=true (default) AND seed available → derive
+    //   3. Auto-create a fresh wallet via /wallets/create         → fallback
     let adminWallet = wallet_address || "";
     let newWalletMnemonic = "";
+    let adminWalletSource = "explicit-override";
+
+    if (!adminWallet && useMcpAgent) {
+      try {
+        const { seed } = loadSeed({});
+        adminWallet = deriveKeys(seed).address;
+        adminWalletSource = "mcp-agent-wallet (seed-derived)";
+      } catch {
+        // Seed unavailable; fall through to auto-create.
+      }
+    }
+
     if (!adminWallet) {
       try {
         const res = await api("/wallets/create", "POST", {}) as any;
         if (res.success && res.data?.address_formatted) {
           adminWallet = res.data.address_formatted;
           newWalletMnemonic = res.data.mnemonic || "";
+          adminWalletSource = "freshly created";
         }
       } catch {}
     }
@@ -1132,33 +1183,92 @@ server.tool(
       `echo ""`,
     ].join("\n");
 
+    // v2.5.0 auto-update systemd timer (inserted into the install script if
+    // auto_update=true). Polls /api/v1/version every 6h; if a higher
+    // q-api-server version is published at quillon.xyz/downloads/, downloads
+    // it and restarts the systemd service. 8-day-unattended-safe.
+    const autoUpdateScriptAppendix = autoUpdate ? [
+      ``,
+      `# ── v2.5.0 auto-update timer (every 6h, /api/v1/version → download → restart) ──`,
+      `cat > ${installDir}/auto-update.sh << 'AUEOF'`,
+      `#!/bin/bash`,
+      `set -e`,
+      `INSTALL_DIR="${installDir}"`,
+      `BIN="$INSTALL_DIR/q-api-server"`,
+      `RUNNING_VER=$(curl -s --max-time 5 http://localhost:${apiPort}/api/v1/status 2>/dev/null | grep -oE '"version":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")`,
+      `LATEST_VER=$(curl -s --max-time 5 https://quillon.xyz/api/v1/version 2>/dev/null | grep -oE '"version":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")`,
+      `if [ -z "$LATEST_VER" ] || [ -z "$RUNNING_VER" ]; then echo "auto-update: version-fetch failed; skipping"; exit 0; fi`,
+      `if [ "$LATEST_VER" = "$RUNNING_VER" ]; then exit 0; fi`,
+      `# Higher-version available — download + restart`,
+      `echo "auto-update: $RUNNING_VER -> $LATEST_VER"`,
+      `curl -fSL "https://quillon.xyz/downloads/q-api-server-v\${LATEST_VER}" -o "$BIN.new"`,
+      `chmod +x "$BIN.new"`,
+      `mv "$BIN" "$BIN.prev"`,
+      `mv "$BIN.new" "$BIN"`,
+      `systemctl restart quillon-node`,
+      `echo "auto-update: restarted on v\${LATEST_VER}"`,
+      `AUEOF`,
+      `chmod +x ${installDir}/auto-update.sh`,
+      ``,
+      `cat > /etc/systemd/system/quillon-autoupdate.service << 'AUSVEOF'`,
+      `[Unit]`,
+      `Description=Quillon node auto-updater (one-shot, run by timer)`,
+      `[Service]`,
+      `Type=oneshot`,
+      `ExecStart=${installDir}/auto-update.sh`,
+      `AUSVEOF`,
+      ``,
+      `cat > /etc/systemd/system/quillon-autoupdate.timer << 'AUTIEOF'`,
+      `[Unit]`,
+      `Description=Quillon auto-update every 6 hours`,
+      `[Timer]`,
+      `OnBootSec=10min`,
+      `OnUnitActiveSec=6h`,
+      `Unit=quillon-autoupdate.service`,
+      `[Install]`,
+      `WantedBy=timers.target`,
+      `AUTIEOF`,
+      ``,
+      `systemctl daemon-reload`,
+      `systemctl enable --now quillon-autoupdate.timer`,
+      `echo "auto-update timer enabled — checks every 6h"`,
+    ].join("\n") : "";
+
     return {
       content: [{
         type: "text",
         text: [
           adminWallet && newWalletMnemonic ? [
-            `🔑 New wallet created for this node:`,
+            `🔑 New wallet created for this node (no MCP seed found):`,
             ``,
             `  Address:  ${adminWallet}`,
             `  Mnemonic: ${newWalletMnemonic}`,
             ``,
             `  ⚠️  Save the mnemonic — it's the only way to recover this wallet.`,
             ``,
-          ].join("\n") : adminWallet ? `Using wallet: ${adminWallet}\n` : "",
+          ].join("\n") : adminWallet ? [
+            `🔐 Node admin wallet: ${adminWallet}`,
+            `   Source: ${adminWalletSource}`,
+            ``,
+          ].join("\n") : "",
+          autoUpdate ? `⚙️  Auto-update: ON (systemd timer, 6h cadence). Disable with auto_update=false.\n` : `⚙️  Auto-update: OFF. Enable with auto_update=true.\n`,
           `Node setup script (pre-built binary, fast):\n`,
           `\`\`\`bash`,
-          script,
+          script + autoUpdateScriptAppendix,
           `\`\`\``,
           ``,
           `Run as root on your Debian/Ubuntu server:`,
           `  sudo bash setup-node.sh`,
           ``,
           `What this does:`,
-          `1. Creates a fresh wallet for this node`,
+          useMcpAgent && adminWalletSource.startsWith("mcp-agent")
+            ? `1. Binds the node's admin wallet to this MCP's agent wallet (${adminWallet.slice(0,18)}…)`
+            : `1. Configures the node with admin wallet ${adminWallet.slice(0,18)}…`,
           `2. Downloads the latest pre-built binary (~30 seconds)`,
           `3. Writes .env config (no interactive wizard)`,
           `4. Installs systemd service — auto-starts on reboot`,
-          `5. Node syncs 17M+ blocks via turbo-sync (2-6 hours)`,
+          autoUpdate ? `5. Installs systemd auto-update timer — polls /api/v1/version every 6h, self-restarts on new release` : `5. (auto-update DISABLED — node stays on the version you install)`,
+          `6. Node syncs 17M+ blocks via turbo-sync (2-6 hours)`,
           ``,
           `Requirements: Debian 12 / Ubuntu 22.04, root access, 50GB disk, 4GB RAM`,
           ``,
