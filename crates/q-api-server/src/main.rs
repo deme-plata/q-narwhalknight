@@ -12749,6 +12749,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             }
                                         }
 
+                                        // v10.11.5: Wire SwapIndexer.index_block — the indexer was
+                                        // instantiated in AppState (lib.rs:3214/:4708) but its
+                                        // index_block() method was never called from anywhere. As a
+                                        // result CF_WALLET_SWAP_INDEX stayed empty forever and the
+                                        // /api/v1/wallet/<addr>/history endpoint returned ZERO swaps
+                                        // for every wallet — Recent Activity in the UI looked
+                                        // mining-only. Fix: invoke the indexer right after each
+                                        // gossipsub block commits. Failures log warn! and continue;
+                                        // tx history is not consensus-critical, so an indexing miss
+                                        // never blocks block production.
+                                        {
+                                            let block_hash = block.calculate_hash();
+                                            let block_timestamp = block.header.timestamp as i64;
+                                            if let Err(e) = app_state_gossip.swap_indexer
+                                                .index_block(block_height, block_hash, block_timestamp, &block.transactions)
+                                                .await
+                                            {
+                                                warn!(
+                                                    "⚠️  [SWAP INDEXER] index_block({}) failed: {} (block still committed; history will miss this swap)",
+                                                    block_height, e
+                                                );
+                                            }
+                                        }
+
                                         // ============================================
                                         // 🔄 v8.7.3: Deterministic state replay for all tx types
                                         // After the block is committed, replay non-coinbase/non-transfer
