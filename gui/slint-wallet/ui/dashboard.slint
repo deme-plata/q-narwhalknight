@@ -26,17 +26,43 @@ export component DashboardScreen inherits Rectangle {
         padding: Theme.spacing-md;
         spacing: Theme.spacing-md;
 
-        // Header
+        // Header — v1.3.0: Quillon logo prominently shown
         HorizontalLayout {
-            alignment: space-between;
-            height: 32px;
+            alignment: start;
+            spacing: Theme.spacing-sm;
+            height: 36px;
 
-            Text {
-                text: "Dashboard";
-                color: Theme.text-primary;
-                font-size: Theme.font-xl;
-                font-weight: 700;
-                vertical-alignment: center;
+            // Logo with quantum-glow halo
+            Rectangle {
+                width: 36px; height: 36px;
+                border-radius: 18px;
+                background: @radial-gradient(circle,
+                    Theme.accent-purple.with-alpha(0.18) 0%,
+                    Theme.accent-cyan.with-alpha(0.08) 60%,
+                    transparent 100%);
+                Image {
+                    source: @image-url("icons/quillon-logo.png");
+                    width: 28px; height: 28px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 0px;
+                Text {
+                    text: "Quillon";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xl;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Graph Wallet";
+                    color: Theme.text-muted;
+                    font-size: 10px;
+                }
             }
         }
 

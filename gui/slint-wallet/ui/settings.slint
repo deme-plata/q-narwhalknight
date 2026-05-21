@@ -197,6 +197,7 @@ export component SettingsScreen inherits Rectangle {
             VerticalLayout {
                 alignment: center;
                 spacing: 2px;
+                horizontal-stretch: 1;
                 Text {
                     text: "Settings";
                     color: Theme.text-primary;
@@ -207,6 +208,23 @@ export component SettingsScreen inherits Rectangle {
                     text: "Mining, network, appearance, security";
                     color: Theme.text-muted;
                     font-size: Theme.font-xs;
+                }
+            }
+
+            // v1.3.0: Quillon logo accent on the right
+            Rectangle {
+                width: 36px; height: 36px;
+                border-radius: 18px;
+                background: @radial-gradient(circle,
+                    Theme.accent-cyan.with-alpha(0.15) 0%,
+                    Theme.accent-purple.with-alpha(0.05) 70%,
+                    transparent 100%);
+                Image {
+                    source: @image-url("icons/quillon-logo.png");
+                    width: 28px; height: 28px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    image-fit: contain;
                 }
             }
         }
