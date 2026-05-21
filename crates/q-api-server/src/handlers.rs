@@ -4435,10 +4435,23 @@ pub async fn get_transaction(
             // is in the mempool (or was, and was never finalised). Report
             // `in_mempool` with zero confirmations. The wallet UI then
             // correctly shows "pending" instead of fake-confirmed.
+            // v10.11.7: storage-path also consults the live mempool. v10.11.6
+            // patched the DashMap branch (line ~4256) but this storage-load
+            // fallback also returned "in_mempool" for txs in storage with no
+            // block_height, regardless of whether the active pool still
+            // contained them. That left wallet UIs showing "pending" forever
+            // for txs that were evicted (low-fee, expired, shutdown). Now
+            // when found_block_height is None we check the active pool too:
+            // present → "in_mempool" (genuinely queued); absent → "dropped".
             let (status_str, confirmations) = if let Some(block_height) = found_block_height {
                 ("confirmed".to_string(), (current_height - block_height + 1) as u32)
             } else {
-                ("in_mempool".to_string(), 0)
+                let still_in_pool = match state.production_mempool {
+                    Some(ref mp) => mp.contains(&tx_hash).await,
+                    None => true, // no mempool to query, trust the storage-only signal
+                };
+                let s = if still_in_pool { "in_mempool" } else { "dropped" };
+                (s.to_string(), 0)
             };
 
             // ZK-STARK Privacy: Check if user can see full details
@@ -4915,11 +4928,17 @@ async fn send_transaction_inner(
         );
     }
 
-    // Create message to sign (transaction hash)
-    let message = &tx_hash;
-
-    // Sign the transaction with Ed25519
-    let signature: Signature = signing_key.sign(message);
+    // v10.11.8 (2026-05-22): sign canonical signable_payload, NOT tx_hash.
+    //
+    // Why: tx_hash is postcard(tx) with signature=empty Vec. After signing we
+    // overwrite signature with 64 bytes, so the validator's self.hash()
+    // re-serialization yields different bytes than what we signed. The
+    // canonical signable_payload zeroes signature to [0u8;64] *before*
+    // postcard-encoding, giving signer + verifier a stable target. v10.11.7's
+    // dual-check (signable_payload OR hash) couldn't help because we were
+    // signing neither of those targets — we were signing hash-with-empty-sig.
+    let message = signed_transaction.signable_payload();
+    let signature: Signature = signing_key.sign(&message);
 
     // Store the signature in the transaction
     signed_transaction.signature = signature.to_bytes().to_vec();
