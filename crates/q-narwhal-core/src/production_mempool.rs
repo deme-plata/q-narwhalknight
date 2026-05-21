@@ -615,6 +615,16 @@ impl ProductionMempool {
         }
     }
 
+    /// v10.11.6: Is this tx hash currently in the active pending pool?
+    /// Used by the tx-status handler to detect mempool-eviction —
+    /// when the DashMap-tracked status is still InMempool but contains()
+    /// returns false, the tx was evicted (low-fee, expired, or cleared
+    /// during shutdown). The handler then reports "dropped" instead of
+    /// the misleading "in_mempool".
+    pub async fn contains(&self, hash: &TxHash) -> bool {
+        self.pending_transactions.read().await.contains_key(hash)
+    }
+
     /// Cleanup expired transactions
     pub async fn cleanup_expired_transactions(&self) {
         let now = SystemTime::now();

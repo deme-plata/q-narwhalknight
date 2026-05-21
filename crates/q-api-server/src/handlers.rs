@@ -4253,9 +4253,19 @@ pub async fn get_transaction(
             TxStatus::Pending => build_privacy_response(
                 tx_hash_str.clone(), "pending".to_string(), None, 0, None
             ),
-            TxStatus::InMempool => build_privacy_response(
-                tx_hash_str.clone(), "in_mempool".to_string(), None, 0, None
-            ),
+            TxStatus::InMempool => {
+                // v10.11.6: DashMap-tracked status may be stale — the tx could
+                // have been evicted from the actual mempool (low-fee eviction at
+                // admission, expired age in cleanup_expired_transactions, or
+                // dropped at shutdown). Double-check the live pool; if absent,
+                // report "dropped" instead of misleading "in_mempool".
+                let still_in_pool = match state.production_mempool {
+                    Some(ref mp) => mp.contains(&tx_hash).await,
+                    None => true, // no mempool to query, trust the tracker
+                };
+                let status_str = if still_in_pool { "in_mempool" } else { "dropped" };
+                build_privacy_response(tx_hash_str.clone(), status_str.to_string(), None, 0, None)
+            }
             TxStatus::Mixing => build_privacy_response(
                 tx_hash_str.clone(), "mixing".to_string(), None, 0, None
             ),
