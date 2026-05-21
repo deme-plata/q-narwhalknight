@@ -1,0 +1,24 @@
+[package]
+name = "tps-bench"
+version = "0.2.0"
+edition = "2021"
+description = "Production-honest live TPS benchmark for Quillon Graph — 8 parallel executors, SIMD batch sign, real HTTP path"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+sha3 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rayon = { workspace = true }
+hdrhistogram = "7"
+
+# Optional: SIMD batch verification utilities (we use the parallel-sign path
+# via rayon; q-crypto-simd's hashing helpers are batched via BLAKE3 tree mode)
+blake3 = { version = "1.5", features = ["rayon"] }

@@ -98,6 +98,32 @@ Emit events on:
 
 Run for up to 1 hour; user can stop earlier with TaskStop on the Monitor.
 
+### Phase 4 — Post-deploy verification (MANDATORY on production restart)
+
+If the user promotes the new binary to production (i.e. the cowboy path:
+SCP binary into the deploy dir, update the `q-api-server-stable` symlink,
+`systemctl restart q-api-server`), the skill MUST run
+`helpers/verify_post_deploy.sh $VERSION` afterward. It checks four things:
+
+1. The running PID's `/proc/$pid/exe` actually resolves to the new
+   versioned binary (catches "symlink swap forgotten" / "systemd cached
+   old path" mistakes).
+2. `GET /api/v1/status` returns a height (catches "service active but
+   binary panicked silently" — systemd will report active even when the
+   inner process exited on a bad path).
+3. The height advances over a 15-second sample (catches "service up but
+   wedged on a bad migration" — important for any release that changes
+   storage schema or balance accounting).
+4. **The operator's wallet balance is intact.** Signed via X-Wallet-Auth
+   against `/api/v1/wallets/$WALLET/balance`. This is the single most
+   important post-deploy check: it confirms that (a) the new binary's
+   auth path still works, (b) the agent's QUG balance was not zeroed or
+   regressed by the new release. The skill bit this gap on its first
+   real invocation 2026-05-21; the operator caught it.
+
+Skip this phase ONLY if you didn't touch production — pure docker-test
+runs don't need it.
+
 ## Final report shape
 
 ```
