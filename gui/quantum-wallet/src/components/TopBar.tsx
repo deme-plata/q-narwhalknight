@@ -13,6 +13,7 @@ import NetworkPowerModal from './NetworkPowerModal';
 import WebGpuMinerModal from './WebGpuMinerModal';
 import AgentTerminalModal from './AgentTerminalModal';
 import PapersLibraryModal from './PapersLibraryModal';
+import QFluxStatsPill from './QFluxStatsPill';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
 
@@ -1588,6 +1589,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               <span className="text-sm font-bold font-mono leading-tight text-amber-100">#{liveBlockHeight.toLocaleString()}</span>
               <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Block</span>
             </div>
+
+            {/* q-flux edge analytics — public pill, hover for full breakdown */}
+            <QFluxStatsPill />
 
             {/* Peers — clickable */}
             <motion.button
