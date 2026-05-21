@@ -10,6 +10,11 @@
 //! TODO: add Pause/Resume Mining menu items once we have a stable handle on
 //! the miner state. Add per-token balance preview in the tray tooltip.
 
+// ComponentHandle brings .show() / .hide() / .as_weak() into scope on the
+// generated AppWindow type. Without this import, `app.show()` fails to
+// resolve under cross-compile targets (and fails for the same reason on
+// native — we just happened not to call show() from this module before).
+use slint::ComponentHandle;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIcon, TrayIconBuilder, TrayIconEvent,
