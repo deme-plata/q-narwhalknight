@@ -464,6 +464,132 @@ pub async fn health_check_simple() -> Result<Json<ApiResponse<String>>, StatusCo
     Ok(Json(ApiResponse::success("OK".to_string())))
 }
 
+/// v10.11.0 BalanceRootV2 visibility (Arc A v10.10.16 V1.1).
+///
+/// Response payload for `GET /api/v1/integrity/balance-root` — a read-only,
+/// no-auth surface that exposes both balance-root flavors so operators can
+/// cross-diff across nodes via the companion script
+/// `tools/quillon-wallet-mcp/cross_node_root_diff.mjs`.
+///
+/// `root_v1` and `root_v2_smt` use different domain separators
+/// ("balance_root_v1" flat-hash vs SMT BLAKE3 with "smt_leaf_v2"/"smt_node_v2"
+/// tags), so they are NEVER expected to agree byte-for-byte on the same
+/// node. The `roots_agree` field is therefore informational only; the real
+/// signal is comparing the SAME hash flavor across different nodes.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BalanceRootIntegrity {
+    /// Current local chain height (cached atomic).
+    pub height: u64,
+    /// v1 flat-hash balance root over sorted (addr, balance) pairs.
+    /// Hex-encoded BLAKE3 with domain separator "balance_root_v1".
+    pub root_v1: String,
+    /// v2 Sparse Merkle Tree root (currently shadow / dormant on mainnet).
+    /// Hex-encoded BLAKE3 over the SMT with "smt_leaf_v2"/"smt_node_v2"
+    /// domain tags. This is the value future block validators will commit
+    /// to once BalanceRootV2 activates.
+    pub root_v2_smt: String,
+    /// Informational: do the two hashes happen to byte-match? Always false
+    /// because the schemes differ — included only as a sanity check that
+    /// neither came back as all-zeros.
+    pub roots_agree: bool,
+    /// `"ready"` — SMT has at least one wallet applied (root != genesis).
+    /// `"missing"` — SMT cached root equals genesis_root despite the wallet
+    ///               table being non-empty (rebuild needed).
+    /// `"empty"` — both SMT and wallet table are empty (genesis state).
+    pub smt_state: String,
+    /// Number of wallets in the wallet table at the moment of compute.
+    pub wallet_count: usize,
+    /// Total supply summed across the wallet table, in display-QUG (24-decimal
+    /// fixed-point string, e.g. `"21025.000000000000000000000000"`).
+    pub total_supply_qug: String,
+}
+
+/// v10.11.0 BalanceRootV2 visibility — `GET /api/v1/integrity/balance-root`.
+///
+/// Read-only, no-auth. Computes both v1 (flat hash) and v2 (SMT) balance
+/// roots for the current wallet table. Designed for operator cross-node
+/// diff: any two nodes serving the same chain should produce identical
+/// `root_v1` AND identical `root_v2_smt` values. If they don't, state has
+/// silently diverged — see `tools/quillon-wallet-mcp/cross_node_root_diff.mjs`
+/// for the cross-node check, and `qnk_balance_root_v2_*` Prometheus series
+/// for time-series visibility.
+///
+/// **Why no auth:** the returned hashes are commitments to public state.
+/// They reveal no per-wallet information beyond what `/api/v1/health`
+/// already exposes (wallet_count + total_supply). Operator-facing
+/// observability needs to be scrapeable from monitoring boxes without
+/// distributing wallet credentials.
+///
+/// **Cost:** one full wallet-table load + one sort + 1 BLAKE3 over N
+/// entries for v1. v2 SMT root is a cached read (free). On a 12K-wallet
+/// table, total compute is well under 100ms.
+pub async fn balance_root_integrity(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<BalanceRootIntegrity>>, StatusCode> {
+    let current_height = state
+        .current_height_atomic
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // v2 SMT root — sync cached read.
+    let smt_root_bytes = state.storage_engine.balance_smt.root();
+    let smt_genesis = state.storage_engine.balance_smt.genesis_root();
+    let smt_is_genesis = smt_root_bytes == smt_genesis;
+
+    // v1 flat-hash root — fresh compute (operator wants truth, not cache).
+    let v1_root = match state.storage_engine.compute_balance_root_for_block().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "[INTEGRITY] balance_root_integrity: v1 compute_balance_root_for_block failed: {}",
+                e
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Wallet count + total supply — also fresh.
+    let (_state_hash, wallet_count, total_supply) =
+        match state.storage_engine.compute_balance_state_hash().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "[INTEGRITY] balance_root_integrity: compute_balance_state_hash failed: {}",
+                    e
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+    let smt_state = if smt_is_genesis {
+        if wallet_count == 0 { "empty" } else { "missing" }
+    } else {
+        "ready"
+    };
+
+    // Update Prometheus signals — best-effort, no failure path.
+    if let Some(m) = state.network_metrics.as_ref() {
+        m.balance_root_v2_smt_ready
+            .set(if smt_state == "ready" { 1 } else { 0 });
+        m.balance_root_v2_query_total.inc();
+    }
+
+    let total_supply_qug = format!(
+        "{}.{:024}",
+        total_supply / 1_000_000_000_000_000_000_000_000u128,
+        total_supply % 1_000_000_000_000_000_000_000_000u128
+    );
+
+    Ok(Json(ApiResponse::success(BalanceRootIntegrity {
+        height: current_height,
+        root_v1: hex::encode(v1_root),
+        root_v2_smt: hex::encode(smt_root_bytes),
+        roots_agree: v1_root == smt_root_bytes,
+        smt_state: smt_state.to_string(),
+        wallet_count,
+        total_supply_qug,
+    })))
+}
+
 /// v10.9.27: Prometheus-format `/metrics` endpoint.
 ///
 /// Returns the full network observability snapshot in OpenMetrics text

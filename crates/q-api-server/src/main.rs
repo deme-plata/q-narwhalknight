@@ -25486,6 +25486,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/health", get(handlers::health_check))
         .route("/api/v1/health", get(handlers::health_check))
         .route("/api/v1/health/simple", get(handlers::health_check_simple))
+        // v10.11.0 BalanceRootV2 visibility (Arc A v10.10.16 V1.1) —
+        // no-auth read-only integrity surface. Cross-diff via
+        // tools/quillon-wallet-mcp/cross_node_root_diff.mjs.
+        .route("/api/v1/integrity/balance-root", get(handlers::balance_root_integrity))
         // v10.9.27: Prometheus-format /metrics — the diagnostic endpoint for
         // "why doesn't sync work" questions. See handlers::metrics_endpoint
         // for the full list of emitted families. No auth — metrics are

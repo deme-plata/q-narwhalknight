@@ -201,6 +201,24 @@ pub struct NetworkMetrics {
     /// Open file descriptors held by this process.
     pub open_fds: Gauge,
 
+    /// v10.11.0 BalanceRootV2 visibility (Arc A v10.10.16 V1.3).
+    /// 1 when the in-memory SMT root differs from genesis_root (i.e. SMT
+    /// has at least one wallet applied); 0 when SMT is still at genesis
+    /// (either fresh-start or rebuild in progress). Refreshed on every
+    /// /api/v1/integrity/balance-root request.
+    pub balance_root_v2_smt_ready: Gauge,
+
+    /// v10.11.0 BalanceRootV2 visibility — counts /integrity/balance-root
+    /// queries. SLO signal that the divergence-detection surface is being
+    /// scraped by operators / monitoring.
+    pub balance_root_v2_query_total: Counter,
+
+    /// v10.11.0 BalanceRootV2 visibility — counts successful SMT rebuilds
+    /// triggered via the (future v10.10.17) /integrity/rebuild-smt
+    /// endpoint or operator CLI. Stays at 0 in v10.11.0; forward-declared
+    /// so the metric surface is stable for downstream scrapers.
+    pub balance_root_v2_rebuild_total: Counter,
+
     // ── Snapshot helpers ────────────────────────────────────────────
 
     /// Per-peer last-seen wall-clock seconds. Not a Prometheus metric
@@ -393,6 +411,28 @@ impl NetworkMetrics {
             open_fds.clone(),
         );
 
+        // v10.11.0 BalanceRootV2 visibility (Arc A v10.10.16 V1.3).
+        let balance_root_v2_smt_ready = Gauge::default();
+        registry.register(
+            "qnk_balance_root_v2_smt_ready",
+            "1 if the balance_root_v2 SMT has at least one wallet applied (root != genesis_root); 0 otherwise",
+            balance_root_v2_smt_ready.clone(),
+        );
+
+        let balance_root_v2_query_total = Counter::default();
+        registry.register(
+            "qnk_balance_root_v2_query_total",
+            "Total /api/v1/integrity/balance-root queries served — operators use this for cross-node SMT-root divergence detection",
+            balance_root_v2_query_total.clone(),
+        );
+
+        let balance_root_v2_rebuild_total = Counter::default();
+        registry.register(
+            "qnk_balance_root_v2_rebuild_total",
+            "Total successful balance_root_v2 SMT rebuilds (operator-triggered). Forward-declared in v10.11.0; incrementer ships in v10.10.17 /integrity/rebuild-smt endpoint",
+            balance_root_v2_rebuild_total.clone(),
+        );
+
         let start_time_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -425,6 +465,9 @@ impl NetworkMetrics {
             rss_bytes,
             db_size_bytes,
             open_fds,
+            balance_root_v2_smt_ready,
+            balance_root_v2_query_total,
+            balance_root_v2_rebuild_total,
             peer_last_seen_secs: Arc::new(dashmap::DashMap::new()),
             start_time_unix_secs,
             rx_bytes_total: Arc::new(AtomicU64::new(0)),
