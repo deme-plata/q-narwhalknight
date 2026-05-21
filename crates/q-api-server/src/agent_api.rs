@@ -265,62 +265,65 @@ pub async fn submit_batch(
         );
     }
 
-    // Allocate the nonce range atomically. The nonce_tracker's get_and_increment
-    // is sequential per-wallet, so calling it N times in a tight loop yields
-    // [first..=last]. The first/last get reported back.
+    // v10.10.15: Parallel batch submission.
+    //
+    // Pre-v10.10.15 this loop was strictly sequential — `for ... await` on
+    // submit_transaction per item, meaning a 1000-tx batch sequentialized
+    // through ~5 ms × 1000 = ~5 s at handler level alone. Now we:
+    //
+    //  1. Allocate the FULL nonce range up front via NonceTracker::allocate_range
+    //     (one atomic DashMap op for the whole batch, instead of N).
+    //  2. Build + submit each tx in its own future.
+    //  3. join_all the futures so they run concurrently on the tokio scheduler,
+    //     bounded only by the mempool RwLock + libp2p mutex (the structural
+    //     bottlenecks tracked for v10.10.16).
+    //
+    // Response ordering preserved (join_all returns in input order). Per-item
+    // success/error semantics unchanged — best-effort batch atomicity per
+    // AFL-1 spec §4.2.
     let now = chrono::Utc::now();
-    let first_nonce = state.nonce_tracker.get_and_increment(&auth.address);
-    let mut items = Vec::with_capacity(body.transactions.len());
-    let mut accepted = 0usize;
-    let mut rejected = 0usize;
+    let total = body.transactions.len();
+    let first_nonce = state.nonce_tracker.allocate_range(&auth.address, total as u64);
 
-    // First intent uses first_nonce; the rest pull sequential nonces.
-    for (idx, intent) in body.transactions.iter().enumerate() {
-        let nonce = if idx == 0 {
-            first_nonce
-        } else {
-            state.nonce_tracker.get_and_increment(&auth.address)
-        };
-
-        let tx = match build_tx_from_intent(intent, auth.address, nonce, now) {
-            Ok(t) => t,
-            Err(reason) => {
-                rejected += 1;
-                items.push(AgentBatchItem {
-                    tx_id: format!("0x{}", "0".repeat(64)),
-                    assigned_nonce: nonce,
-                    status: "rejected".to_string(),
-                    reason: Some(reason),
-                });
-                continue;
+    use futures::future::join_all;
+    let item_futures = body.transactions.iter().enumerate().map(|(idx, intent)| {
+        let state_arc = state.clone();
+        let auth_addr = auth.address;
+        let intent_clone = intent.clone();
+        let nonce = first_nonce + idx as u64;
+        async move {
+            let tx = match build_tx_from_intent(&intent_clone, auth_addr, nonce, now) {
+                Ok(t) => t,
+                Err(reason) => {
+                    return AgentBatchItem {
+                        tx_id: format!("0x{}", "0".repeat(64)),
+                        assigned_nonce: nonce,
+                        status: "rejected".to_string(),
+                        reason: Some(reason),
+                    };
+                }
+            };
+            let tx_id = tx.id;
+            let result = transaction_utils::submit_transaction(
+                tx,
+                &state_arc.tx_pool,
+                &state_arc.tx_status,
+                state_arc.production_mempool.as_ref(),
+                state_arc.libp2p_discovery.as_ref(),
+            ).await;
+            AgentBatchItem {
+                tx_id: format!("0x{}", hex::encode(tx_id)),
+                assigned_nonce: nonce,
+                status: if result.queued_for_block { "queued".to_string() } else { "rejected".to_string() },
+                reason: if result.queued_for_block { None } else { Some("mempool refused".to_string()) },
             }
-        };
-        let tx_id = tx.id;
-        let result = transaction_utils::submit_transaction(
-            tx,
-            &state.tx_pool,
-            &state.tx_status,
-            state.production_mempool.as_ref(),
-            state.libp2p_discovery.as_ref(),
-        ).await;
-
-        if result.queued_for_block {
-            accepted += 1;
-        } else {
-            // Tx hit mempool refusal (signature/fee/format gate). Still report
-            // its tx_id so caller can correlate. Status = rejected, no specific
-            // reason from the mempool since it doesn't propagate one back here.
-            rejected += 1;
         }
-        items.push(AgentBatchItem {
-            tx_id: format!("0x{}", hex::encode(tx_id)),
-            assigned_nonce: nonce,
-            status: if result.queued_for_block { "queued".to_string() } else { "rejected".to_string() },
-            reason: if result.queued_for_block { None } else { Some("mempool refused".to_string()) },
-        });
-    }
+    });
+    let items: Vec<AgentBatchItem> = join_all(item_futures).await;
+    let accepted = items.iter().filter(|i| i.status == "queued").count();
+    let rejected = total - accepted;
 
-    let last_nonce = first_nonce + (body.transactions.len() as u64).saturating_sub(1);
+    let last_nonce = first_nonce + (total as u64).saturating_sub(1);
     let response = AgentBatchResponse {
         items,
         first_nonce,

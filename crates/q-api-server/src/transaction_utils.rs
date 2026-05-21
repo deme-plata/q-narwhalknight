@@ -42,6 +42,20 @@ impl NonceTracker {
         nonce
     }
 
+    /// v10.10.15: Atomically reserve a contiguous range of `count` nonces for a wallet.
+    /// Returns the FIRST nonce in the range. Caller is expected to use
+    /// `[first, first + count)` for the next `count` transactions.
+    ///
+    /// Used by the parallel `submit_batch` handler at `agent_api.rs`: pre-allocating
+    /// the whole range up front lets all batch items be built + submitted in parallel
+    /// without contending on `get_and_increment`. Replaces N atomic ops with 1.
+    pub fn allocate_range(&self, wallet: &Address, count: u64) -> u64 {
+        let mut entry = self.nonces.entry(*wallet).or_insert(0);
+        let first = *entry;
+        *entry += count;
+        first
+    }
+
     /// Get the current nonce for a wallet without incrementing
     pub fn get_current(&self, wallet: &Address) -> u64 {
         self.nonces.get(wallet).map(|v| *v).unwrap_or(0)
