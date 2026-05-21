@@ -16,6 +16,7 @@ members = [
     "crates/q-fairqueue",
     "crates/q-tor-client",     # Re-enabled: Fixed dependency compatibility
     "crates/q-tor-circuit",    # Re-enabled: Fixed Tor library compatibility
+    "crates/q-egress-audit",   # 2026-05-21: pre-Tor/WireGuard structured leak gate (task #38)
     # "crates/q-bitcoin-bridge", # New: Bitcoin network bridge for anonymous peer discovery - DEACTIVATED
     "crates/q-dandelion",
     # "crates/q-dns-phantom",    # DEACTIVATED
