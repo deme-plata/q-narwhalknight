@@ -9,6 +9,7 @@ import SmartContractModal from './SmartContractModal';
 import NetworkMapModal from './NetworkMapModal';
 import ThemeChooserModal from './ThemeChooserModal';
 import MinerLinkModal from './MinerLinkModal';
+import NetworkPowerModal from './NetworkPowerModal';
 import WebGpuMinerModal from './WebGpuMinerModal';
 import AgentTerminalModal from './AgentTerminalModal';
 import PapersLibraryModal from './PapersLibraryModal';
@@ -320,6 +321,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [recentInboxItems, setRecentInboxItems] = useState<any[]>([]);
   const walletAddr = useMemo(() => localStorage.getItem('walletAddress') || '', []);
   const [showMinerLinkModal, setShowMinerLinkModal] = useState(false);
+  const [showNetworkPowerModal, setShowNetworkPowerModal] = useState(false);
   const [showWebGpuMiner, setShowWebGpuMiner] = useState(false);
   const [showAgentTerminal, setShowAgentTerminal] = useState(false);
   const [showPapersLibrary, setShowPapersLibrary] = useState(false);
@@ -1574,12 +1576,15 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Peers</span>
             </motion.button>
 
-            {/* Network power — always visible */}
+            {/* Network power — always visible, click to open NetworkPowerModal (same as MiningDashboard) */}
             <motion.div
-              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[72px]"
+              className="flex flex-col items-center px-3 py-1 rounded-xl min-w-[72px] cursor-pointer"
               style={{ background: 'rgba(139,92,246,0.1)', border: '1px solid rgba(139,92,246,0.28)' }}
               animate={{ borderColor: networkHashrate > 0 ? 'rgba(139,92,246,0.45)' : 'rgba(139,92,246,0.2)' }}
-              title="Total Network Mining Power"
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              title="Total Network Mining Power — click for miner list + hashrate history"
+              onClick={() => setShowNetworkPowerModal(true)}
             >
               <span className="flex items-center gap-1 text-violet-200 text-sm font-bold leading-tight">
                 <motion.span animate={{ scale: [1, 1.15, 1] }} transition={{ duration: 1.8, repeat: Infinity }}>
@@ -2570,6 +2575,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         isOpen={showMinerLinkModal}
         onClose={() => setShowMinerLinkModal(false)}
         minerLink={minerLink}
+      />
+
+      {/* v10.10.12: Network Power Modal — opened from the "Net Power" badge in the top bar.
+          Same modal as the one on the Mining page; uses live networkHashrate +
+          networkMiners state. */}
+      <NetworkPowerModal
+        isOpen={showNetworkPowerModal}
+        onClose={() => setShowNetworkPowerModal(false)}
+        networkHashRate={networkHashrate}
+        connectedMiners={networkMiners}
       />
 
       {/* v10.10.0: Browser WebGPU miner (PR #94 companion) */}
