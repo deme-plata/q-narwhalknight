@@ -424,6 +424,9 @@ mod tests {
             anchor_state: [0u8; 32],
             tip_height: 999_999,
             folded_state: arb_root(99),
+            // step_count value is arbitrary in a forgery — the
+            // commitment-binding check fires first regardless.
+            step_count: 0,
         };
         let err = verify(&forged, 0, [0u8; 32]).unwrap_err();
         assert!(

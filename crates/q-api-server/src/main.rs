@@ -10021,10 +10021,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         "🔍 Checking gossipsub_rx_opt status: is_some={}",
         gossipsub_rx_opt.is_some()
     );
-    if let Some(mut gossipsub_rx) = gossipsub_rx_opt {
-        let app_state_gossip = app_state.clone();
-        let response_map_for_gossipsub = turbo_sync_response_map.clone();
+    if let Some(gossipsub_rx) = gossipsub_rx_opt {
+        // v10.10.11: Supervisor pattern — the inner consumer task historically
+        // died silently mid-loop and the swarm event handler then warn-spammed
+        // "channel closed" once per inbound gossip message (see the May-20 2026
+        // v10.10.10-fresh incident). The supervisor catches a panic, increments
+        // `qnk_gossipsub_consumer_restarts`, sleeps 500ms, and respawns. A clean
+        // exit (sender dropped) means the network manager is shutting down, so
+        // we exit too. The `Arc<Mutex<Receiver>>` lets the receiver outlive each
+        // inner task and be re-locked on respawn.
+        let app_state_gossip_outer = app_state.clone();
+        let response_map_for_gossipsub_outer = turbo_sync_response_map.clone();
+        let gossipsub_rx_arc =
+            std::sync::Arc::new(tokio::sync::Mutex::new(gossipsub_rx));
         tokio::spawn(async move {
+            let mut restarts: u64 = 0;
+            loop {
+                let rx_inner = gossipsub_rx_arc.clone();
+                let app_state_gossip = app_state_gossip_outer.clone();
+                let response_map_for_gossipsub = response_map_for_gossipsub_outer.clone();
+                let handle = tokio::spawn(async move {
+                    let mut gossipsub_rx_guard = rx_inner.lock().await;
+                    let gossipsub_rx: &mut tokio::sync::mpsc::Receiver<(String, Vec<u8>)> =
+                        &mut *gossipsub_rx_guard;
             info!("📨 Starting gossipsub transaction/block synchronization processor...");
 
             // v6.1.0: OOM PREVENTION - Limit concurrent block processing tasks
@@ -16162,7 +16181,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
             }
             warn!("📨 Gossipsub processor channel closed");
-        });
+                }); // close inner consumer tokio::spawn
+                match handle.await {
+                    Ok(()) => {
+                        warn!("📨 [GOSSIP SUPERVISOR] consumer exited cleanly (sender dropped) — STOPPING supervisor");
+                        break;
+                    }
+                    Err(e) if e.is_panic() => {
+                        restarts += 1;
+                        error!(
+                            "📨 [GOSSIP SUPERVISOR] consumer panicked (restart #{}): {:?}",
+                            restarts, e
+                        );
+                        if let Some(m) = &app_state_gossip_outer.network_metrics {
+                            m.gossipsub_consumer_restarts.inc();
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Err(e) => {
+                        error!("📨 [GOSSIP SUPERVISOR] inner task cancelled: {:?}", e);
+                        break;
+                    }
+                }
+            } // close `loop {`
+        }); // close outer supervisor tokio::spawn
         info!("✅ Gossipsub transaction/block synchronization enabled");
 
         // ========================================

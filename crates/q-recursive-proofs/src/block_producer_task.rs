@@ -124,8 +124,14 @@ where
 struct FolderStrategy<F, B, C> {
     folder: Arc<LatticeStepFolder>,
     circuit_builder: B,
-    _f: std::marker::PhantomData<F>,
-    _c: std::marker::PhantomData<C>,
+    // `fn() -> T` variant: PhantomData is always `Send + Sync` regardless
+    // of whether `T` is. The `StepProofSource` supertrait requires this
+    // struct to be `Send + Sync`, but `C: ConstraintSynthesizer<F>` does
+    // not (and cannot — arkworks constraint synthesisers are not
+    // Send/Sync in general). The fn-pointer indirection erases the
+    // auto-trait dependency on `C`.
+    _f: std::marker::PhantomData<fn() -> F>,
+    _c: std::marker::PhantomData<fn() -> C>,
 }
 
 impl<F, B, C> StepProofSource for FolderStrategy<F, B, C>

@@ -173,8 +173,12 @@ pub struct TipProofJson {
 /// `/tip/health` body — liveness check.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TipProofHealthJson {
-    pub status: &'static str,
-    pub proof_version: &'static str,
+    // `String` (not `&'static str`) so the type round-trips through
+    // serde — deserializing a borrowed &str from an owned Vec<u8> body
+    // fails the borrow-checker. Owned heap storage is irrelevant here:
+    // this struct is constructed once per HTTP request.
+    pub status: String,
+    pub proof_version: String,
     pub tip_height: u64,
     pub step_count: usize,
     pub anchor_height: u64,
@@ -254,8 +258,8 @@ pub fn handle_get_tip_stats(service: &TipProofService) -> HttpResponse {
 pub fn handle_get_tip_health(service: &TipProofService) -> HttpResponse {
     let (anchor_height, _) = service.anchor();
     let envelope = TipProofHealthJson {
-        status: "ok",
-        proof_version: service.proof_version(),
+        status: "ok".to_string(),
+        proof_version: service.proof_version().to_string(),
         tip_height: service.tip_height(),
         step_count: service.step_count(),
         anchor_height,

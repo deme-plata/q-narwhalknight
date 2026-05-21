@@ -3601,7 +3601,14 @@ impl TurboSyncManager {
                         }
                     }
                     Err(e) => {
-                        warn!("🔍 [CHECKPOINT PROBE] height={} peer={} ERROR: {}", height, url, e);
+                        let __probe_subkey = format!("h={}", height / 1000);
+                        if let Some(suppressed) = CHECKPOINT_PROBE_LIMITER.check(&__probe_subkey) {
+                            if suppressed > 0 {
+                                warn!("🔍 [CHECKPOINT PROBE] height~{}k ERROR: {} (+{} suppressed)", height / 1000, e, suppressed);
+                            } else {
+                                warn!("🔍 [CHECKPOINT PROBE] height={} peer={} ERROR: {}", height, url, e);
+                            }
+                        }
                         continue;
                     }
                 }
@@ -4518,29 +4525,37 @@ impl TurboSyncManager {
 
         if qualified.is_empty() {
             // ✅ v0.9.6-beta: LOUD ERROR logging for critical peer discovery failure
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            error!("🚨 CRITICAL: NO PEERS AVAILABLE FOR SYNC!");
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            error!("   Target height: {}", target_height);
-            error!("   Peers in registry: {}", registry.len());
-            error!("   Peers filtered by trust: {}", banned_count);
-            error!("");
-            error!("🔍 TROUBLESHOOTING:");
-            error!("   1. Check if bootstrap peers are configured (Q_BOOTSTRAP_PEERS)");
-            error!("   2. Verify libp2p peer discovery is working (check for CONNECTION logs)");
-            error!("   3. Ensure peer height announcements are being received (check gossipsub)");
-            error!("   4. Check if peer registry is being populated from libp2p discoveries");
-            error!("   5. Check if peers are banned due to low trust scores");
-            error!("");
-            error!("📋 Peer Registry Contents:");
-            for (peer, height) in registry.iter() {
-                let trust = self.peer_trust.get_trust_score(&peer.to_string()).unwrap_or(0.5);
-                error!("   • Peer {} has height {}, trust: {:.2}", peer, height, trust);
+            // v10.10.11: rate-limit the entire 10-line banner — fires once every 30s.
+            // If fewer registry peers exist than before, the suppressed count tells you.
+            if let Some(suppressed) = NO_PEERS_LIMITER.check("global") {
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                if suppressed > 0 {
+                    error!("🚨 CRITICAL: NO PEERS AVAILABLE FOR SYNC! (+{} suppressed in last 30s)", suppressed);
+                } else {
+                    error!("🚨 CRITICAL: NO PEERS AVAILABLE FOR SYNC!");
+                }
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                error!("   Target height: {}", target_height);
+                error!("   Peers in registry: {}", registry.len());
+                error!("   Peers filtered by trust: {}", banned_count);
+                error!("");
+                error!("🔍 TROUBLESHOOTING:");
+                error!("   1. Check if bootstrap peers are configured (Q_BOOTSTRAP_PEERS)");
+                error!("   2. Verify libp2p peer discovery is working (check for CONNECTION logs)");
+                error!("   3. Ensure peer height announcements are being received (check gossipsub)");
+                error!("   4. Check if peer registry is being populated from libp2p discoveries");
+                error!("   5. Check if peers are banned due to low trust scores");
+                error!("");
+                error!("📋 Peer Registry Contents:");
+                for (peer, height) in registry.iter() {
+                    let trust = self.peer_trust.get_trust_score(&peer.to_string()).unwrap_or(0.5);
+                    error!("   • Peer {} has height {}, trust: {:.2}", peer, height, trust);
+                }
+                if registry.is_empty() {
+                    error!("   (EMPTY - This is the problem! No peers discovered.)");
+                }
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
             }
-            if registry.is_empty() {
-                error!("   (EMPTY - This is the problem! No peers discovered.)");
-            }
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         } else {
             info!("📡 [PEER TRUST] Found {} trusted peers with height >= {} (sorted by trust)",
                   qualified.len(), target_height);
@@ -6300,9 +6315,18 @@ impl TurboSyncManager {
                             }
 
                             // 💥 v1.3.9-beta: Direct request error
-                            error!("💥 [P2P DIRECT ERROR] Request failed: {:?}", e);
-                            error!("   Range: {}..={}", start_height, end_height);
-                            error!("   Peer: {} (score decreased)", peer);
+                            // v10.10.11: rate-limit per-peer 10s window (preserves per-peer visibility)
+                            let __peer_subkey = format!("req-{}", peer);
+                            if let Some(suppressed) = P2P_DIRECT_ERROR_LIMITER.check(&__peer_subkey) {
+                                if suppressed > 0 {
+                                    error!("💥 [P2P DIRECT ERROR] Request failed peer={} range={}..={}: {:?} (+{} suppressed)",
+                                           peer, start_height, end_height, e, suppressed);
+                                } else {
+                                    error!("💥 [P2P DIRECT ERROR] Request failed: {:?}", e);
+                                    error!("   Range: {}..={}", start_height, end_height);
+                                    error!("   Peer: {} (score decreased)", peer);
+                                }
+                            }
 
                             let local_height = self.storage.get_latest_qblock_height().await?.unwrap_or(0);
                             if start_height > local_height {
@@ -6330,9 +6354,18 @@ impl TurboSyncManager {
                         self.apollo_update_kalman(0.0, 0.0, 1.0).await;
                     }
 
-                    error!("💥 [P2P DIRECT ERROR] Response channel closed for {}..={}",
-                          start_height, end_height);
-                    error!("   Peer: {} (likely disconnected)", peer);
+                    // v10.10.11: rate-limit per-peer 10s window
+                    let __peer_subkey = format!("rsp-closed-{}", peer);
+                    if let Some(suppressed) = P2P_DIRECT_ERROR_LIMITER.check(&__peer_subkey) {
+                        if suppressed > 0 {
+                            error!("💥 [P2P DIRECT ERROR] Response channel closed peer={} range={}..={} (+{} suppressed)",
+                                   peer, start_height, end_height, suppressed);
+                        } else {
+                            error!("💥 [P2P DIRECT ERROR] Response channel closed for {}..={}",
+                                  start_height, end_height);
+                            error!("   Peer: {} (likely disconnected)", peer);
+                        }
+                    }
 
                     let local_height = self.storage.get_latest_qblock_height().await?.unwrap_or(0);
                     if start_height > local_height {
@@ -6363,12 +6396,21 @@ impl TurboSyncManager {
                     }
 
                     // ⏱️ v3.4.7-beta: Timeout logging with reduced max timeout
-                    error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    error!("⏱️  [P2P DIRECT] Chunk timeout after {:?}", dynamic_timeout);
-                    error!("    Range: {}..={}", start_height, end_height);
-                    error!("    Peer: {} (score decreased)", peer);
-                    error!("    NOTE: v3.4.7 uses 10s-45s adaptive timeout - will retry with different peer");
-                    error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    // v10.10.11: rate-limit per-peer 10s window for the 6-line banner
+                    let __peer_subkey = format!("timeout-{}", peer);
+                    if let Some(suppressed) = P2P_DIRECT_ERROR_LIMITER.check(&__peer_subkey) {
+                        error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                        if suppressed > 0 {
+                            error!("⏱️  [P2P DIRECT] Chunk timeout peer={} range={}..={} after {:?} (+{} suppressed)",
+                                   peer, start_height, end_height, dynamic_timeout, suppressed);
+                        } else {
+                            error!("⏱️  [P2P DIRECT] Chunk timeout after {:?}", dynamic_timeout);
+                            error!("    Range: {}..={}", start_height, end_height);
+                            error!("    Peer: {} (score decreased)", peer);
+                            error!("    NOTE: v3.4.7 uses 10s-45s adaptive timeout - will retry with different peer");
+                        }
+                        error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                    }
 
                     let local_height = self.storage.get_latest_qblock_height().await?.unwrap_or(0);
                     if start_height > local_height {
@@ -6698,8 +6740,17 @@ impl TurboSyncManager {
                                           start, end);
                                     return Ok((start, end));
                                 }
-                                error!("❌ Failed chunk {}-{} after {} retries with {} different peers: {}",
-                                       start, end, max_retries, max_retries.min(peer_count as u32), e);
+                                // v10.10.11: rate-limit per chunk-range 60s window
+                                let __chunk_subkey = format!("{}-{}", start, end);
+                                if let Some(suppressed) = CHUNK_RETRY_LIMITER.check(&__chunk_subkey) {
+                                    if suppressed > 0 {
+                                        error!("❌ Failed chunk {}-{} after {} retries (+{} suppressed): {}",
+                                               start, end, max_retries, suppressed, e);
+                                    } else {
+                                        error!("❌ Failed chunk {}-{} after {} retries with {} different peers: {}",
+                                               start, end, max_retries, max_retries.min(peer_count as u32), e);
+                                    }
+                                }
                                 return Err(e);
                             }
                             warn!("⚠️  Chunk {}-{} failed with peer {} (attempt {}/{}): {}",
@@ -6836,16 +6887,23 @@ impl TurboSyncManager {
         // This prevents phantom success when chunks fail to download
         if completed_chunks < total_chunks {
             let failed = total_chunks - completed_chunks;
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            error!("🚨 [TURBO SYNC] DOWNLOAD FAILED!");
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            error!("   Completed chunks: {}/{}", completed_chunks, total_chunks);
-            error!("   Failed chunks: {}", failed);
-            error!("   Success rate: {:.1}%", (completed_chunks as f64 / total_chunks as f64) * 100.0);
-            error!("");
-            error!("   This prevents phantom success - refusing to claim sync complete!");
-            error!("   Will fall back to HTTP sync for missing blocks.");
-            error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            // v10.10.11: rate-limit the 10-line banner — fires once every 60s
+            if let Some(suppressed) = DOWNLOAD_FAILED_LIMITER.check("global") {
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                if suppressed > 0 {
+                    error!("🚨 [TURBO SYNC] DOWNLOAD FAILED! (+{} suppressed in last 60s)", suppressed);
+                } else {
+                    error!("🚨 [TURBO SYNC] DOWNLOAD FAILED!");
+                }
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                error!("   Completed chunks: {}/{}", completed_chunks, total_chunks);
+                error!("   Failed chunks: {}", failed);
+                error!("   Success rate: {:.1}%", (completed_chunks as f64 / total_chunks as f64) * 100.0);
+                error!("");
+                error!("   This prevents phantom success - refusing to claim sync complete!");
+                error!("   Will fall back to HTTP sync for missing blocks.");
+                error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            }
 
             anyhow::bail!(
                 "TURBO SYNC incomplete: {}/{} chunks failed ({:.1}% success rate). \

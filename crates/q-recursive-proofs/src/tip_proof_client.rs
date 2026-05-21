@@ -272,22 +272,26 @@ impl TipProofClient {
         // Anti-rollback — refuse to downgrade the cached tip.
         {
             let guard = self.state.read().expect("RwLock poisoned");
-            if let Some(ref cached) = guard.cached {
-                if proof.tip_height <= cached.tip_height {
+            let cached_tip_height = guard.cached.as_ref().map(|c| c.tip_height);
+            if let Some(cached_tip) = cached_tip_height {
+                if proof.tip_height <= cached_tip {
+                    // Release the read guard BEFORE acquiring the write
+                    // guard. `cached_tip` was copied above, so it
+                    // outlives the borrow.
                     drop(guard);
                     let mut wg = self.state.write().expect("RwLock poisoned");
                     let reason = format!(
                         "rollback rejected: fetched tip {} <= cached tip {}",
-                        proof.tip_height, cached.tip_height
+                        proof.tip_height, cached_tip
                     );
                     wg.stats.record_rollback(reason);
                     warn!(
                         "TipProofClient: rejected rollback {} -> {}",
-                        cached.tip_height, proof.tip_height
+                        cached_tip, proof.tip_height
                     );
                     return Err(TipProofClientError::RollbackRejected {
                         fetched: proof.tip_height,
-                        cached: cached.tip_height,
+                        cached: cached_tip,
                     });
                 }
             }
@@ -343,18 +347,19 @@ impl TipProofClient {
         // Anti-rollback first (cheap, before crypto).
         {
             let guard = self.state.read().expect("RwLock poisoned");
-            if let Some(ref cached) = guard.cached {
-                if proof.tip_height <= cached.tip_height {
+            let cached_tip_height = guard.cached.as_ref().map(|c| c.tip_height);
+            if let Some(cached_tip) = cached_tip_height {
+                if proof.tip_height <= cached_tip {
                     drop(guard);
                     let mut wg = self.state.write().expect("RwLock poisoned");
                     let reason = format!(
                         "rollback rejected: fetched tip {} <= cached tip {}",
-                        proof.tip_height, cached.tip_height
+                        proof.tip_height, cached_tip
                     );
                     wg.stats.record_rollback(reason);
                     return Err(TipProofClientError::RollbackRejected {
                         fetched: proof.tip_height,
-                        cached: cached.tip_height,
+                        cached: cached_tip,
                     });
                 }
             }

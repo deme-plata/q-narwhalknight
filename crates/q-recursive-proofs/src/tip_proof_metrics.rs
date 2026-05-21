@@ -457,7 +457,12 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let sink: Arc<dyn MetricsSink> = Arc::new(VecSink::new());
+        // Hold the concrete VecSink + the dyn-trait alias separately so
+        // we can `len()` on the concrete type after threads complete
+        // without needing `Any` downcasting from the trait object.
+        let vec_sink: Arc<VecSink> = Arc::new(VecSink::new());
+        let sink: Arc<dyn MetricsSink> = vec_sink.clone();
+
         let mut handles = Vec::new();
         for tid in 0..4 {
             let s = Arc::clone(&sink);
@@ -473,10 +478,6 @@ mod tests {
 
         // Each thread emits 100 observations → 400 total. The VecSink
         // wraps a Mutex so all writes are serialised.
-        let vec_sink: &VecSink =
-            (sink.as_ref() as &dyn std::any::Any)
-                .downcast_ref::<VecSink>()
-                .expect("type known");
         assert_eq!(vec_sink.len(), 400);
     }
 }

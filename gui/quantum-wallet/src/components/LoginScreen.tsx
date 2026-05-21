@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen, Bot, Code2, Coins, GitBranch, Network, Layers, ShieldCheck, Workflow, ArrowRight, Atom, Repeat } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 // 2026-05-17: BIP39 validation imports for brainwallet hotfix (see validateSeedPhrase).
@@ -1697,33 +1697,80 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center z-[100] overflow-y-auto py-8"
+            className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-start justify-center z-[100] overflow-y-auto py-8"
             onClick={() => setShowAIModal(false)}
           >
+            {/* Floating quantum particles — bg ambience */}
+            <div className="fixed inset-0 pointer-events-none overflow-hidden">
+              {Array.from({ length: 18 }).map((_, i) => (
+                <motion.div
+                  key={`ai-particle-${i}`}
+                  className="absolute w-1 h-1 rounded-full bg-violet-400/40"
+                  initial={{
+                    x: `${(i * 53) % 100}vw`,
+                    y: `${(i * 37) % 100}vh`,
+                    opacity: 0,
+                  }}
+                  animate={{
+                    y: [`${(i * 37) % 100}vh`, `${((i * 37) % 100) - 25}vh`, `${(i * 37) % 100}vh`],
+                    opacity: [0, 0.8, 0],
+                    scale: [0.5, 1.2, 0.5],
+                  }}
+                  transition={{
+                    duration: 6 + (i % 5),
+                    repeat: Infinity,
+                    delay: i * 0.3,
+                    ease: 'easeInOut',
+                  }}
+                />
+              ))}
+            </div>
+
             <motion.div
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              initial={{ scale: 0.9, opacity: 0, y: 30 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="bg-gradient-to-br from-slate-900 via-violet-950/30 to-slate-900 border-2 border-violet-500/30 rounded-2xl p-6 max-w-lg w-full mx-4 shadow-2xl"
+              exit={{ scale: 0.9, opacity: 0, y: 30 }}
+              transition={{ type: 'spring', damping: 22, stiffness: 280 }}
+              className="relative bg-gradient-to-br from-slate-900 via-violet-950/40 to-slate-900 border-2 border-violet-500/30 rounded-2xl p-6 sm:p-8 max-w-3xl w-full mx-4 shadow-2xl"
               onClick={(e) => e.stopPropagation()}
-              style={{ boxShadow: '0 0 80px rgba(139, 92, 246, 0.25)' }}
+              style={{ boxShadow: '0 0 120px rgba(139, 92, 246, 0.35), inset 0 0 60px rgba(139, 92, 246, 0.05)' }}
             >
+              {/* Aurora border glow */}
+              <motion.div
+                className="absolute inset-0 rounded-2xl pointer-events-none"
+                animate={{
+                  background: [
+                    'radial-gradient(circle at 0% 0%, rgba(139,92,246,0.15), transparent 50%)',
+                    'radial-gradient(circle at 100% 100%, rgba(192,132,252,0.15), transparent 50%)',
+                    'radial-gradient(circle at 0% 100%, rgba(139,92,246,0.15), transparent 50%)',
+                    'radial-gradient(circle at 100% 0%, rgba(192,132,252,0.15), transparent 50%)',
+                    'radial-gradient(circle at 0% 0%, rgba(139,92,246,0.15), transparent 50%)',
+                  ],
+                }}
+                transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
+              />
+
               {/* Header */}
-              <div className="flex items-center justify-between mb-6">
+              <div className="relative flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-br from-violet-500/30 to-purple-500/30 border border-violet-500/50 flex items-center justify-center relative">
-                    <Sparkles className="w-7 h-7 text-violet-400" />
+                  <div className="w-14 h-14 rounded-full bg-gradient-to-br from-violet-500/40 to-fuchsia-500/40 border border-violet-400/60 flex items-center justify-center relative">
+                    <Sparkles className="w-8 h-8 text-violet-300" />
                     <motion.div
-                      className="absolute inset-0 rounded-full border-2 border-violet-400/30"
-                      animate={{ scale: [1, 1.3, 1], opacity: [0.5, 0, 0.5] }}
-                      transition={{ duration: 2, repeat: Infinity }}
+                      className="absolute inset-0 rounded-full border-2 border-violet-400/40"
+                      animate={{ scale: [1, 1.4, 1], opacity: [0.6, 0, 0.6] }}
+                      transition={{ duration: 2.2, repeat: Infinity }}
+                    />
+                    <motion.div
+                      className="absolute inset-0 rounded-full border border-fuchsia-400/30"
+                      animate={{ scale: [1, 1.7, 1], opacity: [0.4, 0, 0.4] }}
+                      transition={{ duration: 2.8, repeat: Infinity, delay: 0.4 }}
                     />
                   </div>
                   <div>
-                    <h2 className="text-2xl font-bold bg-gradient-to-r from-violet-400 to-purple-400 bg-clip-text text-transparent">
-                      AI Setup
+                    <h2 className="text-3xl font-black bg-gradient-to-r from-violet-300 via-fuchsia-300 to-purple-300 bg-clip-text text-transparent">
+                      Quillon Agentic AI
                     </h2>
-                    <p className="text-violet-300/60 text-sm">Manage wallet & mining with natural language</p>
+                    <p className="text-violet-300/70 text-sm">Your AI controls a quantum-resistant chain in natural language</p>
                   </div>
                 </div>
                 <button onClick={() => setShowAIModal(false)} className="p-2 hover:bg-violet-500/20 rounded-lg transition-colors">
@@ -1731,29 +1778,192 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 </button>
               </div>
 
-              {/* What you can do */}
-              <div className="mb-5 p-4 bg-violet-500/5 border border-violet-500/15 rounded-xl">
-                <p className="text-violet-200/80 text-sm mb-3 font-medium">After setup, just say in natural language:</p>
-                <div className="space-y-2">
+              {/* The headline pitch */}
+              <motion.div
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.1 }}
+                className="relative mb-6 p-4 bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-purple-500/10 border border-violet-400/25 rounded-xl"
+              >
+                <p className="text-violet-100/90 text-sm leading-relaxed">
+                  Quillon ships a <span className="font-bold text-fuchsia-300">production MCP server</span> with <span className="font-bold text-violet-300">44+ tools</span> that
+                  give an AI direct, signed-by-seed access to wallets, mining, DEX swaps, multisig proposals, post-quantum
+                  proofs, and chain analytics. <span className="text-violet-200">No browser auth. No middleman. No checkpoints trusted.</span>
+                </p>
+                {/* Animated tool count */}
+                <motion.div
+                  className="absolute -top-3 -right-3 px-3 py-1 bg-gradient-to-r from-fuchsia-500 to-violet-500 rounded-full text-xs font-black text-white shadow-lg"
+                  animate={{ scale: [1, 1.08, 1] }}
+                  transition={{ duration: 2.5, repeat: Infinity }}
+                  style={{ boxShadow: '0 0 20px rgba(217, 70, 239, 0.6)' }}
+                >
+                  v2.2.0 — 44 tools
+                </motion.div>
+              </motion.div>
+
+              {/* Capability matrix */}
+              <div className="relative mb-6">
+                <p className="text-violet-200/80 text-xs uppercase tracking-wider font-bold mb-3 flex items-center gap-2">
+                  <Layers className="w-3.5 h-3.5" />
+                  Capabilities your AI inherits
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
-                    { cmd: '"Create a wallet"', desc: 'Generate address + recovery phrase', icon: '🔐' },
-                    { cmd: '"Start mining"', desc: 'Download miner & begin earning QUG', icon: '⛏️' },
-                    { cmd: '"Create a node"', desc: 'Download & run a full network node', icon: '🖥️' },
-                    { cmd: '"What\'s my balance?"', desc: 'Check any wallet instantly', icon: '💰' },
-                    { cmd: '"Send 10 QUG to qnk..."', desc: 'Transfer funds with one sentence', icon: '🚀' },
-                    { cmd: '"Network status"', desc: 'Height, peers, hashrate', icon: '📡' },
+                    {
+                      icon: Wallet,
+                      title: 'Wallet ops',
+                      desc: 'Create / import / sign / send. Seed-derived Ed25519 + X-Wallet-Auth — no browser.',
+                      color: 'violet',
+                    },
+                    {
+                      icon: Pickaxe,
+                      title: 'Mining control',
+                      desc: 'Setup miner, start/stop, live hashrate, reward tracking. One-line setup_miner.',
+                      color: 'fuchsia',
+                    },
+                    {
+                      icon: Coins,
+                      title: 'DEX + liquidity',
+                      desc: 'Quote, swap, add LP, bootstrap pools. dex_swap uses signed X-Wallet-Auth.',
+                      color: 'purple',
+                    },
+                    {
+                      icon: ShieldCheck,
+                      title: 'Multisig (post-quantum)',
+                      desc: 'Joint-control wallets — hybrid Dilithium5 + Ed25519. Per-proposal threshold.',
+                      color: 'indigo',
+                    },
+                    {
+                      icon: Atom,
+                      title: 'Tip-proofs (10 ms verify)',
+                      desc: 'LatticeTipProof — trustless bootstrap from genesis. No checkpoint trust. PQ-safe.',
+                      color: 'blue',
+                    },
+                    {
+                      icon: Activity,
+                      title: 'Live science / observability',
+                      desc: 'engine_pulse, science_summary, speed_report, verify_node_consistency, chain_overview.',
+                      color: 'cyan',
+                    },
+                    {
+                      icon: TrendingUp,
+                      title: 'QShare yield + bot',
+                      desc: 'qshare_mint, buyback, NAV, premium ratio. Phase-2 trading-bot strategy MCP tools.',
+                      color: 'emerald',
+                    },
+                    {
+                      icon: Workflow,
+                      title: 'Agentic loops',
+                      desc: 'Closed-loop derive → mine → swap → confirm. AI scores its own tx via score_tx_dry.',
+                      color: 'pink',
+                    },
+                  ].map((cap, i) => (
+                    <motion.div
+                      key={cap.title}
+                      initial={{ opacity: 0, y: 12 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.05 * i + 0.15, type: 'spring', stiffness: 320, damping: 22 }}
+                      whileHover={{ y: -2, scale: 1.015 }}
+                      className="group relative p-3 bg-slate-800/50 border border-violet-500/15 hover:border-violet-400/40 rounded-xl transition-colors overflow-hidden"
+                    >
+                      <motion.div
+                        className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(139,92,246,0.08), rgba(217,70,239,0.04))',
+                        }}
+                      />
+                      <div className="relative flex items-start gap-2.5">
+                        <div className={`shrink-0 w-9 h-9 rounded-lg bg-${cap.color}-500/15 border border-${cap.color}-500/25 flex items-center justify-center`}>
+                          <cap.icon className={`w-4.5 h-4.5 text-${cap.color}-300`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-violet-100 text-sm leading-tight">{cap.title}</h4>
+                          <p className="text-violet-300/60 text-[11px] leading-snug mt-0.5">{cap.desc}</p>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                </div>
+              </div>
+
+              {/* The agent loop animation */}
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.6 }}
+                className="relative mb-6 p-4 bg-black/40 border border-violet-500/20 rounded-xl"
+              >
+                <p className="text-violet-200/80 text-xs uppercase tracking-wider font-bold mb-3 flex items-center gap-2">
+                  <Repeat className="w-3.5 h-3.5" />
+                  The closed agentic loop
+                </p>
+                <div className="flex items-center justify-between gap-1 sm:gap-2 flex-wrap">
+                  {[
+                    { icon: Bot, label: 'AI prompt' },
+                    { icon: Code2, label: 'MCP tool call' },
+                    { icon: Key, label: 'Seed-sign' },
+                    { icon: Network, label: 'RPC → chain' },
+                    { icon: Blocks, label: 'Block mined' },
+                    { icon: Sparkles, label: 'Result back' },
+                  ].map((step, i, arr) => (
+                    <div key={step.label} className="flex items-center gap-1 sm:gap-2 flex-1 min-w-0">
+                      <motion.div
+                        initial={{ scale: 0 }}
+                        animate={{ scale: 1 }}
+                        transition={{ delay: 0.7 + i * 0.08, type: 'spring', stiffness: 380, damping: 18 }}
+                        className="flex flex-col items-center gap-1 min-w-0"
+                      >
+                        <motion.div
+                          className="w-9 h-9 rounded-full bg-gradient-to-br from-violet-500/30 to-fuchsia-500/30 border border-violet-400/40 flex items-center justify-center"
+                          animate={{ boxShadow: ['0 0 0 rgba(139,92,246,0)', '0 0 12px rgba(139,92,246,0.5)', '0 0 0 rgba(139,92,246,0)'] }}
+                          transition={{ duration: 2.4, repeat: Infinity, delay: i * 0.4 }}
+                        >
+                          <step.icon className="w-4 h-4 text-violet-200" />
+                        </motion.div>
+                        <span className="text-[9px] text-violet-300/60 text-center truncate w-full">{step.label}</span>
+                      </motion.div>
+                      {i < arr.length - 1 && (
+                        <motion.div
+                          initial={{ scaleX: 0 }}
+                          animate={{ scaleX: 1 }}
+                          transition={{ delay: 0.75 + i * 0.08, duration: 0.3 }}
+                          className="flex-1 h-px bg-gradient-to-r from-violet-500/40 to-fuchsia-500/40 origin-left"
+                          style={{ minWidth: '8px' }}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <p className="text-center text-violet-400/40 text-[10px] mt-3 italic">
+                  First end-to-end loop closed 2026-05-17 — derive → mine → swap → confirm, fully MCP-driven.
+                </p>
+              </motion.div>
+
+              {/* What you can say */}
+              <div className="mb-6 p-4 bg-violet-500/5 border border-violet-500/15 rounded-xl">
+                <p className="text-violet-200/80 text-xs uppercase tracking-wider font-bold mb-3">Say any of these in natural language</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {[
+                    { cmd: '"Create a wallet"', desc: 'Generate address + seed phrase', icon: '🔐' },
+                    { cmd: '"Start mining"', desc: 'Download miner & earn QUG', icon: '⛏️' },
+                    { cmd: '"Send 10 QUG to qnk..."', desc: 'Seed-signed transfer', icon: '🚀' },
+                    { cmd: '"Quote a swap MOON → QUG"', desc: 'Live DEX pool depth', icon: '🔀' },
+                    { cmd: '"Propose a multisig mint"', desc: 'Joint-control PQ proposal', icon: '🤝' },
+                    { cmd: '"Tip-proof verify"', desc: '10 ms trustless bootstrap', icon: '⚛️' },
+                    { cmd: '"Speed report"', desc: 'TPS, finality, peer parity', icon: '📊' },
+                    { cmd: '"Score this tx draft"', desc: 'agent_panel reputation check', icon: '🎯' },
                   ].map((item, i) => (
                     <motion.div
-                      key={i}
-                      initial={{ opacity: 0, x: -10 }}
+                      key={item.cmd}
+                      initial={{ opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: 0.1 * i }}
-                      className="flex items-center gap-3 p-2 bg-slate-800/40 rounded-lg"
+                      transition={{ delay: 0.04 * i + 0.8 }}
+                      className="flex items-center gap-2 p-2 bg-slate-800/40 rounded-lg hover:bg-slate-800/70 transition-colors"
                     >
-                      <span className="text-lg">{item.icon}</span>
-                      <div className="flex-1">
-                        <span className="text-violet-200 text-sm font-mono">{item.cmd}</span>
-                        <span className="text-violet-400/50 text-xs ml-2">— {item.desc}</span>
+                      <span className="text-base shrink-0">{item.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-violet-200 text-xs font-mono truncate">{item.cmd}</div>
+                        <div className="text-violet-400/50 text-[10px] truncate">{item.desc}</div>
                       </div>
                     </motion.div>
                   ))}
@@ -1762,11 +1972,16 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
               {/* Setup Command */}
               <div className="mb-5">
-                <p className="text-violet-300/70 text-xs mb-2 uppercase tracking-wider font-bold">One command to set up:</p>
+                <p className="text-violet-300/70 text-xs mb-2 uppercase tracking-wider font-bold">One command to wire up your AI:</p>
                 <div className="relative group">
-                  <pre className="bg-black/60 border border-violet-500/20 rounded-xl p-4 text-sm font-mono text-violet-300 overflow-x-auto">
+                  <motion.pre
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ delay: 0.9 }}
+                    className="bg-black/70 border border-violet-500/25 rounded-xl p-4 text-sm font-mono text-violet-300 overflow-x-auto"
+                  >
                     curl -fsSL https://quillon.xyz/setup-ai.sh | bash
-                  </pre>
+                  </motion.pre>
                   <motion.button
                     className={`absolute top-2 right-2 px-3 py-1.5 ${aiCopied ? 'bg-emerald-500/30 border-emerald-400/50' : 'bg-violet-500/20 border-violet-400/30 hover:bg-violet-500/40'} border rounded-lg text-xs font-bold transition-all`}
                     whileTap={{ scale: 0.9 }}
@@ -1783,35 +1998,51 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 </div>
               </div>
 
-              {/* How it works */}
-              <div className="flex items-center gap-3 mb-5">
+              {/* How it works — 3 steps with animated arrows */}
+              <div className="flex items-center gap-2 mb-5">
                 {[
                   { step: '1', label: 'Paste in terminal', color: 'violet' },
                   { step: '2', label: 'Open AI assistant', color: 'purple' },
                   { step: '3', label: 'Say "create a wallet" or "create a node"', color: 'fuchsia' },
-                ].map((s, i) => (
-                  <div key={i} className="flex-1 text-center">
-                    <div className={`w-8 h-8 rounded-full bg-${s.color}-500/20 border border-${s.color}-400/30 flex items-center justify-center mx-auto mb-1`}>
-                      <span className={`text-sm font-black text-${s.color}-400`}>{s.step}</span>
-                    </div>
-                    <span className="text-[10px] text-violet-300/60">{s.label}</span>
+                ].map((s, i, arr) => (
+                  <div key={s.step} className="flex items-center gap-2 flex-1">
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.5 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ delay: 1.0 + i * 0.1 }}
+                      className="flex-1 text-center"
+                    >
+                      <div className={`w-9 h-9 rounded-full bg-${s.color}-500/20 border border-${s.color}-400/40 flex items-center justify-center mx-auto mb-1`}>
+                        <span className={`text-sm font-black text-${s.color}-300`}>{s.step}</span>
+                      </div>
+                      <span className="text-[10px] text-violet-300/60 px-1">{s.label}</span>
+                    </motion.div>
+                    {i < arr.length - 1 && (
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 0.5 }} transition={{ delay: 1.1 + i * 0.1 }}>
+                        <ArrowRight className="w-3.5 h-3.5 text-violet-400/50 shrink-0" />
+                      </motion.div>
+                    )}
                   </div>
                 ))}
               </div>
 
               {/* Supported AIs */}
-              <div className="p-3 bg-slate-800/40 rounded-xl border border-violet-500/10">
+              <div className="p-3 bg-slate-800/40 rounded-xl border border-violet-500/10 mb-3">
                 <p className="text-violet-300/50 text-[10px] uppercase tracking-wider font-bold mb-2">Supported AI Assistants</p>
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold">Claude Code</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Claude Code
+                  </span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">ChatGPT (coming soon)</span>
+                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">Cursor (coming soon)</span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">More TBA</span>
                 </div>
               </div>
 
               {/* Footer */}
-              <p className="text-center text-violet-400/30 text-[10px] mt-4">
-                No GPG signatures. No air-gapped computers. Just works.
+              <p className="text-center text-violet-400/40 text-[10px] italic">
+                No GPG signatures. No air-gapped computers. No browser auth dance. Just works.
               </p>
             </motion.div>
           </motion.div>

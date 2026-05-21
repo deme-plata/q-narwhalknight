@@ -310,4 +310,3 @@ export const sseManager = {
 };
 
 export default sseManager;
-import { generateAuthHeader, walletSession } from './walletAuth';

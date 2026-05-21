@@ -65,6 +65,7 @@ use ark_r1cs_std::{
     uint32::UInt32,
 };
 use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use serde::{Deserialize, Serialize};
 
 use crate::circuits::delta_block::{DeltaBlockCircuit, DeltaBlockInputs};
 
@@ -82,7 +83,7 @@ pub const STEP_Z_LEN: usize = 9;
 /// passed-by-value" type — closures, adapter constructors, and the
 /// folding driver pass it across function boundaries dozens of times
 /// per fold and any clone overhead would hurt the hot path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepIO {
     /// SMT root at this point in the chain.
     pub state_root: [u8; 32],
