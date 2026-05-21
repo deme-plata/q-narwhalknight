@@ -80,3 +80,11 @@ tokio-test = "0.4"
 name = "recursive_proof_bench"
 harness = false
 required-features = ["benchmarks"]
+
+# Path C measurement layer — measures the structural verify cost wallets pay
+# today via q-ivc-verifier-wasm. See plan at
+# /root/.claude/plans/precious-watching-clock.md (IVC + 10ms Verification).
+[[bench]]
+name = "tip_proof_verify_bench"
+harness = false
+required-features = ["benchmarks"]

@@ -60,6 +60,39 @@ pub fn verifier_ready() -> bool {
     true
 }
 
+/// The **soundness regime** this build actually delivers, distinct from the
+/// wire-format `verifier_version()`. The version string identifies the
+/// PROOF FORMAT the verifier accepts; this string identifies WHAT SOUNDNESS
+/// GUARANTEE the wallet gets if verification passes.
+///
+/// `verifier_version()` and `verification_regime()` doing the same job is a
+/// real wallet-UX trust hazard — pre-2026-05-21 wallets reported
+/// `"latticeguard-rlwe-v1"` as if lattice cryptography were running, when
+/// Phase B1 actually shipped chain-integrity-only checks (anchor binding +
+/// monotonicity + per-step state-chain continuity). This function exists so
+/// wallets render an honest banner regardless of which proof format they
+/// happen to be receiving.
+///
+/// Regimes:
+/// - `"chain-integrity-advisory"` — current default. The proof's chain of
+///   `StepIO` transitions is verified (no splicing, no anchor swap, no
+///   height regression). The per-step `LatticeGuardProof` IS NOT
+///   cryptographically verified. Wallets MUST display an advisory warning
+///   along the lines of "verified chain integrity — full cryptographic
+///   verify available in v3."
+/// - `"full-cryptographic"` — Phase C and later. The per-step proof carries
+///   real Module-SIS / lattice-fold cryptography that is verified end-to-end.
+///   Wallets can drop the advisory warning.
+///
+/// Wallet integration: read this once at startup, render a regime-specific
+/// trust banner that does NOT change with each `verify_proof_bytes` call.
+/// The verification REGIME is build-time, the verification RESULT is
+/// per-proof.
+#[wasm_bindgen]
+pub fn verification_regime() -> String {
+    "chain-integrity-advisory".to_string()
+}
+
 /// Verify a recursive proof against an expected genesis anchor + tip
 /// height.
 ///
