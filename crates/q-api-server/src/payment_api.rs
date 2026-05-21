@@ -842,6 +842,205 @@ pub async fn convert_usd_to_qugusd(
     }
 }
 
+// ============================================================================
+// Inverse: QUGUSD → USD (the missing leg of the QUG → DKK cashout pipeline)
+// ============================================================================
+
+/// Request to convert QUGUSD back to Stripe USD balance.
+/// The pipeline this fits into: QUG → [DEX swap] → QUGUSD → [convert_qugusd_to_usd]
+/// → USD → [Stripe payout] → DKK in your bank. This handler is the middle leg.
+#[derive(Debug, Deserialize)]
+pub struct ConvertFromQugusdRequest {
+    pub wallet_address: String,
+    /// QUGUSD amount in display units (e.g. "100" = 100 QUGUSD).
+    pub qugusd_amount: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConvertFromQugusdResponse {
+    pub success: bool,
+    pub qugusd_burned: String,
+    pub usd_credited: String,
+    pub conversion_fee: String,
+    pub new_qugusd_balance: String,
+    pub new_usd_balance: String,
+}
+
+/// POST /api/v1/payment/convert-from-qugusd
+/// Burn QUGUSD from the wallet's token balance and credit the equivalent USD
+/// (minus a 0.1% fee) to the wallet's Stripe USD balance. Mirrors the existing
+/// `convert_usd_to_qugusd` going the other way.
+///
+/// Requires wallet auth (same `extract_wallet_from_headers` pattern as the
+/// minting direction). 1 QUGUSD = 1 USD = 100 cents; fee taken on the USD side.
+pub async fn convert_qugusd_to_usd(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<ConvertFromQugusdRequest>,
+) -> Result<Json<ApiResponse<ConvertFromQugusdResponse>>, StatusCode> {
+    // Auth — wallet must be the caller.
+    let auth_wallet = extract_wallet_from_headers(&headers);
+    if auth_wallet.as_deref() != Some(&request.wallet_address) {
+        warn!("Unauthorized QUGUSD-to-USD redemption attempt for wallet: {}", request.wallet_address);
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Unauthorized: wallet auth header must match requested wallet".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    if let Some(resp) = check_payment_rate_limit::<ConvertFromQugusdResponse>(&state, &request.wallet_address) {
+        return Ok(resp);
+    }
+
+    info!(
+        "🔄 Redeeming QUGUSD → USD for wallet: {}, amount: {} QUGUSD",
+        request.wallet_address, request.qugusd_amount
+    );
+
+    let amount_decimal: Decimal = request.qugusd_amount.parse().map_err(|e| {
+        error!("Invalid QUGUSD amount: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
+
+    // QUGUSD base units = display * 10^16 (double-conversion format, 8-decimal token)
+    // We compute in two steps to dodge i128/Decimal precision issues: first cents (u64),
+    // then cents → base units.
+    let qugusd_cents: u64 = (amount_decimal * Decimal::from(100))
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if qugusd_cents == 0 {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some("Amount must be greater than zero".to_string()),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    let qugusd_base_units_per_cent: u128 = 100_000_000_000_000; // 10^14, mirrors mint direction
+    let qugusd_base_units: u128 = (qugusd_cents as u128) * qugusd_base_units_per_cent;
+
+    let wallet_addr_bytes = match crate::handlers::parse_wallet_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Invalid wallet address: {}", e);
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Invalid wallet address: {}", e)),
+                timestamp: chrono::Utc::now(),
+            }));
+        }
+    };
+
+    let current_qugusd = state
+        .storage_engine
+        .get_token_balance(&wallet_addr_bytes, &q_types::QUGUSD_TOKEN_ADDRESS)
+        .await
+        .unwrap_or(0);
+
+    if current_qugusd < qugusd_base_units {
+        return Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(format!(
+                "Insufficient QUGUSD balance. You have {:.4}, need {:.4}",
+                current_qugusd as f64 / 1e16,
+                qugusd_base_units as f64 / 1e16
+            )),
+            timestamp: chrono::Utc::now(),
+        }));
+    }
+
+    // 0.1% fee, taken on the USD output side (so user sees "burn 100, get 99.90 USD")
+    let fee_cents = (qugusd_cents as f64 * 0.001) as u64;
+    let usd_credit_cents = qugusd_cents - fee_cents;
+
+    // Burn QUGUSD first by overwriting balance with the lower value.
+    // (save_token_balance is a plain put — no max-wins guard at this layer;
+    // the max-wins rule from CLAUDE.md applies to save_wallet_balances on
+    // the native QUG ledger, not to token balances.)
+    let new_qugusd_total = current_qugusd - qugusd_base_units;
+    match state
+        .storage_engine
+        .save_token_balance(
+            &wallet_addr_bytes,
+            &q_types::QUGUSD_TOKEN_ADDRESS,
+            new_qugusd_total,
+        )
+        .await
+    {
+        Ok(_) => {
+            // Credit USD. If this fails, re-mint the burned QUGUSD so the user
+            // doesn't lose value to a half-completed conversion.
+            match state
+                .storage_engine
+                .credit_usd_balance(&request.wallet_address, usd_credit_cents)
+                .await
+            {
+                Ok(_) => {
+                    let new_usd_balance = state
+                        .storage_engine
+                        .get_usd_balance(&request.wallet_address)
+                        .await
+                        .unwrap_or(0);
+
+                    let qugusd_burned = qugusd_cents as f64 / 100.0;
+                    let usd_credited = usd_credit_cents as f64 / 100.0;
+                    let fee = fee_cents as f64 / 100.0;
+
+                    info!(
+                        "✅ Redeemed {:.4} QUGUSD → ${:.2} USD (fee: ${:.4})",
+                        qugusd_burned, usd_credited, fee
+                    );
+
+                    Ok(Json(ApiResponse {
+                        success: true,
+                        data: Some(ConvertFromQugusdResponse {
+                            success: true,
+                            qugusd_burned: format!("{:.4}", qugusd_burned),
+                            usd_credited: format!("{:.2}", usd_credited),
+                            conversion_fee: format!("{:.4}", fee),
+                            new_qugusd_balance: format!("{:.4}", new_qugusd_total as f64 / 1e16),
+                            new_usd_balance: format!("{:.2}", new_usd_balance as f64 / 100.0),
+                        }),
+                        error: None,
+                        timestamp: chrono::Utc::now(),
+                    }))
+                }
+                Err(e) => {
+                    error!("Failed to credit USD after QUGUSD burn: {}; re-minting QUGUSD to keep wallet whole", e);
+                    let _ = state
+                        .storage_engine
+                        .save_token_balance(
+                            &wallet_addr_bytes,
+                            &q_types::QUGUSD_TOKEN_ADDRESS,
+                            current_qugusd,
+                        )
+                        .await;
+                    Ok(Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        error: Some(format!("Failed to credit USD: {}", e)),
+                        timestamp: chrono::Utc::now(),
+                    }))
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to burn QUGUSD: {}", e);
+            Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Failed to burn QUGUSD: {}", e)),
+                timestamp: chrono::Utc::now(),
+            }))
+        }
+    }
+}
+
 /// Request to transfer USD between wallets
 #[derive(Debug, Deserialize)]
 pub struct TransferUsdRequest {
