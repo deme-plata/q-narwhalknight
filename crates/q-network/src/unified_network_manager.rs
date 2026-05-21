@@ -1830,43 +1830,23 @@ impl UnifiedNetworkManager {
         // 🌐 v2.0.0: SwarmBuilder with full transport stack (libp2p 0.56)
         // 🔥 CRITICAL PATTERN: .with_websocket() is ASYNC (needs .await?), others are sync (just ?)
         //
-        // 🧅 v10.10.12 PHASE C: when tor_policy.outbound_via_tor is enabled AND a
-        // QTorClient is initialised, register QTorTransport as an additional
-        // outbound transport. libp2p tries transports in registration order on
-        // dial; QTorTransport accepts /onion3/... natively (and clearnet too
-        // when fallback enabled), falling through MultiaddrNotSupported for
-        // anything else so the standard TCP transport handles it.
+        // 🧅 Tor Phase C (outbound libp2p via Arti): REVERTED 2026-05-21.
+        // The fe3feea7 splice (.with_other_transport with QTorTransport)
+        // failed to compile under libp2p 0.56 — three coupled root causes:
+        //   1. closure returned Result<T, io::Error>, but with_other_transport's
+        //      type-bound expects T: Transport directly, not the Result wrapper
+        //   2. QTorTransport's Output = tokio::net::TcpStream doesn't satisfy
+        //      futures::AsyncRead + AsyncWrite that .authenticate() requires —
+        //      needs a tokio_util::compat::Compat wrapper applied via .map()
+        //   3. SwarmBuilder phase order: with_other_transport returns
+        //      OtherTransportPhase, which doesn't expose .with_quic() — the
+        //      splice has to land AFTER .with_quic().with_dns()?.with_websocket()
         //
-        // The adapter at q-tor-client/src/qtor_transport.rs:144 delegates to
-        // QTorClient::connect_to_peer which uses the existing Arti circuit
-        // manager (no double-bootstrap). Output is a TcpStream that libp2p
-        // pipes Noise + Yamux over via standard upgrade machinery.
-        //
-        // 🛡️ FAIL-HONEST GATE (v10.10.12): if Q_TOR_REQUIRE_WIREGUARD=1 (default
-        // recommended posture, off until wg-bind-iface lands in task #39),
-        // refuse to enable Tor outbound when the WireGuard interface is NOT
-        // up. Reason: naked Tor traffic is MORE visible to the ISP than
-        // clearnet Quillon traffic — flagged, rate-limited, sometimes legally
-        // suspect. Under the ISP-stealth threat model, fail through to
-        // clearnet rather than expose Tor without the WireGuard wrapper.
-        // This protects the "ISP can't tell I'm using Tor" property by
-        // refusing to violate it silently.
-        let require_wireguard = std::env::var("Q_TOR_REQUIRE_WIREGUARD").ok().as_deref() == Some("1");
-        let wireguard_up = if require_wireguard {
-            // TODO(task #39): real check against bind-iface helper
-            // For now: only allow if Q_WIREGUARD_IFACE is set AND we can stat it
-            std::env::var("Q_WIREGUARD_IFACE").ok()
-                .map(|iface| std::path::Path::new(&format!("/sys/class/net/{}", iface)).exists())
-                .unwrap_or(false)
-        } else {
-            true // not requiring wg → don't gate
-        };
-        let outbound_via_tor = tor_policy.outbound_via_tor && tor_client.is_some() && wireguard_up;
-        if tor_policy.outbound_via_tor && tor_client.is_some() && require_wireguard && !wireguard_up {
-            warn!("🛡️ [FAIL-HONEST] Tor outbound requested but Q_TOR_REQUIRE_WIREGUARD=1 and WireGuard interface not up — falling through to clearnet. Set Q_TOR_REQUIRE_WIREGUARD=0 to override (NOT RECOMMENDED — exposes Tor to ISP).");
-        }
-        let qtor_for_transport = if outbound_via_tor { tor_client.clone() } else { None };
-        let qtor_clearnet_fallback = tor_policy.skip_sync_via_tor == false; // wrap clearnet too unless operator opts out
+        // All three are fixable but want a small isolated PR with cargo
+        // check before pushing. Reverting here so the rest of the workspace
+        // builds; Tor outbound stays at the v10.10.9 state (Phase A onion
+        // listener + Phase B Dandelion stem via Tor circuits — those still
+        // work). Re-do tracked at task #39 / WG-Layer-1 plumbing.
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -1874,39 +1854,6 @@ impl UnifiedNetworkManager {
                 noise::Config::new,
                 yamux::Config::default,
             )?  // Sync
-            .with_other_transport(|keypair_for_qtor| -> Result<_, std::io::Error> {
-                use libp2p::core::transport::Transport;
-                if let Some(qtor) = qtor_for_transport.as_ref() {
-                    info!("🧅 [PHASE C] Wiring QTorTransport as outbound transport (clearnet_fallback={})", qtor_clearnet_fallback);
-                    let qtor_transport = q_tor_client::QTorTransport::new(qtor.clone())
-                        .with_clearnet_fallback(qtor_clearnet_fallback);
-                    // Upgrade with Noise + Yamux so libp2p treats it as a full transport.
-                    // The Noise config closure expects the keypair by reference at upgrade time.
-                    let noise_cfg = noise::Config::new(keypair_for_qtor)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("noise init: {e}")))?;
-                    let upgraded = qtor_transport
-                        .upgrade(libp2p::core::upgrade::Version::V1)
-                        .authenticate(noise_cfg)
-                        .multiplex(yamux::Config::default())
-                        .boxed();
-                    Ok(upgraded)
-                } else {
-                    // Tor disabled or no client — return an empty pluggable transport.
-                    // Use a MemoryTransport-shaped no-op: every dial errors with
-                    // MultiaddrNotSupported so libp2p falls through to the TCP
-                    // transport above.
-                    debug!("🧅 [PHASE C] Tor outbound disabled (tor_policy.outbound_via_tor=false or no tor_client)");
-                    let noop = libp2p::core::transport::dummy::DummyTransport::new();
-                    let noise_cfg = noise::Config::new(keypair_for_qtor)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("noise init: {e}")))?;
-                    let upgraded = noop
-                        .upgrade(libp2p::core::upgrade::Version::V1)
-                        .authenticate(noise_cfg)
-                        .multiplex(yamux::Config::default())
-                        .boxed();
-                    Ok(upgraded)
-                }
-            })?
             .with_quic()  // Sync
             .with_dns()?  // Sync
             .with_websocket(
