@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown, Trophy } from 'lucide-react';
+import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown, Trophy, Bot } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 import type { MiningStatsEvent } from '../services/api';
@@ -348,6 +348,12 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   // Network power + miners (polled from /api/v1/network/supply)
   const [networkHashrate, setNetworkHashrate] = useState<number>(0);
   const [networkMiners, setNetworkMiners] = useState<number>(0);
+  // v10.10.14: Connected AI agents — opted-in agents counted via /api/v1/agents/connected
+  // (endpoint planned for v10.10.15; until then this stays at 0 and the badge shows "—")
+  const [connectedAgents, setConnectedAgents] = useState<number>(0);
+  const [connectedAgentsList, setConnectedAgentsList] = useState<Array<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number}>>([]);
+  const [chainTvl, setChainTvl] = useState<number>(0);
+  const [showAgentsModal, setShowAgentsModal] = useState(false);
 
   // Network Health Gauge — k-parameter from /api/v1/k-parameter
   const [kValue, setKValue] = useState<number>(0);
@@ -1009,6 +1015,28 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
     return () => clearInterval(interval);
   }, []);
 
+  // v10.10.14: Connected agents — opted-in AI agents publishing PvL + tx stats
+  // via /api/v1/agents/connected (planned for v10.10.15). Until that ships, the
+  // endpoint returns 404 and the badge stays at "—". Graceful no-op on failure.
+  useEffect(() => {
+    const fetchAgents = async () => {
+      try {
+        const res = await fetch('/api/v1/agents/connected');
+        if (!res.ok) return; // endpoint not deployed yet → keep showing "—"
+        const d = await res.json();
+        const data = d?.data ?? d;
+        if (Array.isArray(data?.agents)) {
+          setConnectedAgents(data.agents.length);
+          setConnectedAgentsList(data.agents);
+        }
+        if (typeof data?.chain_tvl === 'number') setChainTvl(data.chain_tvl);
+      } catch {}
+    };
+    fetchAgents();
+    const interval = setInterval(fetchAgents, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   // v3.9.2-beta: Copy wallet address to clipboard
   const copyWalletAddress = () => {
     if (walletAddr) {
@@ -1611,6 +1639,29 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 {networkMiners > 0 ? networkMiners.toLocaleString() : '—'}
               </span>
               <span className="text-orange-400/50 text-[9px] font-semibold uppercase tracking-wider">Miners</span>
+            </motion.div>
+
+            {/* v10.10.14: Connected Agents (AI peers opted-in) — always visible.
+                Click to open the agents directory modal with each opted-in agent's
+                stats (PvL — personal value locked in their wallet, win-rate,
+                tx_count_24h) + chain-wide TVL header. Backend endpoint
+                /api/v1/agents/connected (planned for v10.10.15) populates this. */}
+            <motion.div
+              className="flex flex-col items-center px-3 py-1 rounded-xl cursor-pointer min-w-[60px]"
+              style={{ background: 'rgba(217,70,239,0.08)', border: '1px solid rgba(217,70,239,0.28)' }}
+              animate={{ borderColor: connectedAgents > 0 ? 'rgba(217,70,239,0.5)' : 'rgba(217,70,239,0.2)' }}
+              whileHover={{ scale: 1.06 }}
+              whileTap={{ scale: 0.94 }}
+              title="Connected AI agents — click to see opted-in agents' PvL / TVL / stats"
+              onClick={() => setShowAgentsModal(true)}
+            >
+              <span className="flex items-center gap-1 text-fuchsia-200 text-sm font-bold leading-tight">
+                <motion.span animate={{ rotate: connectedAgents > 0 ? [0, 360] : 0 }} transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}>
+                  <Bot className="w-3 h-3 text-fuchsia-400" />
+                </motion.span>
+                {connectedAgents > 0 ? connectedAgents : '—'}
+              </span>
+              <span className="text-fuchsia-400/50 text-[9px] font-semibold uppercase tracking-wider">Agents</span>
             </motion.div>
 
             {/* Personal hashrate — only when active, click to manage */}
@@ -2590,6 +2641,104 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         networkHashRate={networkHashrate}
         connectedMiners={networkMiners}
       />
+
+      {/* v10.10.14: Connected Agents Modal — placeholder list until
+          /api/v1/agents/connected ships in v10.10.15. Shows each opted-in
+          agent's PvL + 24h tx count + win rate, plus chain-wide TVL header. */}
+      <AnimatePresence>
+        {showAgentsModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+            onClick={() => setShowAgentsModal(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 16 }}
+              className="bg-black/95 border border-fuchsia-500/30 rounded-2xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Bot className="w-5 h-5 text-fuchsia-400" />
+                  <h2 className="text-xl font-bold text-white">Connected Agents</h2>
+                  <span className="px-2 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 text-xs font-semibold">
+                    {connectedAgents} opted-in
+                  </span>
+                </div>
+                <button onClick={() => setShowAgentsModal(false)} className="text-gray-500 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="mb-5 p-3 rounded-xl bg-gradient-to-r from-fuchsia-500/10 to-violet-500/10 border border-fuchsia-500/20 flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-fuchsia-300/70 uppercase tracking-widest font-semibold">Chain TVL</p>
+                  <p className="text-2xl font-black text-white">{chainTvl > 0 ? chainTvl.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'} <span className="text-sm text-gray-400">QUG</span></p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-fuchsia-300/70 uppercase tracking-widest font-semibold">Agent share</p>
+                  <p className="text-2xl font-black text-white">
+                    {chainTvl > 0 && connectedAgentsList.length > 0
+                      ? `${((connectedAgentsList.reduce((s, a) => s + a.pvl, 0) / chainTvl) * 100).toFixed(2)}%`
+                      : '—'}
+                  </p>
+                </div>
+              </div>
+
+              {connectedAgentsList.length === 0 ? (
+                <div className="py-8 text-center text-gray-500">
+                  <Bot className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                  <p className="text-sm">No agents have opted in yet.</p>
+                  <p className="text-xs mt-2 text-gray-600">
+                    Agents that opt-in publish PvL (Personal Value Locked), 24h tx count, and win rate.
+                    Their endpoint <span className="font-mono text-fuchsia-300/60">/api/v1/agents/connected</span> ships in v10.10.15.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {connectedAgentsList.map((a) => (
+                    <div key={a.address} className="flex items-center justify-between p-3 rounded-xl bg-white/5 border border-white/10 hover:border-fuchsia-500/40 transition-colors">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-fuchsia-500 to-violet-600 flex items-center justify-center flex-shrink-0">
+                          <Bot className="w-4 h-4 text-white" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-white truncate">{a.alias || (a.address.slice(0, 12) + '…')}</p>
+                          <p className="text-[10px] text-gray-500 font-mono truncate">{a.address}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 text-right flex-shrink-0">
+                        <div>
+                          <p className="text-[10px] text-fuchsia-300/60 uppercase tracking-wider">PvL</p>
+                          <p className="text-sm font-bold text-white">{a.pvl.toLocaleString(undefined, { maximumFractionDigits: 2 })} QUG</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-fuchsia-300/60 uppercase tracking-wider">24h tx</p>
+                          <p className="text-sm font-bold text-white">{a.tx_count_24h.toLocaleString()}</p>
+                        </div>
+                        {a.win_rate !== undefined && (
+                          <div>
+                            <p className="text-[10px] text-fuchsia-300/60 uppercase tracking-wider">Win</p>
+                            <p className="text-sm font-bold text-white">{(a.win_rate * 100).toFixed(1)}%</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <p className="text-[10px] text-gray-600 text-center mt-5">
+                Opt-in is voluntary. Non-opted agents stay private. Stats are agent-self-reported via signed claims to the chain.
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* v10.10.0: Browser WebGPU miner (PR #94 companion) */}
       <WebGpuMinerModal

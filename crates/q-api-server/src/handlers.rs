@@ -5427,6 +5427,21 @@ pub async fn send_transaction_signed(
         .data(tx_data)
         .build_with_nonce(nonce, now);
 
+    // v10.10.14 fix: explicit fee. Pre-fix, fee defaulted to 0 (TransactionBuilder
+    // initializes fee: 0 unconditionally), so once v10.9.58 PR #68 tightened
+    // ProductionMempool::perform_validation from Ok(true) stub to real
+    // signature/fee/coinbase checks, every send_signed tx silently failed
+    // block-inclusion because of the zero-fee check (the API still returned
+    // success+tx_id at queue time, producing "ghost confirmations" where the
+    // explorer showed the hash but no balance delta applied — confirmed via
+    // 2026-05-21 1-QUG handshake-test that the user observed as
+    // "amount 0.000000 received"). Set to MIN_TRANSACTION_FEE so the fee check
+    // passes. The signature path is still broken (signature: vec![] empty by
+    // default; X-Wallet-Auth doesn't double as tx authorization); fixing that
+    // requires either client-pre-signing or a server-side trust flag and is
+    // tracked separately.
+    tx.fee = q_types::MIN_TRANSACTION_FEE_V1;
+
     // 7. Memo support (preserves the field used by inbox messages)
     if let Some(memo) = request.memo {
         tx.memo = Some(memo);
