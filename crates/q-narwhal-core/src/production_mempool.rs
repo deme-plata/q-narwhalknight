@@ -193,6 +193,12 @@ pub struct TxValidator {
 
     /// Signature verification cache
     verification_cache: Arc<RwLock<HashMap<TxHash, bool>>>,
+
+    /// 🛡 v10.11.1: X-Wallet-Auth trust side-table. See ProductionMempool
+    /// doc for the full bug history. Shared Arc with ProductionMempool so
+    /// the handler-side mark_auth_trusted() and the validator-side
+    /// perform_validation() see the same entries.
+    trusted_via_auth: Arc<DashMap<TxHash, ([u8; 32], std::time::Instant)>>,
 }
 
 // TorBroadcastManager is imported from tor_broadcast module
@@ -268,7 +274,11 @@ impl ProductionMempool {
         info!("   Max Age: {:?}", config.max_age);
         info!("   Min Fee/Byte: {}", config.min_fee_per_byte);
 
-        let transaction_validator = Arc::new(TxValidator::new(phase));
+        // 🛡 v10.11.1: shared trust map. Both ProductionMempool (for
+        // mark_auth_trusted from handlers) and TxValidator (for
+        // perform_validation) hold the same Arc.
+        let trusted_via_auth = Arc::new(DashMap::new());
+        let transaction_validator = Arc::new(TxValidator::new(phase, trusted_via_auth.clone()));
         let broadcast_manager =
             Arc::new(TorBroadcastManager::new(tor_client, BroadcastConfig::default()).await?);
 
@@ -277,7 +287,7 @@ impl ProductionMempool {
         Ok(Self {
             pending_transactions: Arc::new(RwLock::new(BTreeMap::new())),
             pending_nonces: DashMap::new(),
-            trusted_via_auth: Arc::new(DashMap::new()),
+            trusted_via_auth,
             transaction_validator,
             broadcast_manager,
             config,
@@ -812,10 +822,11 @@ impl SpamDetector {
 }
 
 impl TxValidator {
-    fn new(phase: Phase) -> Self {
+    fn new(phase: Phase, trusted_via_auth: Arc<DashMap<TxHash, ([u8; 32], std::time::Instant)>>) -> Self {
         Self {
             current_phase: phase,
             verification_cache: Arc::new(RwLock::new(HashMap::new())),
+            trusted_via_auth,
         }
     }
 
@@ -869,18 +880,22 @@ impl TxValidator {
             return Ok(true);
         }
 
-        // 🛡 v10.11.0a: X-Wallet-Auth trust flag. If the API layer pre-authenticated
+        // 🛡 v10.11.1: X-Wallet-Auth trust flag. If the API layer pre-authenticated
         // the caller via X-Wallet-Auth and marked this tx_id as trusted, skip the
         // inner-signature check. Still apply fee + format checks below. See the
-        // doc on the `trusted_via_auth` field for the bug history.
+        // doc on TxValidator.trusted_via_auth for the bug history.
         let tx_id = transaction.hash();
-        let auth_trusted = self.trusted_via_auth.get(&tx_id).map(|entry| {
-            let (addr, ts) = *entry.value();
-            // Only trust if the recorded address matches the tx's from. This
-            // prevents a malicious internal path from marking arbitrary tx_ids
-            // as trusted with a wrong from.
-            addr == transaction.from && ts.elapsed() < Duration::from_secs(3600)
-        }).unwrap_or(false);
+        let auth_trusted: bool = self
+            .trusted_via_auth
+            .get(&tx_id)
+            .map(|entry| {
+                let (addr, ts): ([u8; 32], std::time::Instant) = *entry.value();
+                // Only trust if the recorded address matches the tx's from. This
+                // prevents a malicious internal path from marking arbitrary tx_ids
+                // as trusted with a wrong from.
+                addr == transaction.from && ts.elapsed() < Duration::from_secs(3600)
+            })
+            .unwrap_or(false);
 
         if auth_trusted {
             debug!(
