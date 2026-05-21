@@ -75,17 +75,54 @@ const API_PATH_PREFIX = (() => {
   }
 })();
 
-async function api(path: string, method = "GET", body?: unknown): Promise<unknown> {
-  const url = `${API_BASE}${path}`;
-  const opts: RequestInit = {
+// v2.7.1: backend resolution — lets a tool pin to a specific node by shortname
+// or full URL, bypassing the LB routing roulette on https://quillon.xyz. The
+// fork divergence (Epsilon canonical 18.17M vs Delta fork 18.23M as of
+// 2026-05-21) means /wallet/tokens returns different portfolios depending on
+// which backend the LB picks — agents need a way to pin reads/writes to
+// a known-good node.
+//
+// Accepted forms:
+//   - "epsilon"  → http://89.149.241.126:8080/api/v1   (canonical, 10Gbit supernode)
+//   - "delta"    → http://5.79.79.158:8080/api/v1     (fork-side, 1Gbit)
+//   - "beta"     → http://185.182.185.227:8080/api/v1 (dev endpoint)
+//   - "gamma"    → http://109.205.176.60:8808/api/v1  (backup)
+//   - "quillon" / "lb" / undefined → https://quillon.xyz/api/v1 (LB default)
+//   - any full URL with "/api/v1" suffix → used verbatim
+function resolveBackend(ref?: string): { base: string; prefix: string } {
+  const aliases: Record<string, string> = {
+    epsilon: "http://89.149.241.126:8080/api/v1",
+    delta:   "http://5.79.79.158:8080/api/v1",
+    beta:    "http://185.182.185.227:8080/api/v1",
+    gamma:   "http://109.205.176.60:8808/api/v1",
+    quillon: "https://quillon.xyz/api/v1",
+    lb:      "https://quillon.xyz/api/v1",
+  };
+  if (!ref) return { base: API_BASE, prefix: API_PATH_PREFIX };
+  const lower = ref.trim().toLowerCase();
+  const base = aliases[lower] ?? ref;
+  // Don't run user-passed URLs through validateApiUrl — it would block IPs.
+  // We do basic format check: must include /api/v
+  if (!base.includes("/api/v")) {
+    throw new Error(`Invalid endpoint "${ref}". Use a shortname (epsilon|delta|beta|gamma|quillon) or a full URL ending in /api/v1.`);
+  }
+  let prefix = "/api/v1";
+  try { prefix = new URL(base).pathname.replace(/\/$/, ""); } catch { /* keep default */ }
+  return { base, prefix };
+}
+
+async function api(path: string, method = "GET", body?: unknown, opts?: { endpoint?: string }): Promise<unknown> {
+  const be = resolveBackend(opts?.endpoint);
+  const url = `${be.base}${path}`;
+  const initOpts: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
     redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
   };
-  if (body) opts.body = JSON.stringify(body);
+  if (body) initOpts.body = JSON.stringify(body);
 
-  const res = await fetch(url, opts);
-  if (!res.ok) throw new Error(`API ${method} ${path} returned ${res.status}: ${await res.text()}`);
+  const res = await fetch(url, initOpts);
+  if (!res.ok) throw new Error(`API ${method} ${path} (${be.base}) returned ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
@@ -97,10 +134,11 @@ async function apiSigned(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   body?: unknown,
-  opts?: { seed?: string },
+  opts?: { seed?: string; endpoint?: string },
 ): Promise<unknown> {
-  const url = `${API_BASE}${path}`;
-  const signPath = `${API_PATH_PREFIX}${path}`;
+  const be = resolveBackend(opts?.endpoint);
+  const url = `${be.base}${path}`;
+  const signPath = `${be.prefix}${path}`;
 
   const doRequest = async (attempt: number): Promise<Response> => {
     const auth = signXWalletAuth(signPath, { seedArg: opts?.seed });
@@ -145,7 +183,7 @@ async function apiSigned(
 // --- MCP Server ---
 const server = new McpServer({
   name: "quillon-wallet",
-  version: "2.1.0",
+  version: "2.7.2",
 });
 
 // ============================================================
@@ -589,127 +627,100 @@ server.tool(
 
 server.tool(
   "send_qug",
-  "Send QUG from your authenticated wallet to another address. Run 'authenticate wallet' first if you haven't already.",
+  "Send QUG to another address. v2.7.1: migrated off the browser-auth gate that required 'authenticate wallet' first — now signs every send via the configured seed (file → QNK_SEED env) using X-Wallet-Auth on POST /transactions/send_signed, mirroring how the existing one-off mjs scripts (e.g. send_qug_to_viktor_advanced_memo.mjs) have been doing it. Adds optional memo + endpoint parameters. The MCP spending cap (1000 QUG per send) and the explicit confirm gate remain.",
   {
-    to_address: z.string().describe("Recipient qnk... address"),
-    amount: z.number().describe("Amount of QUG to send"),
+    to_address: z.string().describe("Recipient qnk... address (qnk + 64 hex chars)"),
+    amount: z.number().positive().describe("Amount of QUG to send in display units (e.g., 1.5 for 1.5 QUG)"),
+    memo: z.string().optional().describe("Optional memo string attached to the transaction. UTF-8 accepted. The Quillon ledger stores it on the tx record; some clients render it in the tx details modal."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override (shortname or full URL). Use 'epsilon' to land tx on canonical chain and bypass the quillon.xyz LB routing roulette. Defaults to the MCP's configured QUILLON_API_URL."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a dry-run summary with the fields you're about to commit."),
   },
-  async ({ to_address, amount }) => {
-    if (!isSessionValid()) {
-      return {
-        content: [{
-          type: "text",
-          text: [
-            `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send QUG:`,
-            ``,
-            `  1. Say "authenticate wallet"`,
-            `  2. Open the link in your browser and approve`,
-            `  3. Say "check auth"`,
-            `  4. Then "send ${amount} QUG to ${to_address}"`,
-          ].join("\n"),
-        }],
-      };
+  async ({ to_address, amount, memo, seed, endpoint, confirm }) => {
+    // Validate recipient format
+    if (!/^qnk[0-9a-f]{64}$/.test(to_address)) {
+      return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...` }] };
     }
-    refreshSession(); // Keep session alive on activity
-
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 1: Validate wallet address format
-    // ═══════════════════════════════════════════════════════════════
-    if (!to_address.startsWith('qnk') || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
-      return {
-        content: [{
-          type: "text",
-          text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...`,
-        }],
-      };
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 2: Require explicit confirmation for transactions
-    // ═══════════════════════════════════════════════════════════════
-    // Return a confirmation prompt instead of executing immediately.
-    // The AI must relay this to the user and get explicit approval.
-    if (!to_address.startsWith('qnk_CONFIRMED_')) {
-      return {
-        content: [{
-          type: "text",
-          text: [
-            `⚠️ TRANSACTION CONFIRMATION REQUIRED`,
-            ``,
-            `  From:   ${activeWalletAddress!.slice(0, 20)}...`,
-            `  To:     ${to_address.slice(0, 20)}...`,
-            `  Amount: ${amount} QUG`,
-            ``,
-            `Please confirm: do you want to send ${amount} QUG to ${to_address}?`,
-            `Reply "yes, send ${amount} QUG to ${to_address}" to proceed.`,
-            ``,
-            `⚠️ This action is irreversible. Verify the recipient address carefully.`,
-          ].join("\n"),
-        }],
-      };
-    }
-    // Strip confirmation prefix
-    const confirmed_address = to_address.replace('qnk_CONFIRMED_', 'qnk');
-
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 3: Spending limits
-    // ═══════════════════════════════════════════════════════════════
+    // Spending cap (carryover safety from the old tool)
     if (amount > 1000) {
+      return { content: [{ type: "text", text: `⚠️ Amount exceeds MCP spending limit (1000 QUG per call). For larger transfers, either chunk it or use the web wallet.` }] };
+    }
+
+    let signerAddress: string;
+    try {
+      const { seed: rawSeed } = loadSeed({ seedArg: seed });
+      signerAddress = deriveKeys(rawSeed).address;
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+    }
+
+    // 24-decimal AMM-base scaling.
+    const amtBase = toBaseUnits(amount, AMM_DECIMALS);
+    const memoBytes = memo ? new TextEncoder().encode(memo).length : 0;
+
+    if (!confirm) {
       return {
         content: [{
           type: "text",
-          text: `⚠️ Amount exceeds MCP spending limit (1000 QUG). For larger transfers, use the web wallet at quillon.xyz.`,
+          text: [
+            `⚠ SEND DRY RUN — pass confirm=true to submit`,
+            ``,
+            `  From:     ${signerAddress}`,
+            `  To:       ${to_address}`,
+            `  Amount:   ${amount} QUG  (raw ${amtBase})`,
+            `  Endpoint: ${endpoint ?? "(MCP default)"}`,
+            memo ? `  Memo:     ${memoBytes} bytes UTF-8 (${memo.length} chars)` : `  Memo:     (none)`,
+            ``,
+            memo ? `Memo preview:\n${memo.split("\n").slice(0, 8).map((l) => "  > " + l).join("\n")}${memo.split("\n").length > 8 ? "\n  > …" : ""}` : `(no memo)`,
+            ``,
+            `On confirm:`,
+            `  ↦ POST /api/v1/transactions/send_signed (X-Wallet-Auth)`,
+            `  ↦ Returns transaction_id; chain on-chain via tx_status tx_hash=<id>`,
+            `  ↦ ${endpoint ? "lands on " + endpoint + " (pinned)" : "subject to quillon.xyz LB routing — fork-side backend possible"}`,
+          ].join("\n"),
         }],
       };
     }
-    if (amount <= 0) {
-      return {
-        content: [{
-          type: "text",
-          text: `Invalid amount: must be greater than 0.`,
-        }],
-      };
-    }
+
+    // Build the signed body — u128 amount as JSON STRING to avoid the
+    // deserialize_u128 f64-precision-loss warning the server emits otherwise.
+    const bodyObj: Record<string, unknown> = {
+      from: signerAddress,
+      to: to_address,
+      amount: amtBase,
+      token_type: "QUG",
+    };
+    if (memo) bodyObj.memo = memo;
 
     try {
-      const res = await api("/transactions/send", "POST", {
-        from: activeWalletAddress,
-        to: confirmed_address,
-        amount: Math.floor(amount * 1e24).toString(),
-        ...(authToken ? { auth_token: authToken } : {}),
-      }) as any;
-
-      if (res.success) {
-        return {
-          content: [{
-            type: "text",
-            text: [
-              `Transaction submitted!`,
-              ``,
-              `  From:   ${activeWalletAddress!.slice(0, 16)}...`,
-              `  To:     ${to_address.slice(0, 16)}...`,
-              `  Amount: ${amount} QUG`,
-              res.data?.tx_id ? `  TX ID:  ${res.data.tx_id}` : '',
-              ``,
-              `The transaction will be included in the next block (~1 second).`,
-            ].filter(Boolean).join("\n"),
-          }],
-        };
-      } else {
-        return {
-          content: [{
-            type: "text",
-            text: `Transaction failed: ${res.error || 'Unknown error'}`,
-          }],
-        };
+      const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint }) as any;
+      if (res?.success === false) {
+        return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient QUG balance (run get_balance)\n  • Bad signature — re-check seed file matches the wallet you intend\n  • Recipient address invalid` }] };
       }
-    } catch (e: any) {
+      const data = res?.data ?? res;
+      const txId = data.transaction_id ?? data.tx_id ?? data.tx_hash ?? "(no tx id returned)";
+      const broadcast = data.broadcast_success;
       return {
         content: [{
           type: "text",
-          text: `Send failed: ${e.message}\n\nThe wallet may need re-authentication or have insufficient balance.`,
+          text: [
+            `✅ Sent ${amount} QUG`,
+            ``,
+            `  From:     ${signerAddress}`,
+            `  To:       ${to_address}`,
+            `  Amount:   ${amount} QUG`,
+            `  Tx hash:  ${txId}`,
+            memo ? `  Memo:     ${memoBytes} bytes` : "",
+            broadcast === false ? `  ⚠ broadcast_success=false — local-only on this backend; tx will gossip on next block production` : "",
+            ``,
+            `Next:`,
+            `  tx_status tx_hash=${txId}   → confirm on-chain`,
+            memo ? `  (the memo is stored on the tx record; the wallet UI's tx-details modal may not yet render multi-line memos — known frontend gap)` : "",
+          ].filter(Boolean).join("\n"),
         }],
       };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Send failed: ${e?.message ?? e}` }] };
     }
   }
 );
@@ -1334,16 +1345,74 @@ function findTokenBySymbol(tokens: TokenInfo[], symbol: string): TokenInfo | und
 const AMM_DECIMALS = 24;
 
 // Multiply display amount × 10^decimals as a BigInt-precise string.
+//
+// v2.7.2: ACCEPTS STRING INPUT + uses .toString() instead of .toFixed(decimals).
+// The old .toFixed(decimals) path exposed IEEE-754 binary drift — for example
+// (0.01).toFixed(24) returns "0.010000000000000000208167" because 0.01 has no
+// exact IEEE-754 representation. Scaling that to 24 decimals produced
+// 10000000000000000208167 instead of the clean 10000000000000000000000.
+// The send_qug v2.7.1 dry-run smoke test surfaced this on 2026-05-21.
+//
+// Fix:
+//   1. Accept string input directly — agents passing u128-precise amounts
+//      (e.g. "10000000000000000000000") can preserve every digit.
+//   2. For number input, use displayAmount.toString() — JavaScript engines
+//      emit the shortest round-trip decimal representation (so (0.01)
+//      becomes "0.01", not the 17-significant-digit IEEE expansion).
+//   3. Handle scientific notation if it leaks through (e.g. 1e-7).
+//
 // Avoids float precision loss for large decimal counts (24 for QUG).
-function toBaseUnits(displayAmount: number, decimals: number): string {
-  if (!Number.isFinite(displayAmount) || displayAmount < 0) {
-    throw new Error(`Invalid amount: ${displayAmount}`);
+function toBaseUnits(displayAmount: number | string, decimals: number): string {
+  let s: string;
+  if (typeof displayAmount === "string") {
+    s = displayAmount.trim();
+    if (s === "") throw new Error("Empty amount");
+  } else {
+    if (!Number.isFinite(displayAmount) || displayAmount < 0) {
+      throw new Error(`Invalid amount: ${displayAmount}`);
+    }
+    // toString() gives the shortest round-trip representation.
+    // (0.01).toString() === "0.01"  (no IEEE expansion)
+    // (0.1 + 0.2).toString() === "0.30000000000000004"  (drift survives — that's intentional)
+    s = displayAmount.toString();
   }
-  // Split into integer and fractional, scale each with BigInt to avoid float drift.
-  const s = displayAmount.toFixed(decimals);
-  const [intPart, fracPart = ""] = s.split(".");
-  const padded = (fracPart + "0".repeat(decimals)).slice(0, decimals);
-  const combined = (intPart + padded).replace(/^0+/, "") || "0";
+  // Expand scientific notation like "1e-7" or "5e+21" to plain decimal form.
+  if (/[eE]/.test(s)) {
+    const m = s.match(/^(-?)(\d+(?:\.\d+)?)[eE]([+-]?\d+)$/);
+    if (!m) throw new Error(`Invalid amount format: ${displayAmount}`);
+    const [, sign, mantissa, expStr] = m;
+    const exp = parseInt(expStr, 10);
+    const [mInt, mFrac = ""] = mantissa.split(".");
+    const digits = mInt + mFrac;
+    const pointFromLeft = mInt.length + exp; // virtual decimal point index
+    if (pointFromLeft <= 0) {
+      s = sign + "0." + "0".repeat(-pointFromLeft) + digits;
+    } else if (pointFromLeft >= digits.length) {
+      s = sign + digits + "0".repeat(pointFromLeft - digits.length);
+    } else {
+      s = sign + digits.slice(0, pointFromLeft) + "." + digits.slice(pointFromLeft);
+    }
+  }
+  // Negative not supported.
+  if (s.startsWith("-")) {
+    throw new Error(`Negative amounts not supported: ${displayAmount}`);
+  }
+  // Validate digits + at most one decimal point.
+  if (!/^\d+(\.\d+)?$/.test(s)) {
+    throw new Error(`Invalid amount format: ${displayAmount}`);
+  }
+  // Split into integer + fractional, pad/truncate the fractional to `decimals`.
+  const [intPart, fracRaw = ""] = s.split(".");
+  let frac = fracRaw;
+  if (frac.length > decimals) {
+    // Silently truncate beyond the decimal cap — the value is already more
+    // precise than the on-chain representation can store.
+    frac = frac.slice(0, decimals);
+  } else {
+    frac = frac.padEnd(decimals, "0");
+  }
+  // Combine + strip leading zeros (keep one if the whole thing is zero).
+  const combined = (intPart + frac).replace(/^0+(?!$)/, "") || "0";
   return combined;
 }
 
@@ -1624,109 +1693,121 @@ server.tool(
 
 server.tool(
   "send_token",
-  "Send a non-QUG token (e.g., QUGUSD, wBTC, wETH) from your authenticated wallet to another address. Same auth + confirmation pattern as send_qug. Use this for any token returned by dex_list_tokens.",
+  "Send a non-QUG token to another address. v2.7.1: migrated off the browser-auth gate — now signs every send via the configured seed (file → QNK_SEED env) using X-Wallet-Auth on POST /transactions/send_signed, same approach as the existing one-off mjs scripts. Resolves token symbols (QUGUSD, wBTC, …) to the correct token_type wire format for both native (symbol literal) and Custom/Wrapped (contract address). Adds optional memo + endpoint parameters.",
   {
-    token: z.string().describe("Token symbol (QUGUSD, wBTC, wZEC, wIRON, wETH, etc.) — see dex_list_tokens"),
+    token: z.string().describe("Token symbol (e.g., QUGUSD, wBTC, ASHEN, PACI). Or the full qnk… contract address if the symbol is ambiguous. Run dex_list_tokens for the registered set."),
     to_address: z.string().describe("Recipient qnk... address"),
     amount: z.number().positive().describe("Amount in display units (e.g., 25.5 for 25.5 QUGUSD)"),
-    confirm: z.boolean().optional().describe("Set true to execute; without it, returns confirmation prompt"),
+    memo: z.string().optional().describe("Optional memo string attached to the transaction."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override. Use 'epsilon' for canonical chain landing."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a dry-run summary."),
   },
-  async ({ token, to_address, amount, confirm }) => {
-    // Auth gate (same as send_qug)
-    if (!isSessionValid()) {
-      return {
-        content: [{
-          type: "text",
-          text: [
-            `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send tokens:`,
-            ``,
-            `  1. Say "authenticate wallet"`,
-            `  2. Open the link in your browser and approve`,
-            `  3. Say "check auth"`,
-            `  4. Then retry sending`,
-          ].join("\n"),
-        }],
-      };
+  async ({ token, to_address, amount, memo, seed, endpoint, confirm }) => {
+    if (!/^qnk[0-9a-f]{64}$/.test(to_address)) {
+      return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...` }] };
     }
-    refreshSession();
-
-    // Validate address format
-    if (!to_address.startsWith("qnk") || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
-      return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex chars (67 total).` }] };
-    }
-
     if (amount <= 0) {
       return { content: [{ type: "text", text: `Amount must be > 0.` }] };
     }
 
-    // Look up token decimals + verify it's tradeable
-    let tokens: TokenInfo[];
-    try { tokens = await fetchTokens(); }
-    catch (e: any) { return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] }; }
-    const t = findTokenBySymbol(tokens, token);
-    if (!t) {
-      return { content: [{ type: "text", text: `Unknown token "${token}". Run dex_list_tokens to see what's available.` }] };
+    // Resolve token. Two paths:
+    //   - Address-style ref ("qnk…"): use directly as token_type (Custom/Wrapped).
+    //   - Symbol ref: look up in /dex/tokens. If Native/Stablecoin → symbol literal.
+    //     If Custom/Wrapped → use the contract address (server expects address for these).
+    let tokenLabel = token;
+    let tokenTypeWire: string;
+    let tokenDecimalsHint = AMM_DECIMALS;
+    if (token.startsWith("qnk") && token.length >= 60) {
+      tokenTypeWire = token;
+      tokenLabel = token.slice(0, 12) + "…";
+    } else {
+      let tokens: TokenInfo[];
+      try { tokens = await fetchTokens(); }
+      catch (e: any) { return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] }; }
+      const t = findTokenBySymbol(tokens, token);
+      if (!t) {
+        return { content: [{ type: "text", text: `Unknown token "${token}". Run dex_list_tokens to see registered ones, or pass the contract address directly (e.g. for ASHEN/PACI which may not be in /dex/tokens).` }] };
+      }
+      tokenLabel = t.symbol;
+      tokenDecimalsHint = t.decimals;
+      if (t.symbol.toUpperCase() === "QUG") {
+        return { content: [{ type: "text", text: `For native QUG, use send_qug instead.` }] };
+      }
+      const tt = (t.contract_type || "").toString().toLowerCase();
+      // Native (non-QUG) and Stablecoin: symbol literal works on the server.
+      // Custom/Wrapped: must use the contract address.
+      tokenTypeWire = ["stablecoin", "native"].includes(tt) ? t.symbol : t.address;
     }
 
-    // Don't allow sending QUG through this — use send_qug for native to keep audit trails clean
-    if (t.symbol.toUpperCase() === "QUG") {
-      return { content: [{ type: "text", text: `For native QUG, use send_qug instead (separate code path, separate per-session limits).` }] };
+    // All amounts in 24-decimal AMM-base (per dex_token_bugs memory).
+    const amtBase = toBaseUnits(amount, AMM_DECIMALS);
+
+    let signerAddress: string;
+    try {
+      const { seed: rawSeed } = loadSeed({ seedArg: seed });
+      signerAddress = deriveKeys(rawSeed).address;
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
     }
 
-    // Confirmation step
+    const memoBytes = memo ? new TextEncoder().encode(memo).length : 0;
+
     if (!confirm) {
       return {
         content: [{
           type: "text",
           text: [
-            `⚠️ TOKEN TRANSFER CONFIRMATION REQUIRED`,
+            `⚠ TOKEN SEND DRY RUN — pass confirm=true to submit`,
             ``,
-            `  From:   ${activeWalletAddress!.slice(0, 20)}...`,
-            `  To:     ${to_address.slice(0, 20)}...`,
-            `  Send:   ${amount} ${t.symbol}  (${t.contract_type})`,
-            ``,
-            `Caveat: ${tokenCaveat(t)}`,
-            ``,
-            `Reply: send_token token=${t.symbol} to_address=${to_address} amount=${amount} confirm=true`,
-            `(or rephrase: "yes, send ${amount} ${t.symbol}")`,
-            ``,
-            `This is irreversible. Verify above.`,
+            `  From:        ${signerAddress}`,
+            `  To:          ${to_address}`,
+            `  Amount:      ${amount} ${tokenLabel}`,
+            `  Base (24-d): ${amtBase}`,
+            `  Token wire:  ${tokenTypeWire}`,
+            `  Native dec:  ${tokenDecimalsHint}`,
+            `  Endpoint:    ${endpoint ?? "(MCP default)"}`,
+            memo ? `  Memo:        ${memoBytes} bytes UTF-8` : `  Memo:        (none)`,
           ].join("\n"),
         }],
       };
     }
 
-    // Execute
+    const bodyObj: Record<string, unknown> = {
+      from: signerAddress,
+      to: to_address,
+      amount: amtBase,
+      token_type: tokenTypeWire,
+    };
+    if (memo) bodyObj.memo = memo;
+
     try {
-      const res = await api("/transactions/send", "POST", {
-        from: activeWalletAddress,
-        to: to_address,
-        amount: amount,  // f64; the handler does decimal scaling per token_type
-        token_type: t.symbol,
-        ...(authToken ? { auth_token: authToken } : {}),
-      }) as any;
-
-      if (!res.success) {
-        return { content: [{ type: "text", text: `Token transfer failed: ${res.error || 'unknown error'}` }] };
+      const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint }) as any;
+      if (res?.success === false) {
+        return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient ${tokenLabel} balance (run get_token_balance symbol=${tokenLabel})\n  • Custom token expects contract address as token_type — we used "${tokenTypeWire}"\n  • Recipient address invalid` }] };
       }
-
+      const data = res?.data ?? res;
+      const txId = data.transaction_id ?? data.tx_id ?? data.tx_hash ?? "(no tx id returned)";
+      const broadcast = data.broadcast_success;
       return {
         content: [{
           type: "text",
           text: [
-            `✅ ${t.symbol} transfer submitted!`,
+            `✅ Sent ${amount} ${tokenLabel}`,
             ``,
-            `  From:   ${activeWalletAddress!.slice(0, 16)}...`,
-            `  To:     ${to_address.slice(0, 16)}...`,
-            `  Amount: ${amount} ${t.symbol}`,
-            res.data?.tx_id ? `  Tx id:  ${res.data.tx_id}` : ``,
+            `  From:     ${signerAddress}`,
+            `  To:       ${to_address}`,
+            `  Amount:   ${amount} ${tokenLabel}`,
+            `  Tx hash:  ${txId}`,
+            memo ? `  Memo:     ${memoBytes} bytes` : "",
+            broadcast === false ? `  ⚠ broadcast_success=false — local-only on this backend; tx will gossip on next block production` : "",
             ``,
-            `Will be included in the next block (~1 second).`,
+            `Next: tx_status tx_hash=${txId}`,
           ].filter(Boolean).join("\n"),
         }],
       };
     } catch (e: any) {
-      return { content: [{ type: "text", text: `Token send failed: ${e.message}` }] };
+      return { content: [{ type: "text", text: `Token send failed: ${e?.message ?? e}` }] };
     }
   }
 );
@@ -2663,20 +2744,60 @@ server.tool(
         return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${qug} QUG` }] };
       }
 
-      // For all other tokens: hit /wallets/<addr>/tokens which returns the
-      // full token-balance map. AMM/contract storage is 24-decimal universally.
-      const res = await api(`/wallets/${target}/tokens`, "GET") as any;
-      const list = res?.tokens ?? res?.data?.tokens ?? res?.data ?? [];
-      const entry = Array.isArray(list)
-        ? list.find((e: any) => (e.symbol || "").toUpperCase() === t.symbol.toUpperCase())
-        : null;
-      if (!entry) {
-        return { content: [{ type: "text", text: `${target}\n  ${symbol}: 0 (no balance found)` }] };
+      // v2.7.0: dispatch by token type. The old /wallets/<addr>/tokens path
+      // 404s server-side — the route never existed. Three real paths:
+      //   - Custom / Wrapped (has contract address): GET /contracts/<addr>/balance/<wallet>
+      //     unauthenticated, returns { data: { balance: "<raw u128>" } }
+      //   - Stablecoin (e.g. QUGUSD): GET /wallet/tokens with X-Wallet-Auth, address
+      //     extracted from header. Only works for the signer's own wallet.
+      //   - Native non-QUG: same /wallet/tokens path.
+      const tt = (t.contract_type || "").toString().toLowerCase();
+      const hasContractAddr = t.address && !["native", "stablecoin"].includes(tt);
+
+      if (hasContractAddr) {
+        // Custom or Wrapped token — contract-scoped balance endpoint.
+        const res = await api(`/contracts/${t.address}/balance/${target}`, "GET") as any;
+        const raw = res?.balance ?? res?.data?.balance ?? "0";
+        // Use the token's own decimals for display (AMM_DECIMALS may differ for some).
+        const display = fromBaseUnits(String(raw), t.decimals ?? AMM_DECIMALS);
+        return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${raw}, scale: ${t.decimals ?? AMM_DECIMALS} decimals)` }] };
       }
-      // entry.balance is the 24-decimal AMM base; convert for display.
-      const raw = entry.balance ?? entry.amount ?? "0";
-      const display = fromBaseUnits(String(raw), AMM_DECIMALS);
-      return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display.toFixed(6)}\n  (raw base: ${raw}, scale: ${AMM_DECIMALS} decimals)` }] };
+
+      // Stablecoin / Native-non-QUG path — needs X-Wallet-Auth and only
+      // returns balances for the signer. If `address` was passed explicitly
+      // and doesn't match the seed-derived address, surface that limit.
+      const { seed: rawSeed } = loadSeed({ seedArg: seed });
+      const ownAddress = deriveKeys(rawSeed).address;
+      if (target !== ownAddress) {
+        return { content: [{ type: "text", text: `Cannot query ${symbol} balance for ${target} — the /wallet/tokens endpoint only returns balances for the authenticated caller (you). Use the wallet's own seed or query a Custom/Wrapped token (those allow third-party balance reads via /contracts/<addr>/balance/<wallet>).` }] };
+      }
+      const res = await apiSigned("/wallet/tokens", "GET", undefined, { seed }) as any;
+      // v2.7.1 fix: /wallet/tokens returns { data: { tokens: { "SYMBOL": {...}, ... } } } —
+      // an object keyed by symbol, NOT an array. v2.7.0 parsed it as array and silently
+      // returned 0 for everything. Handle both shapes for forward-compat.
+      const tokensField = res?.data?.tokens ?? res?.tokens ?? null;
+      let entry: any = null;
+      if (tokensField && typeof tokensField === "object" && !Array.isArray(tokensField)) {
+        // Object shape: look up by symbol key (case-insensitive).
+        const want = t.symbol.toUpperCase();
+        for (const [k, v] of Object.entries(tokensField)) {
+          if (k.toUpperCase() === want) { entry = v; break; }
+        }
+      } else if (Array.isArray(tokensField)) {
+        entry = tokensField.find((e: any) => (e.symbol || "").toUpperCase() === t.symbol.toUpperCase());
+      }
+      if (!entry) {
+        return { content: [{ type: "text", text: `${target}\n  ${symbol}: 0 (not present in /wallet/tokens response — wallet has never held ${symbol} on this backend, or backend routing landed on a chain branch where this token doesn't exist)` }] };
+      }
+      // Server returns balance pre-formatted as a display string (e.g. "561137.38026817")
+      // plus balance_base_units for the raw u128. Prefer balance for display.
+      const display = entry.balance ?? "0";
+      const rawBase = entry.balance_base_units ?? entry.amount ?? "(unknown)";
+      const usd = entry.usd_value;
+      const usdLine = (typeof usd === "number" && usd > 0)
+        ? `\n  USD value:  ~$${usd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+        : "";
+      return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${rawBase}, scale: ${t.decimals ?? AMM_DECIMALS} decimals)${usdLine}` }] };
     } catch (e: any) {
       return { content: [{ type: "text", text: `get_token_balance failed: ${e?.message ?? e}` }] };
     }
@@ -2885,21 +3006,37 @@ server.tool(
 // ────────────────────────────────────────────────────────────────────
 server.tool(
   "deploy_token",
-  "Deploy a new ERC20-style token on Quillon. Costs 1 QUG. v2.3.0: convenience wrapper for /api/v1/contracts/deploy with sensible defaults. Use this for commemorative drops (e.g., GROK alongside the existing CLAI) or app-token launches.",
+  "Deploy a new ERC20-style token on Quillon. Costs 1 QUG. v2.7.0: now accepts `contract_type` so it can pick any template from parse_contract_type (secure_token, advanced_token, orbusd_stablecoin, rwa_token, …). v2.3.0: convenience wrapper for /api/v1/contracts/deploy with sensible defaults. Use this for commemorative drops or app-token launches. For multi-step wizard (preview features + toggles) use deploy_smart_contract instead.",
   {
     name: z.string().min(2).max(64).describe("Full token name (e.g., 'Grok AI Commemorative')."),
     symbol: z.string().min(2).max(12).describe("Ticker symbol (e.g., 'GROK'). Uppercase recommended."),
     decimals: z.number().int().min(0).max(24).optional().describe("Decimals (default 0 for collectible/commemorative, 24 for utility tokens that need fractional units)."),
     initial_supply: z.number().positive().optional().describe("Initial supply minted to deployer (default 1_000_000). In display units; deploy will scale by 10^decimals."),
     description: z.string().optional().describe("Free-text description that ends up in the contract metadata."),
+    contract_type: z.string().optional().describe("Server-side template ID (snake_case). Default 'secure_token' = basic ERC20. Other options: 'advanced_token' (mint/burn/reflection/staking), 'orbusd_stablecoin', 'rwa_token', etc. — see deploy_smart_contract for the full list of 27 templates. Free-form for forward-compat."),
+    features: z.object({
+      mintable: z.boolean().optional(),
+      burnable: z.boolean().optional(),
+      reflection: z.boolean().optional(),
+      staking: z.boolean().optional(),
+      governance: z.boolean().optional(),
+      airdrops: z.boolean().optional(),
+      upgrades: z.boolean().optional(),
+      reflection_fee_bps: z.number().int().optional(),
+      burn_fee_bps: z.number().int().optional(),
+      liquidity_fee_bps: z.number().int().optional(),
+      max_tx_bps: z.number().int().optional(),
+      max_wallet_bps: z.number().int().optional(),
+    }).optional().describe("Advanced-template feature toggles + reflection/anti-bot params. Only meaningful when contract_type='advanced_token'."),
     seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
     confirm: z.boolean().optional().describe("Set to true to actually deploy. Without it, returns a dry-run summary."),
   },
-  async ({ name, symbol, decimals, initial_supply, description, seed, confirm }) => {
+  async ({ name, symbol, decimals, initial_supply, description, contract_type, features, seed, confirm }) => {
     try {
       const dec = decimals ?? 0;
       const supply = initial_supply ?? 1_000_000;
       const desc = description ?? `Commemorative ${symbol} token on Quillon Graph`;
+      const ctype = (contract_type ?? "secure_token").trim();
 
       let signerAddress: string;
       try {
@@ -2913,13 +3050,38 @@ server.tool(
 
       const supplyBase = toBaseUnits(supply, dec);
 
+      // Build the parameters block — advanced_token accepts feature toggles.
+      const params: Record<string, unknown> = {
+        name,
+        symbol,
+        decimals: dec,
+        // The PACI deploy script (commit b0256eb5) used `initial_supply` (snake_case);
+        // older deploy_token used `initialSupply` (camelCase). Server's
+        // parse_contract_type accepts both for backward-compat. Send both so
+        // either template path picks it up.
+        initial_supply: supplyBase,
+        initialSupply: supplyBase,
+        description: desc,
+      };
+      if (ctype === "advanced_token" && features) {
+        Object.assign(params, features);
+      }
+
       if (!confirm) {
+        const featLines = ctype === "advanced_token" && features
+          ? [
+              ``,
+              `  Features:`,
+              ...Object.entries(features).map(([k, v]) => `    ${k}: ${v}`),
+            ]
+          : [];
         return {
           content: [{
             type: "text",
             text: [
               `⚠ DEPLOY DRY RUN — pass confirm=true to execute`,
               ``,
+              `  Template:       ${ctype}`,
               `  Name:           ${name}`,
               `  Symbol:         ${symbol}`,
               `  Decimals:       ${dec}`,
@@ -2928,10 +3090,11 @@ server.tool(
               `  Description:    ${desc}`,
               `  Deployer:       ${signerAddress}`,
               `  Cost:           1 QUG (deployment fee)`,
+              ...featLines,
               ``,
               `When you confirm, an LP pool is NOT auto-created. To make ${symbol}`,
               `tradeable on the DEX, follow the deploy with an add_liquidity call`,
-              `pairing ${symbol} with QUG.`,
+              `pairing ${symbol} with QUG or QUGUSD.`,
             ].join("\n"),
           }],
         };
@@ -2941,15 +3104,9 @@ server.tool(
         "/contracts/deploy",
         "POST",
         {
-          contract_type: "TOKEN",
+          contract_type: ctype,
           owner: ownerHex,
-          parameters: {
-            name,
-            symbol,
-            decimals: dec,
-            initialSupply: supplyBase,
-            description: desc,
-          },
+          parameters: params,
         },
         { seed },
       ) as any;
@@ -2982,6 +3139,194 @@ server.tool(
       };
     } catch (e: any) {
       return { content: [{ type: "text", text: `deploy_token failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ────────────────────────────────────────────────────────────────────
+// v2.7.0: add_liquidity — provide LP for a token pair. Costs gas only.
+// Hits POST /api/v1/liquidity/add with X-Wallet-Auth signed by the
+// configured seed. If the pool doesn't exist, the FIRST call creates
+// it and the (amount0, amount1) ratio sets the initial price.
+//
+// Token addressing rules (per `dex_pool_lookup_symbol_vs_address` memory):
+//   - Native (QUG): pass the literal string "QUG"
+//   - Stablecoin (QUGUSD): pass the literal string "QUGUSD"
+//   - Custom / Wrapped: pass the full qnk… contract address
+// Pass token *symbols* for QUG/QUGUSD; pass *addresses* for everything else.
+// The tool auto-resolves symbols → contract addresses via dex_list_tokens.
+//
+// Amounts: pass DISPLAY units; the tool scales to u128 base via the
+// universal AMM 24-decimal encoding (see `dex_token_bugs` memory) — even
+// for 8-decimal tokens like wBTC, the AMM stores amounts in 24-decimal.
+// ────────────────────────────────────────────────────────────────────
+server.tool(
+  "add_liquidity",
+  "Provide liquidity to a QUG-paired or token-paired DEX pool. v2.7.0: closes the gap that previously forced operators to hand-roll signing scripts (see send_qug_to_viktor_advanced_memo.mjs / deploy_paci.mjs pattern). If the pool doesn't exist yet, the FIRST add creates it and the (amount0, amount1) ratio sets the initial price — so be deliberate. Costs gas only (no flat fee). Auto-resolves token *symbols* to contract addresses; for symbols that need a unique address (multiple PACI-style customs) pass the qnk… address directly.",
+  {
+    token0: z.string().describe("First side of the pair. Symbol ('QUG', 'QUGUSD', 'PACI') OR full qnk… contract address. Pass symbols for Native/Stablecoin; symbol-or-address for Custom/Wrapped."),
+    token1: z.string().describe("Second side of the pair. Same format as token0."),
+    amount0: z.union([z.number(), z.string()]).describe("Amount of token0 to deposit in DISPLAY units (e.g., 10 for 10 QUG, 100000 for 100k QUGUSD). Strings accepted for u128-precise inputs."),
+    amount1: z.union([z.number(), z.string()]).describe("Amount of token1 to deposit in DISPLAY units."),
+    slippage_percent: z.number().min(0).max(50).optional().describe("Slippage tolerance for the existing-pool path (default 0.5). Ignored on first-LP add (you set the price). Range 0–50."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a preview with implied prices, FDV, and pool-state warnings."),
+  },
+  async ({ token0, token1, amount0, amount1, slippage_percent, seed, confirm }) => {
+    try {
+      // Resolve seed → signer address.
+      let signerAddress: string;
+      try {
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+      }
+
+      // Resolve token references to (label, server-side identifier).
+      // The server's liquidity_api accepts "QUG" literal for native; for
+      // anything with a contract address use the qnk… address directly.
+      const tokens = await fetchTokens();
+      const resolve = (ref: string): { label: string; id: string; decimals: number; type: string } => {
+        const trimmed = ref.trim();
+        // Looks like an address?
+        if (trimmed.toLowerCase().startsWith("qnk") && trimmed.length >= 60) {
+          const hit = tokens.find(t => t.address?.toLowerCase() === trimmed.toLowerCase());
+          if (hit) return { label: hit.symbol, id: hit.address, decimals: hit.decimals, type: hit.contract_type };
+          return { label: trimmed.slice(0, 12) + "…", id: trimmed, decimals: AMM_DECIMALS, type: "Custom" };
+        }
+        // Symbol path.
+        const upper = trimmed.toUpperCase();
+        const hit = findTokenBySymbol(tokens, upper);
+        if (!hit) {
+          throw new Error(`Unknown token "${ref}". Run dex_list_tokens for the full set.`);
+        }
+        const tt = (hit.contract_type || "").toString().toLowerCase();
+        // Native/Stablecoin → use the symbol literal (server side keys these by name).
+        // Custom/Wrapped → must use the contract address per `dex_pool_lookup_symbol_vs_address`.
+        const id = ["native", "stablecoin"].includes(tt) ? hit.symbol : hit.address;
+        return { label: hit.symbol, id, decimals: hit.decimals, type: hit.contract_type };
+      };
+
+      const a = resolve(token0);
+      const b = resolve(token1);
+      if (a.id === b.id) {
+        return { content: [{ type: "text", text: `Refusing add_liquidity for ${a.label}↔${a.label} — both sides resolve to the same identifier.` }] };
+      }
+
+      // Display → AMM-base (24 decimals universally — see dex_token_bugs memory).
+      const amt0Display = typeof amount0 === "number" ? amount0 : Number(amount0);
+      const amt1Display = typeof amount1 === "number" ? amount1 : Number(amount1);
+      if (!(amt0Display > 0) || !(amt1Display > 0)) {
+        return { content: [{ type: "text", text: `Both amounts must be > 0 (got ${amount0}, ${amount1}).` }] };
+      }
+      const amt0Base = toBaseUnits(amt0Display, AMM_DECIMALS);
+      const amt1Base = toBaseUnits(amt1Display, AMM_DECIMALS);
+
+      // Probe existing pool by quoting 1 unit a→b. If the quote works the pool exists;
+      // if it returns "No liquidity pool found", we're about to create one.
+      // (Pool lookup by symbol works for Native/Stablecoin only; for Custom we need
+      // the symbol path of dex_get_quote, which understands both per recent fixes.)
+      let poolExists = false;
+      let existingQuote: string | null = null;
+      try {
+        const q = await api(`/dex/quote?from=${encodeURIComponent(a.label)}&to=${encodeURIComponent(b.label)}&amount=1`, "GET") as any;
+        if (q?.success !== false && (q?.data?.amount_out || q?.amount_out)) {
+          poolExists = true;
+          existingQuote = `1 ${a.label} ≈ ${q.data?.amount_out ?? q.amount_out} ${b.label} (existing pool)`;
+        }
+      } catch {
+        // 404 / not-found → pool does not exist → first-LP path
+      }
+
+      const impliedPrice0In1 = amt1Display / amt0Display;
+      const impliedPrice1In0 = amt0Display / amt1Display;
+
+      if (!confirm) {
+        const warn: string[] = [];
+        if (!poolExists) {
+          warn.push(`⚠ FIRST-LP — no existing pool. Your ratio sets the initial price.`);
+        } else {
+          warn.push(`Existing pool detected. Quoted: ${existingQuote ?? "(unparseable)"}`);
+          warn.push(`Your add will be priced relative to the existing reserves; if your ratio is far from the pool price you'll donate value to arbers.`);
+        }
+        return {
+          content: [{
+            type: "text",
+            text: [
+              `⚠ ADD LIQUIDITY DRY RUN — pass confirm=true to submit`,
+              ``,
+              `  Pair:       ${a.label} (${a.type}) ↔ ${b.label} (${b.type})`,
+              `  token0 id:  ${a.id}`,
+              `  token1 id:  ${b.id}`,
+              `  amount0:    ${amt0Display.toLocaleString()} ${a.label}`,
+              `  amount1:    ${amt1Display.toLocaleString()} ${b.label}`,
+              `  base0:      ${amt0Base}`,
+              `  base1:      ${amt1Base}`,
+              `  Implied:    1 ${a.label} = ${impliedPrice0In1.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${b.label}`,
+              `              1 ${b.label} = ${impliedPrice1In0.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${a.label}`,
+              `  Provider:   ${signerAddress}`,
+              `  Slippage:   ${slippage_percent ?? 0.5}% (only enforced on existing-pool path)`,
+              ``,
+              ...warn,
+              ``,
+              `Reminder — verify both balances BEFORE confirm:`,
+              `  get_token_balance symbol=${a.label}`,
+              `  get_token_balance symbol=${b.label}`,
+              ``,
+              `On confirm, the LP token credit lands in your wallet under generate_lp_token_address(pool_id).`,
+              `Per add_liquidity_overwrite_bug memory (fixed v10.9.52): any wallet may LP into existing pools — your add will NOT overwrite an existing pool's reserves.`,
+            ].join("\n"),
+          }],
+        };
+      }
+
+      // Real submit — sign + POST /liquidity/add.
+      const res = await apiSigned(
+        "/liquidity/add",
+        "POST",
+        {
+          token0: a.id,
+          token1: b.id,
+          // Send as strings to preserve u128 precision (server's
+          // deserialize_u128_from_any accepts both forms).
+          amount0: amt0Base,
+          amount1: amt1Base,
+          provider: signerAddress,
+        },
+        { seed },
+      ) as any;
+
+      if (res?.success === false) {
+        return { content: [{ type: "text", text: `add_liquidity failed: ${res.error ?? 'unknown error'}\n\nCommon causes:\n  • Insufficient balance of one side (run get_token_balance for both)\n  • Pool address mismatch — Custom/Wrapped need full qnk… address, not symbol\n  • Auth: derived ${signerAddress} but the deposit accounts may not match` }] };
+      }
+      const data = res?.data ?? res;
+      const poolId = data.pool_id ?? data.poolId ?? "(no pool_id)";
+      const lpMinted = data.lp_tokens_minted ?? data.lp_minted ?? "(no lp_minted)";
+      const txHash = data.transaction_hash ?? data.tx_hash ?? "(no tx hash)";
+      const lines: (string | null)[] = [
+        `✅ Liquidity ${poolExists ? "ADDED to" : "POOL CREATED for"} ${a.label}↔${b.label}!`,
+        ``,
+        `  Pool ID:     ${poolId}`,
+        `  LP minted:   ${lpMinted}  (credited to ${signerAddress})`,
+        `  Tx hash:     ${txHash}`,
+        `  Reserves:    +${amt0Display.toLocaleString()} ${a.label} / +${amt1Display.toLocaleString()} ${b.label}`,
+        `  Implied px:  1 ${a.label} = ${impliedPrice0In1.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${b.label}`,
+        ``,
+        `Next steps:`,
+        `  1. tx_status tx_hash=${txHash}  → confirm landed`,
+        `  2. dex_get_quote from_token=${a.label} to_token=${b.label} amount=1  → verify pool routable`,
+        `  3. (optional) score_tweet_draft  → see what the agent_panel x-algo says about announcing this pool`,
+        !poolExists ? `  4. The pool is now TRADEABLE — anyone can dex_swap into it` : null,
+      ];
+      return {
+        content: [{
+          type: "text",
+          text: lines.filter((s): s is string => s !== null).join("\n"),
+        }],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `add_liquidity failed: ${e?.message ?? e}` }] };
     }
   }
 );

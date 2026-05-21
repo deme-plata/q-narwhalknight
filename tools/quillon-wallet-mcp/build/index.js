@@ -63,18 +63,58 @@ const API_PATH_PREFIX = (() => {
         return "/api/v1";
     }
 })();
-async function api(path, method = "GET", body) {
-    const url = `${API_BASE}${path}`;
-    const opts = {
+// v2.7.1: backend resolution — lets a tool pin to a specific node by shortname
+// or full URL, bypassing the LB routing roulette on https://quillon.xyz. The
+// fork divergence (Epsilon canonical 18.17M vs Delta fork 18.23M as of
+// 2026-05-21) means /wallet/tokens returns different portfolios depending on
+// which backend the LB picks — agents need a way to pin reads/writes to
+// a known-good node.
+//
+// Accepted forms:
+//   - "epsilon"  → http://89.149.241.126:8080/api/v1   (canonical, 10Gbit supernode)
+//   - "delta"    → http://5.79.79.158:8080/api/v1     (fork-side, 1Gbit)
+//   - "beta"     → http://185.182.185.227:8080/api/v1 (dev endpoint)
+//   - "gamma"    → http://109.205.176.60:8808/api/v1  (backup)
+//   - "quillon" / "lb" / undefined → https://quillon.xyz/api/v1 (LB default)
+//   - any full URL with "/api/v1" suffix → used verbatim
+function resolveBackend(ref) {
+    const aliases = {
+        epsilon: "http://89.149.241.126:8080/api/v1",
+        delta: "http://5.79.79.158:8080/api/v1",
+        beta: "http://185.182.185.227:8080/api/v1",
+        gamma: "http://109.205.176.60:8808/api/v1",
+        quillon: "https://quillon.xyz/api/v1",
+        lb: "https://quillon.xyz/api/v1",
+    };
+    if (!ref)
+        return { base: API_BASE, prefix: API_PATH_PREFIX };
+    const lower = ref.trim().toLowerCase();
+    const base = aliases[lower] ?? ref;
+    // Don't run user-passed URLs through validateApiUrl — it would block IPs.
+    // We do basic format check: must include /api/v
+    if (!base.includes("/api/v")) {
+        throw new Error(`Invalid endpoint "${ref}". Use a shortname (epsilon|delta|beta|gamma|quillon) or a full URL ending in /api/v1.`);
+    }
+    let prefix = "/api/v1";
+    try {
+        prefix = new URL(base).pathname.replace(/\/$/, "");
+    }
+    catch { /* keep default */ }
+    return { base, prefix };
+}
+async function api(path, method = "GET", body, opts) {
+    const be = resolveBackend(opts?.endpoint);
+    const url = `${be.base}${path}`;
+    const initOpts = {
         method,
         headers: { "Content-Type": "application/json" },
         redirect: "error", // SECURITY: Never follow redirects (prevents open redirect attacks)
     };
     if (body)
-        opts.body = JSON.stringify(body);
-    const res = await fetch(url, opts);
+        initOpts.body = JSON.stringify(body);
+    const res = await fetch(url, initOpts);
     if (!res.ok)
-        throw new Error(`API ${method} ${path} returned ${res.status}: ${await res.text()}`);
+        throw new Error(`API ${method} ${path} (${be.base}) returned ${res.status}: ${await res.text()}`);
     return res.json();
 }
 // v2.0.0: signed variant for endpoints that require X-Wallet-Auth.
@@ -82,8 +122,9 @@ async function api(path, method = "GET", body) {
 // On final failure throws a SignatureError with diagnostic content the agent
 // can act on (which seed source, which derived address, server reply).
 async function apiSigned(path, method = "GET", body, opts) {
-    const url = `${API_BASE}${path}`;
-    const signPath = `${API_PATH_PREFIX}${path}`;
+    const be = resolveBackend(opts?.endpoint);
+    const url = `${be.base}${path}`;
+    const signPath = `${be.prefix}${path}`;
     const doRequest = async (attempt) => {
         const auth = signXWalletAuth(signPath, { seedArg: opts?.seed });
         const init = {
@@ -123,7 +164,7 @@ async function apiSigned(path, method = "GET", body, opts) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "2.1.0",
+    version: "2.7.2",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -135,7 +176,37 @@ server.resource("welcome", "quillon://welcome", async () => ({
             text: [
                 `Welcome to Quillon Graph — Post-Quantum Electronic Cash`,
                 ``,
-                `Available commands (just ask in natural language):`,
+                `══════════════════════════════════════════════════════════════`,
+                `  RECOMMENDED ONBOARDING — three steps, in this order:`,
+                `══════════════════════════════════════════════════════════════`,
+                ``,
+                `  ① TRY MINING FIRST  (fastest way to see QUG land in your wallet)`,
+                `    Just say: "set up mining" — the MCP downloads the miner,`,
+                `    configures it to pay rewards to this MCP's agent wallet,`,
+                `    and creates a systemd service. Reboot-safe.`,
+                ``,
+                `       → tool: setup_miner   (mining_via_pool=false by default)`,
+                `       → tool: start_mining`,
+                `       → tool: mining_status  (check your hashrate + rewards)`,
+                ``,
+                `  ② RUN A NODE  (when you want to participate, not just mine)`,
+                `    Say: "set up a node". The setup wizard asks:`,
+                `      • use this MCP's agent wallet as admin-wallet?  (default: yes)`,
+                `      • enable auto-update?                            (default: yes)`,
+                `    With both enabled, the node binds to the wallet this MCP signs`,
+                `    with, and a small systemd timer checks /api/v1/version every`,
+                `    6 hours — if a newer binary is published it self-installs and`,
+                `    restarts. 8-day-unattended-safe.`,
+                ``,
+                `       → tool: setup_node    (use_mcp_agent_wallet + auto_update default ON)`,
+                ``,
+                `  ③ EVERYTHING ELSE  (after mining is live + node is syncing)`,
+                `    DEX swaps, send_qug, Crown & Ash gameplay, arb_scan,`,
+                `    tx_watch with celebration banners, Quillon Bank, agent panel.`,
+                ``,
+                `══════════════════════════════════════════════════════════════`,
+                `  Full tool surface (50+ tools) — ask in natural language:`,
+                `══════════════════════════════════════════════════════════════`,
                 ``,
                 `  WALLET`,
                 `    "Create a wallet"              — New wallet with recovery phrase`,
@@ -143,29 +214,28 @@ server.resource("welcome", "quillon://welcome", async () => ({
                 `    "Import wallet from mnemonic"   — Recover existing wallet`,
                 `    "Send 10 QUG to qnk..."         — Transfer funds`,
                 ``,
-                `  MINING`,
-                `    "Set up mining on this machine" — Download + configure miner`,
-                `    "Start mining"                  — Begin mining immediately`,
-                `    "How's my mining going?"        — Hashrate, rewards, stats`,
-                ``,
                 `  DEX SWAP`,
                 `    "List tradeable tokens"         — QUG, QUGUSD, wBTC, wZEC, wIRON, wETH`,
                 `    "Quote 10 QUG to QUGUSD"        — See expected output, price impact`,
                 `    "Swap 10 QUG to QUGUSD"         — Two-step: shows quote → asks to confirm`,
                 `    "Send 25 QUGUSD to qnk..."      — Token transfers (any DEX-listed token)`,
+                `    "Scan for arbitrage"            — arb_scan: triangular DEX loops, top by net%`,
+                ``,
+                `  CROWN & ASH (medieval grand strategy on-chain)`,
+                `    "World snapshot"                — heraldic banner with all 7 factions`,
+                `    "Join faction X"                — claim an unclaimed faction (0-6)`,
+                `    "Propose alliance with #N"      — DefensiveAlliance / NonAggression / etc.`,
                 ``,
                 `  NETWORK`,
                 `    "Network status"                — Height, peers, block rate`,
-                `    "Verify node consistency"       — Compare two nodes' balance state (proves decentralization)`,
+                `    "Verify node consistency"       — Compare two nodes' balance state`,
+                `    "Speed report"                  — block time, finality, tip-proof verify`,
                 ``,
-                `  NODE`,
-                `    "Set up a node on this machine" — Download binary + systemd service`,
-                `    "Set up node from source"       — Build with Rust, then install`,
+                `  TX`,
+                `    "Watch this tx hash"            — tx_watch with celebration banner`,
+                `    "Check tx status"               — confirmation depth + block_height`,
                 ``,
-                `  SETUP`,
-                `    "Set up Claude Code integration" — Auto-configure MCP for another machine`,
-                ``,
-                `Everything is post-quantum ready. Ed25519 today, SQIsign tomorrow.`,
+                `Everything is post-quantum ready. Ed25519 today, Dilithium5 tomorrow.`,
                 `No GPG signatures. No air-gapped computers. Just works.`,
                 ``,
                 `Network: quillon.xyz | Source: code.quillon.xyz`,
@@ -484,122 +554,96 @@ server.tool("check_auth", "Check if wallet authentication is complete (after ope
         return { content: [{ type: "text", text: `Auth check failed: ${e.message}` }] };
     }
 });
-server.tool("send_qug", "Send QUG from your authenticated wallet to another address. Run 'authenticate wallet' first if you haven't already.", {
-    to_address: z.string().describe("Recipient qnk... address"),
-    amount: z.number().describe("Amount of QUG to send"),
-}, async ({ to_address, amount }) => {
-    if (!isSessionValid()) {
-        return {
-            content: [{
-                    type: "text",
-                    text: [
-                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send QUG:`,
-                        ``,
-                        `  1. Say "authenticate wallet"`,
-                        `  2. Open the link in your browser and approve`,
-                        `  3. Say "check auth"`,
-                        `  4. Then "send ${amount} QUG to ${to_address}"`,
-                    ].join("\n"),
-                }],
-        };
+server.tool("send_qug", "Send QUG to another address. v2.7.1: migrated off the browser-auth gate that required 'authenticate wallet' first — now signs every send via the configured seed (file → QNK_SEED env) using X-Wallet-Auth on POST /transactions/send_signed, mirroring how the existing one-off mjs scripts (e.g. send_qug_to_viktor_advanced_memo.mjs) have been doing it. Adds optional memo + endpoint parameters. The MCP spending cap (1000 QUG per send) and the explicit confirm gate remain.", {
+    to_address: z.string().describe("Recipient qnk... address (qnk + 64 hex chars)"),
+    amount: z.number().positive().describe("Amount of QUG to send in display units (e.g., 1.5 for 1.5 QUG)"),
+    memo: z.string().optional().describe("Optional memo string attached to the transaction. UTF-8 accepted. The Quillon ledger stores it on the tx record; some clients render it in the tx details modal."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override (shortname or full URL). Use 'epsilon' to land tx on canonical chain and bypass the quillon.xyz LB routing roulette. Defaults to the MCP's configured QUILLON_API_URL."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a dry-run summary with the fields you're about to commit."),
+}, async ({ to_address, amount, memo, seed, endpoint, confirm }) => {
+    // Validate recipient format
+    if (!/^qnk[0-9a-f]{64}$/.test(to_address)) {
+        return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...` }] };
     }
-    refreshSession(); // Keep session alive on activity
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 1: Validate wallet address format
-    // ═══════════════════════════════════════════════════════════════
-    if (!to_address.startsWith('qnk') || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
-        return {
-            content: [{
-                    type: "text",
-                    text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...`,
-                }],
-        };
-    }
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 2: Require explicit confirmation for transactions
-    // ═══════════════════════════════════════════════════════════════
-    // Return a confirmation prompt instead of executing immediately.
-    // The AI must relay this to the user and get explicit approval.
-    if (!to_address.startsWith('qnk_CONFIRMED_')) {
-        return {
-            content: [{
-                    type: "text",
-                    text: [
-                        `⚠️ TRANSACTION CONFIRMATION REQUIRED`,
-                        ``,
-                        `  From:   ${activeWalletAddress.slice(0, 20)}...`,
-                        `  To:     ${to_address.slice(0, 20)}...`,
-                        `  Amount: ${amount} QUG`,
-                        ``,
-                        `Please confirm: do you want to send ${amount} QUG to ${to_address}?`,
-                        `Reply "yes, send ${amount} QUG to ${to_address}" to proceed.`,
-                        ``,
-                        `⚠️ This action is irreversible. Verify the recipient address carefully.`,
-                    ].join("\n"),
-                }],
-        };
-    }
-    // Strip confirmation prefix
-    const confirmed_address = to_address.replace('qnk_CONFIRMED_', 'qnk');
-    // ═══════════════════════════════════════════════════════════════
-    // SECURITY FIX 3: Spending limits
-    // ═══════════════════════════════════════════════════════════════
+    // Spending cap (carryover safety from the old tool)
     if (amount > 1000) {
-        return {
-            content: [{
-                    type: "text",
-                    text: `⚠️ Amount exceeds MCP spending limit (1000 QUG). For larger transfers, use the web wallet at quillon.xyz.`,
-                }],
-        };
+        return { content: [{ type: "text", text: `⚠️ Amount exceeds MCP spending limit (1000 QUG per call). For larger transfers, either chunk it or use the web wallet.` }] };
     }
-    if (amount <= 0) {
-        return {
-            content: [{
-                    type: "text",
-                    text: `Invalid amount: must be greater than 0.`,
-                }],
-        };
-    }
+    let signerAddress;
     try {
-        const res = await api("/transactions/send", "POST", {
-            from: activeWalletAddress,
-            to: confirmed_address,
-            amount: Math.floor(amount * 1e24).toString(),
-            ...(authToken ? { auth_token: authToken } : {}),
-        });
-        if (res.success) {
-            return {
-                content: [{
-                        type: "text",
-                        text: [
-                            `Transaction submitted!`,
-                            ``,
-                            `  From:   ${activeWalletAddress.slice(0, 16)}...`,
-                            `  To:     ${to_address.slice(0, 16)}...`,
-                            `  Amount: ${amount} QUG`,
-                            res.data?.tx_id ? `  TX ID:  ${res.data.tx_id}` : '',
-                            ``,
-                            `The transaction will be included in the next block (~1 second).`,
-                        ].filter(Boolean).join("\n"),
-                    }],
-            };
-        }
-        else {
-            return {
-                content: [{
-                        type: "text",
-                        text: `Transaction failed: ${res.error || 'Unknown error'}`,
-                    }],
-            };
-        }
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
     }
     catch (e) {
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+    }
+    // 24-decimal AMM-base scaling.
+    const amtBase = toBaseUnits(amount, AMM_DECIMALS);
+    const memoBytes = memo ? new TextEncoder().encode(memo).length : 0;
+    if (!confirm) {
         return {
             content: [{
                     type: "text",
-                    text: `Send failed: ${e.message}\n\nThe wallet may need re-authentication or have insufficient balance.`,
+                    text: [
+                        `⚠ SEND DRY RUN — pass confirm=true to submit`,
+                        ``,
+                        `  From:     ${signerAddress}`,
+                        `  To:       ${to_address}`,
+                        `  Amount:   ${amount} QUG  (raw ${amtBase})`,
+                        `  Endpoint: ${endpoint ?? "(MCP default)"}`,
+                        memo ? `  Memo:     ${memoBytes} bytes UTF-8 (${memo.length} chars)` : `  Memo:     (none)`,
+                        ``,
+                        memo ? `Memo preview:\n${memo.split("\n").slice(0, 8).map((l) => "  > " + l).join("\n")}${memo.split("\n").length > 8 ? "\n  > …" : ""}` : `(no memo)`,
+                        ``,
+                        `On confirm:`,
+                        `  ↦ POST /api/v1/transactions/send_signed (X-Wallet-Auth)`,
+                        `  ↦ Returns transaction_id; chain on-chain via tx_status tx_hash=<id>`,
+                        `  ↦ ${endpoint ? "lands on " + endpoint + " (pinned)" : "subject to quillon.xyz LB routing — fork-side backend possible"}`,
+                    ].join("\n"),
                 }],
         };
+    }
+    // Build the signed body — u128 amount as JSON STRING to avoid the
+    // deserialize_u128 f64-precision-loss warning the server emits otherwise.
+    const bodyObj = {
+        from: signerAddress,
+        to: to_address,
+        amount: amtBase,
+        token_type: "QUG",
+    };
+    if (memo)
+        bodyObj.memo = memo;
+    try {
+        const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient QUG balance (run get_balance)\n  • Bad signature — re-check seed file matches the wallet you intend\n  • Recipient address invalid` }] };
+        }
+        const data = res?.data ?? res;
+        const txId = data.transaction_id ?? data.tx_id ?? data.tx_hash ?? "(no tx id returned)";
+        const broadcast = data.broadcast_success;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `✅ Sent ${amount} QUG`,
+                        ``,
+                        `  From:     ${signerAddress}`,
+                        `  To:       ${to_address}`,
+                        `  Amount:   ${amount} QUG`,
+                        `  Tx hash:  ${txId}`,
+                        memo ? `  Memo:     ${memoBytes} bytes` : "",
+                        broadcast === false ? `  ⚠ broadcast_success=false — local-only on this backend; tx will gossip on next block production` : "",
+                        ``,
+                        `Next:`,
+                        `  tx_status tx_hash=${txId}   → confirm on-chain`,
+                        memo ? `  (the memo is stored on the tx record; the wallet UI's tx-details modal may not yet render multi-line memos — known frontend gap)` : "",
+                    ].filter(Boolean).join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Send failed: ${e?.message ?? e}` }] };
     }
 });
 server.tool("network_status", "Get current Quillon network status — height, peers, block rate, mining stats", {}, async () => {
@@ -792,28 +836,49 @@ server.tool("mining_status", "Check current mining statistics — hashrate, solu
 // ============================================================
 // NODE SETUP
 // ============================================================
-server.tool("setup_node", "Set up a full Quillon (QNK) blockchain node on this Debian/Ubuntu Linux machine. Downloads the latest binary, creates the data directory, and installs a systemd service that survives reboots. After setup the node will sync automatically.", {
+server.tool("setup_node", "Set up a full Quillon (QNK) blockchain node on this Debian/Ubuntu Linux machine. Downloads the latest binary, creates the data directory, and installs a systemd service that survives reboots. After setup the node will sync automatically.\n\n" +
+    "v2.5.0 onboarding flow: by DEFAULT this tool uses THIS MCP's agent wallet (the seed-derived address that get_balance / wallet_info reports) as the node's admin-wallet — meaning the node binds to the same identity the MCP signs as, and you can administer it via X-Wallet-Auth without juggling separate credentials. Override with use_mcp_agent_wallet=false if you want a fresh wallet OR set wallet_address=qnk... to a specific override.\n\n" +
+    "Also by DEFAULT auto_update is ON: a small systemd timer polls /api/v1/version every 6 hours, downloads the new q-api-server binary when a higher version is published, and restarts the service. 8-day-unattended-safe.", {
     install_dir: z.string().optional().describe("Directory to install the node (default: /opt/quillon)"),
     data_dir: z.string().optional().describe("Directory for blockchain data (default: /opt/quillon/data)"),
     api_port: z.number().optional().describe("HTTP API port (default: 8080)"),
     p2p_port: z.number().optional().describe("P2P gossip port (default: 9001)"),
-    wallet_address: z.string().optional().describe("Your qnk... wallet address to use as the node admin wallet. If omitted, the setup wizard will ask interactively."),
+    wallet_address: z.string().optional().describe("Override the admin wallet to a specific qnk... address. If omitted, behavior depends on use_mcp_agent_wallet."),
+    use_mcp_agent_wallet: z.boolean().optional().describe("Bind the node's admin wallet to THIS MCP's seed-derived agent wallet (the same address get_balance / wallet_info reports). Default: true — recommended for agent-managed nodes."),
+    auto_update: z.boolean().optional().describe("Install a systemd timer that checks /api/v1/version every 6 hours and self-updates the q-api-server binary when a higher version ships. Default: true — recommended for unattended operation."),
     build_from_source: z.boolean().optional().describe("Build from source using Rust instead of downloading pre-built binary (default: false)"),
-}, async ({ install_dir, data_dir, api_port, p2p_port, build_from_source, wallet_address }) => {
+}, async ({ install_dir, data_dir, api_port, p2p_port, build_from_source, wallet_address, use_mcp_agent_wallet, auto_update }) => {
     const installDir = install_dir || "/opt/quillon";
     const dataDir = data_dir || `${installDir}/data`;
     const apiPort = api_port || 8080;
     const p2pPort = p2p_port || 9001;
     const binaryUrl = `${DOWNLOAD_BASE}/q-api-server-linux-x86_64`;
-    // Auto-create a fresh wallet for this node if none supplied
+    const useMcpAgent = use_mcp_agent_wallet !== false; // default true
+    const autoUpdate = auto_update !== false; // default true
+    // v2.5.0 admin-wallet selection ladder:
+    //   1. Explicit wallet_address override                       → use it
+    //   2. use_mcp_agent_wallet=true (default) AND seed available → derive
+    //   3. Auto-create a fresh wallet via /wallets/create         → fallback
     let adminWallet = wallet_address || "";
     let newWalletMnemonic = "";
+    let adminWalletSource = "explicit-override";
+    if (!adminWallet && useMcpAgent) {
+        try {
+            const { seed } = loadSeed({});
+            adminWallet = deriveKeys(seed).address;
+            adminWalletSource = "mcp-agent-wallet (seed-derived)";
+        }
+        catch {
+            // Seed unavailable; fall through to auto-create.
+        }
+    }
     if (!adminWallet) {
         try {
             const res = await api("/wallets/create", "POST", {});
             if (res.success && res.data?.address_formatted) {
                 adminWallet = res.data.address_formatted;
                 newWalletMnemonic = res.data.mnemonic || "";
+                adminWalletSource = "freshly created";
             }
         }
         catch { }
@@ -1009,33 +1074,91 @@ server.tool("setup_node", "Set up a full Quillon (QNK) blockchain node on this D
         `echo "  ╚═══════════════════════════════════════════════╝"`,
         `echo ""`,
     ].join("\n");
+    // v2.5.0 auto-update systemd timer (inserted into the install script if
+    // auto_update=true). Polls /api/v1/version every 6h; if a higher
+    // q-api-server version is published at quillon.xyz/downloads/, downloads
+    // it and restarts the systemd service. 8-day-unattended-safe.
+    const autoUpdateScriptAppendix = autoUpdate ? [
+        ``,
+        `# ── v2.5.0 auto-update timer (every 6h, /api/v1/version → download → restart) ──`,
+        `cat > ${installDir}/auto-update.sh << 'AUEOF'`,
+        `#!/bin/bash`,
+        `set -e`,
+        `INSTALL_DIR="${installDir}"`,
+        `BIN="$INSTALL_DIR/q-api-server"`,
+        `RUNNING_VER=$(curl -s --max-time 5 http://localhost:${apiPort}/api/v1/status 2>/dev/null | grep -oE '"version":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")`,
+        `LATEST_VER=$(curl -s --max-time 5 https://quillon.xyz/api/v1/version 2>/dev/null | grep -oE '"version":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")`,
+        `if [ -z "$LATEST_VER" ] || [ -z "$RUNNING_VER" ]; then echo "auto-update: version-fetch failed; skipping"; exit 0; fi`,
+        `if [ "$LATEST_VER" = "$RUNNING_VER" ]; then exit 0; fi`,
+        `# Higher-version available — download + restart`,
+        `echo "auto-update: $RUNNING_VER -> $LATEST_VER"`,
+        `curl -fSL "https://quillon.xyz/downloads/q-api-server-v\${LATEST_VER}" -o "$BIN.new"`,
+        `chmod +x "$BIN.new"`,
+        `mv "$BIN" "$BIN.prev"`,
+        `mv "$BIN.new" "$BIN"`,
+        `systemctl restart quillon-node`,
+        `echo "auto-update: restarted on v\${LATEST_VER}"`,
+        `AUEOF`,
+        `chmod +x ${installDir}/auto-update.sh`,
+        ``,
+        `cat > /etc/systemd/system/quillon-autoupdate.service << 'AUSVEOF'`,
+        `[Unit]`,
+        `Description=Quillon node auto-updater (one-shot, run by timer)`,
+        `[Service]`,
+        `Type=oneshot`,
+        `ExecStart=${installDir}/auto-update.sh`,
+        `AUSVEOF`,
+        ``,
+        `cat > /etc/systemd/system/quillon-autoupdate.timer << 'AUTIEOF'`,
+        `[Unit]`,
+        `Description=Quillon auto-update every 6 hours`,
+        `[Timer]`,
+        `OnBootSec=10min`,
+        `OnUnitActiveSec=6h`,
+        `Unit=quillon-autoupdate.service`,
+        `[Install]`,
+        `WantedBy=timers.target`,
+        `AUTIEOF`,
+        ``,
+        `systemctl daemon-reload`,
+        `systemctl enable --now quillon-autoupdate.timer`,
+        `echo "auto-update timer enabled — checks every 6h"`,
+    ].join("\n") : "";
     return {
         content: [{
                 type: "text",
                 text: [
                     adminWallet && newWalletMnemonic ? [
-                        `🔑 New wallet created for this node:`,
+                        `🔑 New wallet created for this node (no MCP seed found):`,
                         ``,
                         `  Address:  ${adminWallet}`,
                         `  Mnemonic: ${newWalletMnemonic}`,
                         ``,
                         `  ⚠️  Save the mnemonic — it's the only way to recover this wallet.`,
                         ``,
-                    ].join("\n") : adminWallet ? `Using wallet: ${adminWallet}\n` : "",
+                    ].join("\n") : adminWallet ? [
+                        `🔐 Node admin wallet: ${adminWallet}`,
+                        `   Source: ${adminWalletSource}`,
+                        ``,
+                    ].join("\n") : "",
+                    autoUpdate ? `⚙️  Auto-update: ON (systemd timer, 6h cadence). Disable with auto_update=false.\n` : `⚙️  Auto-update: OFF. Enable with auto_update=true.\n`,
                     `Node setup script (pre-built binary, fast):\n`,
                     `\`\`\`bash`,
-                    script,
+                    script + autoUpdateScriptAppendix,
                     `\`\`\``,
                     ``,
                     `Run as root on your Debian/Ubuntu server:`,
                     `  sudo bash setup-node.sh`,
                     ``,
                     `What this does:`,
-                    `1. Creates a fresh wallet for this node`,
+                    useMcpAgent && adminWalletSource.startsWith("mcp-agent")
+                        ? `1. Binds the node's admin wallet to this MCP's agent wallet (${adminWallet.slice(0, 18)}…)`
+                        : `1. Configures the node with admin wallet ${adminWallet.slice(0, 18)}…`,
                     `2. Downloads the latest pre-built binary (~30 seconds)`,
                     `3. Writes .env config (no interactive wizard)`,
                     `4. Installs systemd service — auto-starts on reboot`,
-                    `5. Node syncs 17M+ blocks via turbo-sync (2-6 hours)`,
+                    autoUpdate ? `5. Installs systemd auto-update timer — polls /api/v1/version every 6h, self-restarts on new release` : `5. (auto-update DISABLED — node stays on the version you install)`,
+                    `6. Node syncs 17M+ blocks via turbo-sync (2-6 hours)`,
                     ``,
                     `Requirements: Debian 12 / Ubuntu 22.04, root access, 50GB disk, 4GB RAM`,
                     ``,
@@ -1072,16 +1195,80 @@ function findTokenBySymbol(tokens, symbol) {
 // reported a receive of 3.4 × 10^15 QUG (off by 10^16).
 const AMM_DECIMALS = 24;
 // Multiply display amount × 10^decimals as a BigInt-precise string.
+//
+// v2.7.2: ACCEPTS STRING INPUT + uses .toString() instead of .toFixed(decimals).
+// The old .toFixed(decimals) path exposed IEEE-754 binary drift — for example
+// (0.01).toFixed(24) returns "0.010000000000000000208167" because 0.01 has no
+// exact IEEE-754 representation. Scaling that to 24 decimals produced
+// 10000000000000000208167 instead of the clean 10000000000000000000000.
+// The send_qug v2.7.1 dry-run smoke test surfaced this on 2026-05-21.
+//
+// Fix:
+//   1. Accept string input directly — agents passing u128-precise amounts
+//      (e.g. "10000000000000000000000") can preserve every digit.
+//   2. For number input, use displayAmount.toString() — JavaScript engines
+//      emit the shortest round-trip decimal representation (so (0.01)
+//      becomes "0.01", not the 17-significant-digit IEEE expansion).
+//   3. Handle scientific notation if it leaks through (e.g. 1e-7).
+//
 // Avoids float precision loss for large decimal counts (24 for QUG).
 function toBaseUnits(displayAmount, decimals) {
-    if (!Number.isFinite(displayAmount) || displayAmount < 0) {
-        throw new Error(`Invalid amount: ${displayAmount}`);
+    let s;
+    if (typeof displayAmount === "string") {
+        s = displayAmount.trim();
+        if (s === "")
+            throw new Error("Empty amount");
     }
-    // Split into integer and fractional, scale each with BigInt to avoid float drift.
-    const s = displayAmount.toFixed(decimals);
-    const [intPart, fracPart = ""] = s.split(".");
-    const padded = (fracPart + "0".repeat(decimals)).slice(0, decimals);
-    const combined = (intPart + padded).replace(/^0+/, "") || "0";
+    else {
+        if (!Number.isFinite(displayAmount) || displayAmount < 0) {
+            throw new Error(`Invalid amount: ${displayAmount}`);
+        }
+        // toString() gives the shortest round-trip representation.
+        // (0.01).toString() === "0.01"  (no IEEE expansion)
+        // (0.1 + 0.2).toString() === "0.30000000000000004"  (drift survives — that's intentional)
+        s = displayAmount.toString();
+    }
+    // Expand scientific notation like "1e-7" or "5e+21" to plain decimal form.
+    if (/[eE]/.test(s)) {
+        const m = s.match(/^(-?)(\d+(?:\.\d+)?)[eE]([+-]?\d+)$/);
+        if (!m)
+            throw new Error(`Invalid amount format: ${displayAmount}`);
+        const [, sign, mantissa, expStr] = m;
+        const exp = parseInt(expStr, 10);
+        const [mInt, mFrac = ""] = mantissa.split(".");
+        const digits = mInt + mFrac;
+        const pointFromLeft = mInt.length + exp; // virtual decimal point index
+        if (pointFromLeft <= 0) {
+            s = sign + "0." + "0".repeat(-pointFromLeft) + digits;
+        }
+        else if (pointFromLeft >= digits.length) {
+            s = sign + digits + "0".repeat(pointFromLeft - digits.length);
+        }
+        else {
+            s = sign + digits.slice(0, pointFromLeft) + "." + digits.slice(pointFromLeft);
+        }
+    }
+    // Negative not supported.
+    if (s.startsWith("-")) {
+        throw new Error(`Negative amounts not supported: ${displayAmount}`);
+    }
+    // Validate digits + at most one decimal point.
+    if (!/^\d+(\.\d+)?$/.test(s)) {
+        throw new Error(`Invalid amount format: ${displayAmount}`);
+    }
+    // Split into integer + fractional, pad/truncate the fractional to `decimals`.
+    const [intPart, fracRaw = ""] = s.split(".");
+    let frac = fracRaw;
+    if (frac.length > decimals) {
+        // Silently truncate beyond the decimal cap — the value is already more
+        // precise than the on-chain representation can store.
+        frac = frac.slice(0, decimals);
+    }
+    else {
+        frac = frac.padEnd(decimals, "0");
+    }
+    // Combine + strip leading zeros (keep one if the whole thing is zero).
+    const combined = (intPart + frac).replace(/^0+(?!$)/, "") || "0";
     return combined;
 }
 // Inverse: base units (string) → display number with the given decimals.
@@ -1328,104 +1515,120 @@ server.tool("dex_swap", "Execute a DEX swap. v2.1.1: signs via the configured se
 // ============================================================
 // TOKEN TRANSFER TOOL — send any DEX-listed token
 // ============================================================
-server.tool("send_token", "Send a non-QUG token (e.g., QUGUSD, wBTC, wETH) from your authenticated wallet to another address. Same auth + confirmation pattern as send_qug. Use this for any token returned by dex_list_tokens.", {
-    token: z.string().describe("Token symbol (QUGUSD, wBTC, wZEC, wIRON, wETH, etc.) — see dex_list_tokens"),
+server.tool("send_token", "Send a non-QUG token to another address. v2.7.1: migrated off the browser-auth gate — now signs every send via the configured seed (file → QNK_SEED env) using X-Wallet-Auth on POST /transactions/send_signed, same approach as the existing one-off mjs scripts. Resolves token symbols (QUGUSD, wBTC, …) to the correct token_type wire format for both native (symbol literal) and Custom/Wrapped (contract address). Adds optional memo + endpoint parameters.", {
+    token: z.string().describe("Token symbol (e.g., QUGUSD, wBTC, ASHEN, PACI). Or the full qnk… contract address if the symbol is ambiguous. Run dex_list_tokens for the registered set."),
     to_address: z.string().describe("Recipient qnk... address"),
     amount: z.number().positive().describe("Amount in display units (e.g., 25.5 for 25.5 QUGUSD)"),
-    confirm: z.boolean().optional().describe("Set true to execute; without it, returns confirmation prompt"),
-}, async ({ token, to_address, amount, confirm }) => {
-    // Auth gate (same as send_qug)
-    if (!isSessionValid()) {
-        return {
-            content: [{
-                    type: "text",
-                    text: [
-                        `Wallet not authenticated${sessionAuthenticatedAt ? ' (session expired)' : ''}. To send tokens:`,
-                        ``,
-                        `  1. Say "authenticate wallet"`,
-                        `  2. Open the link in your browser and approve`,
-                        `  3. Say "check auth"`,
-                        `  4. Then retry sending`,
-                    ].join("\n"),
-                }],
-        };
-    }
-    refreshSession();
-    // Validate address format
-    if (!to_address.startsWith("qnk") || to_address.length !== 67 || !/^qnk[0-9a-f]{64}$/.test(to_address)) {
-        return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex chars (67 total).` }] };
+    memo: z.string().optional().describe("Optional memo string attached to the transaction."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override. Use 'epsilon' for canonical chain landing."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a dry-run summary."),
+}, async ({ token, to_address, amount, memo, seed, endpoint, confirm }) => {
+    if (!/^qnk[0-9a-f]{64}$/.test(to_address)) {
+        return { content: [{ type: "text", text: `Invalid recipient address. Must be 'qnk' + 64 hex characters (67 total). Got: ${to_address.slice(0, 20)}...` }] };
     }
     if (amount <= 0) {
         return { content: [{ type: "text", text: `Amount must be > 0.` }] };
     }
-    // Look up token decimals + verify it's tradeable
-    let tokens;
+    // Resolve token. Two paths:
+    //   - Address-style ref ("qnk…"): use directly as token_type (Custom/Wrapped).
+    //   - Symbol ref: look up in /dex/tokens. If Native/Stablecoin → symbol literal.
+    //     If Custom/Wrapped → use the contract address (server expects address for these).
+    let tokenLabel = token;
+    let tokenTypeWire;
+    let tokenDecimalsHint = AMM_DECIMALS;
+    if (token.startsWith("qnk") && token.length >= 60) {
+        tokenTypeWire = token;
+        tokenLabel = token.slice(0, 12) + "…";
+    }
+    else {
+        let tokens;
+        try {
+            tokens = await fetchTokens();
+        }
+        catch (e) {
+            return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] };
+        }
+        const t = findTokenBySymbol(tokens, token);
+        if (!t) {
+            return { content: [{ type: "text", text: `Unknown token "${token}". Run dex_list_tokens to see registered ones, or pass the contract address directly (e.g. for ASHEN/PACI which may not be in /dex/tokens).` }] };
+        }
+        tokenLabel = t.symbol;
+        tokenDecimalsHint = t.decimals;
+        if (t.symbol.toUpperCase() === "QUG") {
+            return { content: [{ type: "text", text: `For native QUG, use send_qug instead.` }] };
+        }
+        const tt = (t.contract_type || "").toString().toLowerCase();
+        // Native (non-QUG) and Stablecoin: symbol literal works on the server.
+        // Custom/Wrapped: must use the contract address.
+        tokenTypeWire = ["stablecoin", "native"].includes(tt) ? t.symbol : t.address;
+    }
+    // All amounts in 24-decimal AMM-base (per dex_token_bugs memory).
+    const amtBase = toBaseUnits(amount, AMM_DECIMALS);
+    let signerAddress;
     try {
-        tokens = await fetchTokens();
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
     }
     catch (e) {
-        return { content: [{ type: "text", text: `Token lookup failed: ${e.message}` }] };
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
     }
-    const t = findTokenBySymbol(tokens, token);
-    if (!t) {
-        return { content: [{ type: "text", text: `Unknown token "${token}". Run dex_list_tokens to see what's available.` }] };
-    }
-    // Don't allow sending QUG through this — use send_qug for native to keep audit trails clean
-    if (t.symbol.toUpperCase() === "QUG") {
-        return { content: [{ type: "text", text: `For native QUG, use send_qug instead (separate code path, separate per-session limits).` }] };
-    }
-    // Confirmation step
+    const memoBytes = memo ? new TextEncoder().encode(memo).length : 0;
     if (!confirm) {
         return {
             content: [{
                     type: "text",
                     text: [
-                        `⚠️ TOKEN TRANSFER CONFIRMATION REQUIRED`,
+                        `⚠ TOKEN SEND DRY RUN — pass confirm=true to submit`,
                         ``,
-                        `  From:   ${activeWalletAddress.slice(0, 20)}...`,
-                        `  To:     ${to_address.slice(0, 20)}...`,
-                        `  Send:   ${amount} ${t.symbol}  (${t.contract_type})`,
-                        ``,
-                        `Caveat: ${tokenCaveat(t)}`,
-                        ``,
-                        `Reply: send_token token=${t.symbol} to_address=${to_address} amount=${amount} confirm=true`,
-                        `(or rephrase: "yes, send ${amount} ${t.symbol}")`,
-                        ``,
-                        `This is irreversible. Verify above.`,
+                        `  From:        ${signerAddress}`,
+                        `  To:          ${to_address}`,
+                        `  Amount:      ${amount} ${tokenLabel}`,
+                        `  Base (24-d): ${amtBase}`,
+                        `  Token wire:  ${tokenTypeWire}`,
+                        `  Native dec:  ${tokenDecimalsHint}`,
+                        `  Endpoint:    ${endpoint ?? "(MCP default)"}`,
+                        memo ? `  Memo:        ${memoBytes} bytes UTF-8` : `  Memo:        (none)`,
                     ].join("\n"),
                 }],
         };
     }
-    // Execute
+    const bodyObj = {
+        from: signerAddress,
+        to: to_address,
+        amount: amtBase,
+        token_type: tokenTypeWire,
+    };
+    if (memo)
+        bodyObj.memo = memo;
     try {
-        const res = await api("/transactions/send", "POST", {
-            from: activeWalletAddress,
-            to: to_address,
-            amount: amount, // f64; the handler does decimal scaling per token_type
-            token_type: t.symbol,
-            ...(authToken ? { auth_token: authToken } : {}),
-        });
-        if (!res.success) {
-            return { content: [{ type: "text", text: `Token transfer failed: ${res.error || 'unknown error'}` }] };
+        const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient ${tokenLabel} balance (run get_token_balance symbol=${tokenLabel})\n  • Custom token expects contract address as token_type — we used "${tokenTypeWire}"\n  • Recipient address invalid` }] };
         }
+        const data = res?.data ?? res;
+        const txId = data.transaction_id ?? data.tx_id ?? data.tx_hash ?? "(no tx id returned)";
+        const broadcast = data.broadcast_success;
         return {
             content: [{
                     type: "text",
                     text: [
-                        `✅ ${t.symbol} transfer submitted!`,
+                        `✅ Sent ${amount} ${tokenLabel}`,
                         ``,
-                        `  From:   ${activeWalletAddress.slice(0, 16)}...`,
-                        `  To:     ${to_address.slice(0, 16)}...`,
-                        `  Amount: ${amount} ${t.symbol}`,
-                        res.data?.tx_id ? `  Tx id:  ${res.data.tx_id}` : ``,
+                        `  From:     ${signerAddress}`,
+                        `  To:       ${to_address}`,
+                        `  Amount:   ${amount} ${tokenLabel}`,
+                        `  Tx hash:  ${txId}`,
+                        memo ? `  Memo:     ${memoBytes} bytes` : "",
+                        broadcast === false ? `  ⚠ broadcast_success=false — local-only on this backend; tx will gossip on next block production` : "",
                         ``,
-                        `Will be included in the next block (~1 second).`,
+                        `Next: tx_status tx_hash=${txId}`,
                     ].filter(Boolean).join("\n"),
                 }],
         };
     }
     catch (e) {
-        return { content: [{ type: "text", text: `Token send failed: ${e.message}` }] };
+        return { content: [{ type: "text", text: `Token send failed: ${e?.message ?? e}` }] };
     }
 });
 // ============================================================
@@ -2209,20 +2412,62 @@ server.tool("get_token_balance", "Get the balance of any token (not just QUG) fo
             const qug = res?.balance ?? res?.data?.balance ?? 0;
             return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${qug} QUG` }] };
         }
-        // For all other tokens: hit /wallets/<addr>/tokens which returns the
-        // full token-balance map. AMM/contract storage is 24-decimal universally.
-        const res = await api(`/wallets/${target}/tokens`, "GET");
-        const list = res?.tokens ?? res?.data?.tokens ?? res?.data ?? [];
-        const entry = Array.isArray(list)
-            ? list.find((e) => (e.symbol || "").toUpperCase() === t.symbol.toUpperCase())
-            : null;
-        if (!entry) {
-            return { content: [{ type: "text", text: `${target}\n  ${symbol}: 0 (no balance found)` }] };
+        // v2.7.0: dispatch by token type. The old /wallets/<addr>/tokens path
+        // 404s server-side — the route never existed. Three real paths:
+        //   - Custom / Wrapped (has contract address): GET /contracts/<addr>/balance/<wallet>
+        //     unauthenticated, returns { data: { balance: "<raw u128>" } }
+        //   - Stablecoin (e.g. QUGUSD): GET /wallet/tokens with X-Wallet-Auth, address
+        //     extracted from header. Only works for the signer's own wallet.
+        //   - Native non-QUG: same /wallet/tokens path.
+        const tt = (t.contract_type || "").toString().toLowerCase();
+        const hasContractAddr = t.address && !["native", "stablecoin"].includes(tt);
+        if (hasContractAddr) {
+            // Custom or Wrapped token — contract-scoped balance endpoint.
+            const res = await api(`/contracts/${t.address}/balance/${target}`, "GET");
+            const raw = res?.balance ?? res?.data?.balance ?? "0";
+            // Use the token's own decimals for display (AMM_DECIMALS may differ for some).
+            const display = fromBaseUnits(String(raw), t.decimals ?? AMM_DECIMALS);
+            return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${raw}, scale: ${t.decimals ?? AMM_DECIMALS} decimals)` }] };
         }
-        // entry.balance is the 24-decimal AMM base; convert for display.
-        const raw = entry.balance ?? entry.amount ?? "0";
-        const display = fromBaseUnits(String(raw), AMM_DECIMALS);
-        return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display.toFixed(6)}\n  (raw base: ${raw}, scale: ${AMM_DECIMALS} decimals)` }] };
+        // Stablecoin / Native-non-QUG path — needs X-Wallet-Auth and only
+        // returns balances for the signer. If `address` was passed explicitly
+        // and doesn't match the seed-derived address, surface that limit.
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        const ownAddress = deriveKeys(rawSeed).address;
+        if (target !== ownAddress) {
+            return { content: [{ type: "text", text: `Cannot query ${symbol} balance for ${target} — the /wallet/tokens endpoint only returns balances for the authenticated caller (you). Use the wallet's own seed or query a Custom/Wrapped token (those allow third-party balance reads via /contracts/<addr>/balance/<wallet>).` }] };
+        }
+        const res = await apiSigned("/wallet/tokens", "GET", undefined, { seed });
+        // v2.7.1 fix: /wallet/tokens returns { data: { tokens: { "SYMBOL": {...}, ... } } } —
+        // an object keyed by symbol, NOT an array. v2.7.0 parsed it as array and silently
+        // returned 0 for everything. Handle both shapes for forward-compat.
+        const tokensField = res?.data?.tokens ?? res?.tokens ?? null;
+        let entry = null;
+        if (tokensField && typeof tokensField === "object" && !Array.isArray(tokensField)) {
+            // Object shape: look up by symbol key (case-insensitive).
+            const want = t.symbol.toUpperCase();
+            for (const [k, v] of Object.entries(tokensField)) {
+                if (k.toUpperCase() === want) {
+                    entry = v;
+                    break;
+                }
+            }
+        }
+        else if (Array.isArray(tokensField)) {
+            entry = tokensField.find((e) => (e.symbol || "").toUpperCase() === t.symbol.toUpperCase());
+        }
+        if (!entry) {
+            return { content: [{ type: "text", text: `${target}\n  ${symbol}: 0 (not present in /wallet/tokens response — wallet has never held ${symbol} on this backend, or backend routing landed on a chain branch where this token doesn't exist)` }] };
+        }
+        // Server returns balance pre-formatted as a display string (e.g. "561137.38026817")
+        // plus balance_base_units for the raw u128. Prefer balance for display.
+        const display = entry.balance ?? "0";
+        const rawBase = entry.balance_base_units ?? entry.amount ?? "(unknown)";
+        const usd = entry.usd_value;
+        const usdLine = (typeof usd === "number" && usd > 0)
+            ? `\n  USD value:  ~$${usd.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+            : "";
+        return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${rawBase}, scale: ${t.decimals ?? AMM_DECIMALS} decimals)${usdLine}` }] };
     }
     catch (e) {
         return { content: [{ type: "text", text: `get_token_balance failed: ${e?.message ?? e}` }] };
@@ -2414,19 +2659,35 @@ server.tool("arb_scan", "🎯 KILLER FEATURE — find triangular arbitrage oppor
 // ────────────────────────────────────────────────────────────────────
 // deploy_token — used for GROK commemorative + future commemoratives
 // ────────────────────────────────────────────────────────────────────
-server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 QUG. v2.3.0: convenience wrapper for /api/v1/contracts/deploy with sensible defaults. Use this for commemorative drops (e.g., GROK alongside the existing CLAI) or app-token launches.", {
+server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 QUG. v2.7.0: now accepts `contract_type` so it can pick any template from parse_contract_type (secure_token, advanced_token, orbusd_stablecoin, rwa_token, …). v2.3.0: convenience wrapper for /api/v1/contracts/deploy with sensible defaults. Use this for commemorative drops or app-token launches. For multi-step wizard (preview features + toggles) use deploy_smart_contract instead.", {
     name: z.string().min(2).max(64).describe("Full token name (e.g., 'Grok AI Commemorative')."),
     symbol: z.string().min(2).max(12).describe("Ticker symbol (e.g., 'GROK'). Uppercase recommended."),
     decimals: z.number().int().min(0).max(24).optional().describe("Decimals (default 0 for collectible/commemorative, 24 for utility tokens that need fractional units)."),
     initial_supply: z.number().positive().optional().describe("Initial supply minted to deployer (default 1_000_000). In display units; deploy will scale by 10^decimals."),
     description: z.string().optional().describe("Free-text description that ends up in the contract metadata."),
+    contract_type: z.string().optional().describe("Server-side template ID (snake_case). Default 'secure_token' = basic ERC20. Other options: 'advanced_token' (mint/burn/reflection/staking), 'orbusd_stablecoin', 'rwa_token', etc. — see deploy_smart_contract for the full list of 27 templates. Free-form for forward-compat."),
+    features: z.object({
+        mintable: z.boolean().optional(),
+        burnable: z.boolean().optional(),
+        reflection: z.boolean().optional(),
+        staking: z.boolean().optional(),
+        governance: z.boolean().optional(),
+        airdrops: z.boolean().optional(),
+        upgrades: z.boolean().optional(),
+        reflection_fee_bps: z.number().int().optional(),
+        burn_fee_bps: z.number().int().optional(),
+        liquidity_fee_bps: z.number().int().optional(),
+        max_tx_bps: z.number().int().optional(),
+        max_wallet_bps: z.number().int().optional(),
+    }).optional().describe("Advanced-template feature toggles + reflection/anti-bot params. Only meaningful when contract_type='advanced_token'."),
     seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
     confirm: z.boolean().optional().describe("Set to true to actually deploy. Without it, returns a dry-run summary."),
-}, async ({ name, symbol, decimals, initial_supply, description, seed, confirm }) => {
+}, async ({ name, symbol, decimals, initial_supply, description, contract_type, features, seed, confirm }) => {
     try {
         const dec = decimals ?? 0;
         const supply = initial_supply ?? 1_000_000;
         const desc = description ?? `Commemorative ${symbol} token on Quillon Graph`;
+        const ctype = (contract_type ?? "secure_token").trim();
         let signerAddress;
         try {
             const { seed: rawSeed } = loadSeed({ seedArg: seed });
@@ -2438,13 +2699,37 @@ server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 
         // Strip "qnk" prefix for the deploy endpoint (it wants raw hex address).
         const ownerHex = signerAddress.startsWith("qnk") ? signerAddress.slice(3) : signerAddress;
         const supplyBase = toBaseUnits(supply, dec);
+        // Build the parameters block — advanced_token accepts feature toggles.
+        const params = {
+            name,
+            symbol,
+            decimals: dec,
+            // The PACI deploy script (commit b0256eb5) used `initial_supply` (snake_case);
+            // older deploy_token used `initialSupply` (camelCase). Server's
+            // parse_contract_type accepts both for backward-compat. Send both so
+            // either template path picks it up.
+            initial_supply: supplyBase,
+            initialSupply: supplyBase,
+            description: desc,
+        };
+        if (ctype === "advanced_token" && features) {
+            Object.assign(params, features);
+        }
         if (!confirm) {
+            const featLines = ctype === "advanced_token" && features
+                ? [
+                    ``,
+                    `  Features:`,
+                    ...Object.entries(features).map(([k, v]) => `    ${k}: ${v}`),
+                ]
+                : [];
             return {
                 content: [{
                         type: "text",
                         text: [
                             `⚠ DEPLOY DRY RUN — pass confirm=true to execute`,
                             ``,
+                            `  Template:       ${ctype}`,
                             `  Name:           ${name}`,
                             `  Symbol:         ${symbol}`,
                             `  Decimals:       ${dec}`,
@@ -2453,24 +2738,19 @@ server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 
                             `  Description:    ${desc}`,
                             `  Deployer:       ${signerAddress}`,
                             `  Cost:           1 QUG (deployment fee)`,
+                            ...featLines,
                             ``,
                             `When you confirm, an LP pool is NOT auto-created. To make ${symbol}`,
                             `tradeable on the DEX, follow the deploy with an add_liquidity call`,
-                            `pairing ${symbol} with QUG.`,
+                            `pairing ${symbol} with QUG or QUGUSD.`,
                         ].join("\n"),
                     }],
             };
         }
         const res = await apiSigned("/contracts/deploy", "POST", {
-            contract_type: "TOKEN",
+            contract_type: ctype,
             owner: ownerHex,
-            parameters: {
-                name,
-                symbol,
-                decimals: dec,
-                initialSupply: supplyBase,
-                description: desc,
-            },
+            parameters: params,
         }, { seed });
         if (res?.success === false) {
             return { content: [{ type: "text", text: `Deploy failed: ${res.error ?? 'unknown error'}\n\nIf the error mentions 'rate limit', wait an hour. If it mentions 'insufficient balance', the deployer needs ≥ 1 QUG.` }] };
@@ -2501,6 +2781,399 @@ server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 
     }
     catch (e) {
         return { content: [{ type: "text", text: `deploy_token failed: ${e?.message ?? e}` }] };
+    }
+});
+// ────────────────────────────────────────────────────────────────────
+// v2.7.0: add_liquidity — provide LP for a token pair. Costs gas only.
+// Hits POST /api/v1/liquidity/add with X-Wallet-Auth signed by the
+// configured seed. If the pool doesn't exist, the FIRST call creates
+// it and the (amount0, amount1) ratio sets the initial price.
+//
+// Token addressing rules (per `dex_pool_lookup_symbol_vs_address` memory):
+//   - Native (QUG): pass the literal string "QUG"
+//   - Stablecoin (QUGUSD): pass the literal string "QUGUSD"
+//   - Custom / Wrapped: pass the full qnk… contract address
+// Pass token *symbols* for QUG/QUGUSD; pass *addresses* for everything else.
+// The tool auto-resolves symbols → contract addresses via dex_list_tokens.
+//
+// Amounts: pass DISPLAY units; the tool scales to u128 base via the
+// universal AMM 24-decimal encoding (see `dex_token_bugs` memory) — even
+// for 8-decimal tokens like wBTC, the AMM stores amounts in 24-decimal.
+// ────────────────────────────────────────────────────────────────────
+server.tool("add_liquidity", "Provide liquidity to a QUG-paired or token-paired DEX pool. v2.7.0: closes the gap that previously forced operators to hand-roll signing scripts (see send_qug_to_viktor_advanced_memo.mjs / deploy_paci.mjs pattern). If the pool doesn't exist yet, the FIRST add creates it and the (amount0, amount1) ratio sets the initial price — so be deliberate. Costs gas only (no flat fee). Auto-resolves token *symbols* to contract addresses; for symbols that need a unique address (multiple PACI-style customs) pass the qnk… address directly.", {
+    token0: z.string().describe("First side of the pair. Symbol ('QUG', 'QUGUSD', 'PACI') OR full qnk… contract address. Pass symbols for Native/Stablecoin; symbol-or-address for Custom/Wrapped."),
+    token1: z.string().describe("Second side of the pair. Same format as token0."),
+    amount0: z.union([z.number(), z.string()]).describe("Amount of token0 to deposit in DISPLAY units (e.g., 10 for 10 QUG, 100000 for 100k QUGUSD). Strings accepted for u128-precise inputs."),
+    amount1: z.union([z.number(), z.string()]).describe("Amount of token1 to deposit in DISPLAY units."),
+    slippage_percent: z.number().min(0).max(50).optional().describe("Slippage tolerance for the existing-pool path (default 0.5). Ignored on first-LP add (you set the price). Range 0–50."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a preview with implied prices, FDV, and pool-state warnings."),
+}, async ({ token0, token1, amount0, amount1, slippage_percent, seed, confirm }) => {
+    try {
+        // Resolve seed → signer address.
+        let signerAddress;
+        try {
+            const { seed: rawSeed } = loadSeed({ seedArg: seed });
+            signerAddress = deriveKeys(rawSeed).address;
+        }
+        catch (e) {
+            return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+        }
+        // Resolve token references to (label, server-side identifier).
+        // The server's liquidity_api accepts "QUG" literal for native; for
+        // anything with a contract address use the qnk… address directly.
+        const tokens = await fetchTokens();
+        const resolve = (ref) => {
+            const trimmed = ref.trim();
+            // Looks like an address?
+            if (trimmed.toLowerCase().startsWith("qnk") && trimmed.length >= 60) {
+                const hit = tokens.find(t => t.address?.toLowerCase() === trimmed.toLowerCase());
+                if (hit)
+                    return { label: hit.symbol, id: hit.address, decimals: hit.decimals, type: hit.contract_type };
+                return { label: trimmed.slice(0, 12) + "…", id: trimmed, decimals: AMM_DECIMALS, type: "Custom" };
+            }
+            // Symbol path.
+            const upper = trimmed.toUpperCase();
+            const hit = findTokenBySymbol(tokens, upper);
+            if (!hit) {
+                throw new Error(`Unknown token "${ref}". Run dex_list_tokens for the full set.`);
+            }
+            const tt = (hit.contract_type || "").toString().toLowerCase();
+            // Native/Stablecoin → use the symbol literal (server side keys these by name).
+            // Custom/Wrapped → must use the contract address per `dex_pool_lookup_symbol_vs_address`.
+            const id = ["native", "stablecoin"].includes(tt) ? hit.symbol : hit.address;
+            return { label: hit.symbol, id, decimals: hit.decimals, type: hit.contract_type };
+        };
+        const a = resolve(token0);
+        const b = resolve(token1);
+        if (a.id === b.id) {
+            return { content: [{ type: "text", text: `Refusing add_liquidity for ${a.label}↔${a.label} — both sides resolve to the same identifier.` }] };
+        }
+        // Display → AMM-base (24 decimals universally — see dex_token_bugs memory).
+        const amt0Display = typeof amount0 === "number" ? amount0 : Number(amount0);
+        const amt1Display = typeof amount1 === "number" ? amount1 : Number(amount1);
+        if (!(amt0Display > 0) || !(amt1Display > 0)) {
+            return { content: [{ type: "text", text: `Both amounts must be > 0 (got ${amount0}, ${amount1}).` }] };
+        }
+        const amt0Base = toBaseUnits(amt0Display, AMM_DECIMALS);
+        const amt1Base = toBaseUnits(amt1Display, AMM_DECIMALS);
+        // Probe existing pool by quoting 1 unit a→b. If the quote works the pool exists;
+        // if it returns "No liquidity pool found", we're about to create one.
+        // (Pool lookup by symbol works for Native/Stablecoin only; for Custom we need
+        // the symbol path of dex_get_quote, which understands both per recent fixes.)
+        let poolExists = false;
+        let existingQuote = null;
+        try {
+            const q = await api(`/dex/quote?from=${encodeURIComponent(a.label)}&to=${encodeURIComponent(b.label)}&amount=1`, "GET");
+            if (q?.success !== false && (q?.data?.amount_out || q?.amount_out)) {
+                poolExists = true;
+                existingQuote = `1 ${a.label} ≈ ${q.data?.amount_out ?? q.amount_out} ${b.label} (existing pool)`;
+            }
+        }
+        catch {
+            // 404 / not-found → pool does not exist → first-LP path
+        }
+        const impliedPrice0In1 = amt1Display / amt0Display;
+        const impliedPrice1In0 = amt0Display / amt1Display;
+        if (!confirm) {
+            const warn = [];
+            if (!poolExists) {
+                warn.push(`⚠ FIRST-LP — no existing pool. Your ratio sets the initial price.`);
+            }
+            else {
+                warn.push(`Existing pool detected. Quoted: ${existingQuote ?? "(unparseable)"}`);
+                warn.push(`Your add will be priced relative to the existing reserves; if your ratio is far from the pool price you'll donate value to arbers.`);
+            }
+            return {
+                content: [{
+                        type: "text",
+                        text: [
+                            `⚠ ADD LIQUIDITY DRY RUN — pass confirm=true to submit`,
+                            ``,
+                            `  Pair:       ${a.label} (${a.type}) ↔ ${b.label} (${b.type})`,
+                            `  token0 id:  ${a.id}`,
+                            `  token1 id:  ${b.id}`,
+                            `  amount0:    ${amt0Display.toLocaleString()} ${a.label}`,
+                            `  amount1:    ${amt1Display.toLocaleString()} ${b.label}`,
+                            `  base0:      ${amt0Base}`,
+                            `  base1:      ${amt1Base}`,
+                            `  Implied:    1 ${a.label} = ${impliedPrice0In1.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${b.label}`,
+                            `              1 ${b.label} = ${impliedPrice1In0.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${a.label}`,
+                            `  Provider:   ${signerAddress}`,
+                            `  Slippage:   ${slippage_percent ?? 0.5}% (only enforced on existing-pool path)`,
+                            ``,
+                            ...warn,
+                            ``,
+                            `Reminder — verify both balances BEFORE confirm:`,
+                            `  get_token_balance symbol=${a.label}`,
+                            `  get_token_balance symbol=${b.label}`,
+                            ``,
+                            `On confirm, the LP token credit lands in your wallet under generate_lp_token_address(pool_id).`,
+                            `Per add_liquidity_overwrite_bug memory (fixed v10.9.52): any wallet may LP into existing pools — your add will NOT overwrite an existing pool's reserves.`,
+                        ].join("\n"),
+                    }],
+            };
+        }
+        // Real submit — sign + POST /liquidity/add.
+        const res = await apiSigned("/liquidity/add", "POST", {
+            token0: a.id,
+            token1: b.id,
+            // Send as strings to preserve u128 precision (server's
+            // deserialize_u128_from_any accepts both forms).
+            amount0: amt0Base,
+            amount1: amt1Base,
+            provider: signerAddress,
+        }, { seed });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `add_liquidity failed: ${res.error ?? 'unknown error'}\n\nCommon causes:\n  • Insufficient balance of one side (run get_token_balance for both)\n  • Pool address mismatch — Custom/Wrapped need full qnk… address, not symbol\n  • Auth: derived ${signerAddress} but the deposit accounts may not match` }] };
+        }
+        const data = res?.data ?? res;
+        const poolId = data.pool_id ?? data.poolId ?? "(no pool_id)";
+        const lpMinted = data.lp_tokens_minted ?? data.lp_minted ?? "(no lp_minted)";
+        const txHash = data.transaction_hash ?? data.tx_hash ?? "(no tx hash)";
+        const lines = [
+            `✅ Liquidity ${poolExists ? "ADDED to" : "POOL CREATED for"} ${a.label}↔${b.label}!`,
+            ``,
+            `  Pool ID:     ${poolId}`,
+            `  LP minted:   ${lpMinted}  (credited to ${signerAddress})`,
+            `  Tx hash:     ${txHash}`,
+            `  Reserves:    +${amt0Display.toLocaleString()} ${a.label} / +${amt1Display.toLocaleString()} ${b.label}`,
+            `  Implied px:  1 ${a.label} = ${impliedPrice0In1.toLocaleString(undefined, { maximumFractionDigits: 8 })} ${b.label}`,
+            ``,
+            `Next steps:`,
+            `  1. tx_status tx_hash=${txHash}  → confirm landed`,
+            `  2. dex_get_quote from_token=${a.label} to_token=${b.label} amount=1  → verify pool routable`,
+            `  3. (optional) score_tweet_draft  → see what the agent_panel x-algo says about announcing this pool`,
+            !poolExists ? `  4. The pool is now TRADEABLE — anyone can dex_swap into it` : null,
+        ];
+        return {
+            content: [{
+                    type: "text",
+                    text: lines.filter((s) => s !== null).join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `add_liquidity failed: ${e?.message ?? e}` }] };
+    }
+});
+const CONTRACT_TEMPLATES = [
+    // Core Token Contracts — most users start here.
+    { id: "advanced_token", label: "Advanced Token (PACI-style)", category: "Token", description: "Full-featured ERC20 with toggleable reflection + staking + mint + burn + airdrop. Recommended for new launches.",
+        features: ["mintable", "burnable", "reflection", "staking", "governance", "airdrops", "upgrades"],
+        required: ["name", "symbol", "decimals", "initial_supply"] },
+    { id: "secure_token", label: "Secure Token (basic ERC20)", category: "Token", description: "Minimal ERC20 — name, symbol, supply. Cheapest deploy. Used for commemoratives + simple utility tokens.",
+        features: [],
+        required: ["name", "symbol", "decimals", "initial_supply"] },
+    { id: "rwa_token", label: "Real-World-Asset Token", category: "RWA", description: "Tokenized real-world claim — backed by off-chain custody, with KYC/AML hooks.",
+        features: ["transferable", "kyc_required", "compliance_locked"],
+        required: ["name", "symbol", "underlying", "custody_proof_uri"] },
+    { id: "orbusd_stablecoin", label: "OrbUSD-style Stablecoin", category: "Token", description: "CDP-backed stablecoin with on-chain collateral vault.",
+        features: ["mintable", "burnable", "liquidatable"],
+        required: ["name", "symbol", "collateral_token", "min_collateral_ratio_bps"] },
+    // DeFi Infrastructure.
+    { id: "multisig_wallet", label: "Multisig Wallet", category: "DeFi", description: "N-of-M owner signature scheme for shared treasuries.",
+        features: ["timelock", "spending_limit", "social_recovery"],
+        required: ["owners", "threshold"] },
+    { id: "governance", label: "Governance / DAO", category: "DeFi", description: "Token-weighted voting + proposal execution.",
+        features: ["quadratic_voting", "delegation", "snapshot_voting"],
+        required: ["voting_token", "proposal_threshold", "voting_period_blocks"] },
+    { id: "private_dex", label: "Private DEX", category: "DeFi", description: "Constant-product AMM with optional privacy primitives.",
+        features: ["ring_signatures", "stealth_addresses", "zk_orders"],
+        required: ["fee_bps"] },
+    { id: "timelock_vault", label: "Timelock Vault", category: "DeFi", description: "Funds released only after a delay — vesting + treasury cliffs.",
+        features: ["cancellable", "extendable"],
+        required: ["beneficiary", "unlock_unix"] },
+    { id: "oracle_feed", label: "Oracle Price Feed", category: "DeFi", description: "Push-based price feed, multi-signer signed.",
+        features: ["circuit_breaker", "deviation_check"],
+        required: ["asset_id", "signers", "threshold"] },
+    // Advanced DeFi.
+    { id: "lending_pool", label: "Lending Pool", category: "DeFi", description: "Single-asset lending market with utilization-based interest.",
+        features: ["flash_loans", "isolated_mode"],
+        required: ["underlying_token", "max_utilization_bps"] },
+    { id: "liquidity_pool", label: "Liquidity Pool", category: "DeFi", description: "Standalone constant-product pool — pair any two tokens.",
+        features: ["custom_fee_bps"],
+        required: ["token_a", "token_b", "fee_bps"] },
+    { id: "yield_farming", label: "Yield Farming Vault", category: "DeFi", description: "Staked LP earns emissions over time.",
+        features: ["boost", "lock_periods"],
+        required: ["stake_token", "reward_token", "emission_per_block"] },
+    { id: "staking_contract", label: "Staking Contract", category: "DeFi", description: "Stake any token to earn rewards. Linear or exponential schedules.",
+        features: ["compounding", "early_withdrawal_penalty"],
+        required: ["stake_token", "reward_token", "duration_blocks"] },
+    { id: "insurance_protocol", label: "Insurance Protocol", category: "DeFi", description: "On-chain mutual-insurance pool with payout-on-claim.",
+        features: ["dao_governed_claims", "premium_burning"],
+        required: ["underlying_token", "premium_bps"] },
+    // Real-world assets.
+    { id: "real_estate_token", label: "Real Estate Token", category: "RWA", description: "Tokenized property ownership, deed-backed.", required: ["property_id", "appraised_value_qugusd"] },
+    { id: "commodity_token", label: "Commodity Token", category: "RWA", description: "Tokenized gold/oil/wheat with vault attestation.", required: ["commodity_code", "vault_id"] },
+    { id: "carbon_credit_token", label: "Carbon Credit Token", category: "RWA", description: "Verified emission offsets — burnable on retirement.", required: ["registry", "vintage_year", "tonnes_co2"] },
+    { id: "art_collectible_token", label: "Art / Collectible NFT", category: "RWA", description: "1-of-1 or limited-edition with provenance.", required: ["artist", "title", "edition_size"] },
+    { id: "equity_token", label: "Equity Token", category: "RWA", description: "Cap-table share representation — KYC-gated transfers.", required: ["company_id", "shares_outstanding"] },
+    { id: "fixed_income_token", label: "Fixed Income Token", category: "RWA", description: "Coupon-bearing bond, scheduled payouts.", required: ["issuer", "maturity_unix", "coupon_bps"] },
+    { id: "ip_revenue_token", label: "IP Revenue Token", category: "RWA", description: "Royalty-stream share — receives a % of declared revenue.", required: ["ip_id", "royalty_bps"] },
+    { id: "physical_goods_token", label: "Physical Goods Token", category: "RWA", description: "Sealed-warehouse goods (luxury, wine, watches) with redemption.", required: ["item_id", "custody_url"] },
+    // Derivatives & Trading.
+    { id: "options_contract", label: "Options Contract", category: "Derivative", description: "European-style cash-settled options.", required: ["underlying", "strike", "expiry_unix"] },
+    { id: "prediction_market", label: "Prediction Market", category: "Derivative", description: "Yes/No outcome market with oracle resolution.", required: ["question", "resolver", "close_unix"] },
+    { id: "derivatives_platform", label: "Derivatives Platform", category: "Derivative", description: "Margin-trading venue, perp + futures.", required: ["base_asset"] },
+    { id: "synthetic_assets", label: "Synthetic Assets", category: "Derivative", description: "Tracks an off-chain price (sBTC, sAPPL, etc.) via oracle.", required: ["tracked_asset", "oracle"] },
+    // Utility & Infrastructure.
+    { id: "nft_marketplace", label: "NFT Marketplace", category: "Utility", description: "Listings + auctions, escrow + royalties.", required: ["fee_bps"] },
+    { id: "identity_contract", label: "Identity Contract", category: "Utility", description: "On-chain ENS-style + verified-credentials.", required: ["root_authority"] },
+    { id: "bridge_contract", label: "Bridge Contract", category: "Utility", description: "Multi-sig escrow with relayer attestation for cross-chain.", required: ["foreign_chain_id", "validators"] },
+    { id: "proxy_contract", label: "Proxy Contract", category: "Utility", description: "Upgradeable-impl proxy (transparent + UUPS).", required: ["implementation_address"] },
+];
+server.tool("deploy_smart_contract", "Multi-step deploy wizard. Call once with no args to get the template list (Claude Code surfaces it via AskUserQuestion). Call again with `template` to get required parameters + feature toggles. Call with `template` + `parameters` to see a deploy preview. Call with `confirm: true` to actually deploy. v2.6.0: replaces deploy_token's hardcoded contract_type — supports all 27 templates accepted by the server's parse_contract_type.", {
+    template: z.string().optional().describe("snake_case template ID (e.g., 'advanced_token'). Omit to get the list."),
+    parameters: z.record(z.any()).optional().describe("Deployment parameters keyed by name. Omit to get the required-fields list for the chosen template."),
+    confirm: z.boolean().optional().describe("Set true to actually deploy. Without it, returns a preview."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+}, async ({ template, parameters, confirm, seed }) => {
+    try {
+        // ── Step 1: template missing → return list grouped by category ────
+        if (!template) {
+            const byCategory = {};
+            for (const t of CONTRACT_TEMPLATES) {
+                (byCategory[t.category] ??= []).push(t);
+            }
+            const lines = [
+                `=== deploy_smart_contract (step 1/3) — pick a template ===`,
+                ``,
+                `Choose from ${CONTRACT_TEMPLATES.length} contract templates. Recommended starting points:`,
+                ``,
+                `  • advanced_token  — full-featured ERC20 (mint + burn + reflection + staking) — for new token launches`,
+                `  • secure_token    — minimal ERC20 — cheapest deploy, for commemoratives`,
+                `  • multisig_wallet — shared treasury`,
+                `  • timelock_vault  — vesting + cliffs`,
+                ``,
+                `JSON for Claude Code (use these IDs as options when asking the user):`,
+                JSON.stringify({
+                    needs: "template",
+                    templates: CONTRACT_TEMPLATES.map(t => ({ id: t.id, label: t.label, category: t.category, description: t.description })),
+                }, null, 2),
+            ];
+            return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+        // Validate template ID.
+        const tpl = CONTRACT_TEMPLATES.find(t => t.id === template);
+        if (!tpl) {
+            return { content: [{ type: "text", text: `Unknown template '${template}'. Call deploy_smart_contract() with no args to see the list.` }] };
+        }
+        // ── Step 2: template chosen, parameters missing → return required + features ──
+        if (!parameters) {
+            const lines = [
+                `=== deploy_smart_contract (step 2/3) — template '${tpl.id}' (${tpl.label}) ===`,
+                ``,
+                `${tpl.description}`,
+                ``,
+                `Required parameters: ${(tpl.required ?? []).join(", ") || "(none)"}`,
+                `Optional feature toggles: ${(tpl.features ?? []).join(", ") || "(none)"}`,
+                ``,
+                `Pass {parameters: { <values> }} to see the deploy preview. Example for advanced_token:`,
+                `  { name: "Pacioli", symbol: "PACI", decimals: 24, initial_supply: "100000000000000000000000000000000",`,
+                `    mintable: true, burnable: true, reflection: true, staking: true,`,
+                `    reflection_fee_bps: 100, max_tx_bps: 10000, max_wallet_bps: 10000 }`,
+                ``,
+                `JSON for Claude Code (split each into its own AskUserQuestion):`,
+                JSON.stringify({
+                    needs: "parameters",
+                    template: tpl.id,
+                    required: tpl.required ?? [],
+                    features: (tpl.features ?? []).map(f => ({ id: f, label: f, default: false })),
+                }, null, 2),
+            ];
+            return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+        // Validate required parameters are present.
+        const missing = (tpl.required ?? []).filter(k => !(k in parameters));
+        if (missing.length > 0) {
+            return { content: [{ type: "text", text: `Missing required parameters for '${tpl.id}': ${missing.join(", ")}` }] };
+        }
+        // Derive signer.
+        let signerAddress;
+        try {
+            const { seed: rawSeed } = loadSeed({ seedArg: seed });
+            signerAddress = deriveKeys(rawSeed).address;
+        }
+        catch (e) {
+            return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+        }
+        const ownerHex = signerAddress.startsWith("qnk") ? signerAddress.slice(3) : signerAddress;
+        // ── Step 3: dry-run preview (no confirm) ─────────────────────────
+        if (!confirm) {
+            const previewLines = [
+                `⚠ DEPLOY DRY RUN — pass confirm=true to execute`,
+                ``,
+                `  Template:  ${tpl.id} (${tpl.label})`,
+                `  Deployer:  ${signerAddress}`,
+                ``,
+                `Parameters:`,
+            ];
+            for (const [k, v] of Object.entries(parameters)) {
+                previewLines.push(`  ${k.padEnd(24)} ${typeof v === "string" && v.length > 60 ? v.slice(0, 57) + "..." : JSON.stringify(v)}`);
+            }
+            previewLines.push(``, `Cost: 1 QUG (deployment fee) + variable gas. Confirm with deploy_smart_contract(...args, confirm: true).`);
+            return { content: [{ type: "text", text: previewLines.join("\n") }] };
+        }
+        // ── Step 4: actually deploy ──────────────────────────────────────
+        const res = await apiSigned("/contracts/deploy", "POST", {
+            contract_type: tpl.id,
+            owner: ownerHex,
+            parameters,
+        }, { seed });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `Deploy failed: ${res.error ?? "unknown error"}` }] };
+        }
+        const data = res?.data ?? res;
+        const tx = data.deployment_tx ?? data.transaction_hash ?? data.tx_hash ?? "(none)";
+        const ca = data.contract_address ?? data.address ?? "(pending)";
+        // ASCII celebration art — deploy is a milestone event, so we render
+        // a rocket + sparkle banner sized to feel weighty (mirrors the
+        // txn-incoming celebration the wallet UI shows on send confirmations).
+        const params = parameters;
+        const tokenSymbol = typeof params?.symbol === "string" ? params.symbol : tpl.id.toUpperCase();
+        const tokenName = typeof params?.name === "string" ? params.name : tpl.label;
+        const sparkLeft = ["✦", "·", "✧", "✺", "✦"];
+        const sparkRight = ["✧", "✦", "·", "✦", "✧"];
+        const banner = [
+            `                              ✺`,
+            `                          ╱│╲`,
+            `                         ╱ │ ╲`,
+            `                        ╱  │  ╲     ${sparkLeft.join(" ")}`,
+            `                       │   │   │`,
+            `                       │  ╱│╲  │     L A U N C H`,
+            `                       │ ╱ │ ╲ │`,
+            `                       ╲╱  │  ╲╱     ${sparkRight.join(" ")}`,
+            `                        \\__│__/`,
+            `                          ▲▲▲`,
+            `                        ░▒▓██▓▒░`,
+            `                      ░▒▓██████▓▒░`,
+        ];
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        banner.join("\n"),
+                        ``,
+                        `                  ✦  ${tokenName.toUpperCase()} (${tokenSymbol}) IS LIVE  ✦`,
+                        ``,
+                        `  Template:   ${tpl.label}`,
+                        `  Contract:   ${ca}`,
+                        `  Deploy tx:  ${tx}`,
+                        `  Deployer:   ${signerAddress.slice(0, 24)}…`,
+                        ``,
+                        `Next:  tx_status tx_hash=${tx}   (confirm it landed)`,
+                        `       add_liquidity ${tokenSymbol}/QUGUSD (if tradeable)`,
+                        ``,
+                        `${tpl.id === "advanced_token" && params?.reflection === true
+                            ? "Reflection enabled: every transfer redistributes a slice to holders, including yours."
+                            : ""}`.trim(),
+                    ].filter(Boolean).join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `deploy_smart_contract failed: ${e?.message ?? e}` }] };
     }
 });
 // ────────────────────────────────────────────────────────────────────
@@ -2643,6 +3316,514 @@ server.tool("mining_calculator", "Projected mining earnings: daily / weekly / mo
     }
     catch (e) {
         return { content: [{ type: "text", text: `mining_calculator failed: ${e?.message ?? e}` }] };
+    }
+});
+function autoStyle(label) {
+    if (!label)
+        return 'fireworks';
+    const l = label.toLowerCase();
+    if (/gift|received|drop|reward|airdrop/.test(l))
+        return 'gift';
+    if (/deploy|launch|mint|create/.test(l))
+        return 'rocket';
+    if (/swap|exchange|trade|dex/.test(l))
+        return 'swap';
+    return 'fireworks';
+}
+function renderCelebration(style, label, tx) {
+    const shortHash = tx.hash.slice(0, 8) + '…' + tx.hash.slice(-6);
+    const block = tx.block_height != null ? `#${tx.block_height.toLocaleString()}` : '#pending';
+    const confs = tx.confirmations ?? 0;
+    const lab = label || 'transaction confirmed';
+    switch (style) {
+        case 'fireworks':
+            return [
+                '',
+                '              ·        ✨        ·   ✨    ·',
+                '          ✨       💥     ✨        💥      ✨',
+                '       💥     ✨     ╭─────────────────╮     ✨   💥',
+                '    ✨      💥       │   CONFIRMED ✓   │      💥      ✨',
+                '       💥     ✨     ╰─────────────────╯     ✨   💥',
+                '          ✨       💥     ✨        💥      ✨',
+                '              ·        ✨        ·   ✨    ·',
+                '',
+                `   ${lab}`,
+                `   tx  ${shortHash}`,
+                `   block ${block} · ${confs} confirmation${confs === 1 ? '' : 's'}`,
+                '',
+            ].join('\n');
+        case 'rocket':
+            return [
+                '',
+                '                       △',
+                '                      △△△',
+                '                     △ ★ △           CONFIRMED ✓',
+                '                     △ ★ △           ',
+                '                     △ ★ △           ' + lab,
+                '                     ▕═══▏',
+                '                      ║║║              tx  ' + shortHash,
+                '                     ▕▒▒▒▏             block ' + block,
+                '                    ▕▒▒▒▒▒▏            ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+                '                     ◢◢ ◣◣',
+                '                    ◢◢   ◣◣',
+                '                  · ◢ ▓▓▓ ◣ ·',
+                '              · ✨   ▓▓▓▓▓   ✨ ·',
+                '            ·       ▓▓▓▓▓▓▓       ·',
+                '          ·     ✨   ▓▓▓▓▓   ✨     ·',
+                '        ·             ✨ ✨             ·',
+                '',
+            ].join('\n');
+        case 'gift':
+            return [
+                '',
+                '                       .--.',
+                '                  __ /    .._',
+                '            .--. ╱  ◣◣◣◣ ╱  .--.',
+                '           ╱    │ ▓▓▓▓▓▓ │     ╲',
+                '        ╭──┤    │ ▓ ★★ ▓ │      ├──╮',
+                '        │  │    │ ▓▓▓▓▓▓ │      │  │       🎁  GIFT RECEIVED  🎁',
+                '        ╰──┤    │ ▓▓▓▓▓▓ │      ├──╯',
+                '           ╲    │  ╲╲╱╱  │     ╱            ' + lab,
+                '            ╲___╲══════╱___╱',
+                '                ▔▔▔▔▔▔▔                    tx  ' + shortHash,
+                '         ✨        ·        ✨              block ' + block,
+                '            ·  ✨     ✨  ·                 ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+                '         ✨        ·        ✨',
+                '',
+            ].join('\n');
+        case 'swap':
+            return [
+                '',
+                '          ◢◤    ╔═══════════╗    ◢◤',
+                '       ◢◤       ║   SWAP    ║       ◢◤',
+                '    ◢◤          ║ CONFIRMED ║          ◢◤',
+                '       ◥◣       ╚═══════════╝       ◥◣',
+                '          ◥◣        ⇆  ⇆        ◥◣',
+                '',
+                '   ' + lab,
+                '   tx  ' + shortHash,
+                '   block ' + block + '  ·  ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+                '',
+            ].join('\n');
+        case 'minimal':
+            return `✓ ${lab}\n  tx  ${shortHash}  ·  block ${block}  ·  ${confs} conf`;
+    }
+}
+server.tool("tx_watch", "Wait for a transaction hash to confirm on-chain, then return a context-appropriate celebration banner. Polls /api/v1/transactions/<hash> every 2 seconds until status flips from in_mempool→confirmed (or timeout). Bundles wait+verify+celebrate; use after any tx-producing tool (send_qug, send_token, dex_swap, deploy_token) when you want the user to feel the confirmation land. Auto-picks style from label keywords (gift/received/drop → gift, deploy/launch/mint → rocket, swap/trade → swap, else fireworks).", {
+    tx_hash: z.string().describe("Transaction hash (with or without 0x prefix — auto-stripped)."),
+    label: z.string().optional().describe("Short human-readable description of what the tx did (e.g., 'Gift received from founder', '5 QUG → QUGUSD swap', 'DEFI5 mint'). Drives auto-style + appears in the banner."),
+    style: z.enum(['fireworks', 'rocket', 'gift', 'swap', 'minimal']).optional().describe("Override the auto-detected animation style."),
+    timeout_secs: z.number().int().min(2).max(120).optional().describe("Max seconds to wait (default 30). Falls through with a 'still pending' message if exceeded."),
+}, async ({ tx_hash, label, style, timeout_secs }) => {
+    const cleanHash = tx_hash.trim().replace(/^0x/i, '');
+    const timeoutMs = (timeout_secs ?? 30) * 1000;
+    const chosenStyle = style ?? autoStyle(label);
+    const start = Date.now();
+    let lastStatus = 'unknown';
+    let confirmedTx = null;
+    while (Date.now() - start < timeoutMs) {
+        try {
+            const res = await api(`/transactions/${cleanHash}`, "GET");
+            const data = res?.data ?? res;
+            if (data?.status === 'confirmed') {
+                confirmedTx = data;
+                break;
+            }
+            if (data?.status)
+                lastStatus = data.status;
+        }
+        catch (e) {
+            // tx may not have propagated yet — keep polling
+        }
+        await new Promise(r => setTimeout(r, 2000));
+    }
+    if (!confirmedTx) {
+        const waited = Math.floor((Date.now() - start) / 1000);
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `⏳ tx ${cleanHash.slice(0, 8)}… still ${lastStatus} after ${waited}s.`,
+                        ``,
+                        `Quillon target cadence is ~1 block/sec but propagation + finality can lag`,
+                        `2–10s during heavy load. Options:`,
+                        `  • Re-run tx_watch tx_hash=${cleanHash} timeout_secs=60 — it's idempotent`,
+                        `  • Hit the API directly: curl https://quillon.xyz/api/v1/transactions/${cleanHash}`,
+                        `  • If still pending after 60s the tx was likely rejected during validation`,
+                        `    (check journalctl on the receiving node for 'tx_validation_failed').`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    return {
+        content: [{
+                type: "text",
+                text: renderCelebration(chosenStyle, label ?? 'transaction confirmed', {
+                    hash: confirmedTx.hash ?? cleanHash,
+                    block_height: confirmedTx.block_height,
+                    confirmations: confirmedTx.confirmations,
+                    timestamp: confirmedTx.timestamp,
+                }),
+            }],
+    };
+});
+// ============================================================
+// CROWN & ASH — medieval grand strategy game on Quillon
+// ============================================================
+//
+// Server endpoints: GET /api/v1/crown-ash/{world,realm/:wallet,faction/:id,
+//                       province/:id,turn/:n,history/:province}
+//                   POST /api/v1/crown-ash/{action,join}
+//
+// Action types (from crown-ash-types/src/action.rs):
+//   RaiseArmy, MoveArmy, MoveArmyPath, DisbandArmy,
+//   DeclareWar, ProposeTreaty, AcceptTreaty,
+//   BuildImprovement, SetTaxRate, AssignCouncilor, DesignateHeir,
+//   ArrangeMarriage, ConvertProvince, LaunchPlot, BackPlot,
+//   InvestigatePlot, EstablishTradeRoute, DisruptTradeRoute
+//
+// Treaty types: NonAggression, DefensiveAlliance, TradeAgreement,
+//               Marriage, Vassalization, WhitePeace, Surrender
+//
+// Casus belli: Conquest, HolyWar, Reconquest, Rebellion, Succession, Insult
+const CROWN_ASH_PATH = "/crown-ash"; // appended to API_BASE (already includes /api/v1)
+function gameAddress(seedArg) {
+    const { seed } = loadSeed({ seedArg });
+    return deriveKeys(seed).address;
+}
+// Religion → single-cell heraldic glyph (kept narrow so columns align).
+const RELIGION_GLYPH = {
+    EmberChurch: "✚", // ember + cross
+    SaltCult: "⚓", // anchor of brine
+    FrostSpirits: "❄", // snowflake
+    OldFaith: "☉", // sun-disc
+    BlackOrder: "☠", // skull rite
+};
+function relGlyph(r) { return (r && RELIGION_GLYPH[r]) ?? "·"; }
+// Tiny inline bar — "█████░░░░░" — proportion of total.
+function miniBar(value, max, width = 10) {
+    if (max <= 0)
+        return "·".repeat(width);
+    const filled = Math.max(0, Math.min(width, Math.round((value / max) * width)));
+    return "█".repeat(filled) + "░".repeat(width - filled);
+}
+// Synthesize a realm view from a world snapshot. Used both as the
+// crown_ash_realm response (since the server's /realm/<addr> path
+// currently 404s) and inline anywhere we want "my faction at a glance".
+function synthesizeRealm(world, wallet) {
+    const factions = world?.factions ?? [];
+    const me = factions.find((f) => f?.player_wallet === wallet);
+    if (!me)
+        return null;
+    const fid = me.id;
+    const provinces = (world?.provinces ?? []).filter((p) => p?.controller === fid);
+    const armies = (world?.armies ?? []).filter((a) => a?.faction === fid);
+    const treaties = (world?.treaties ?? []).filter((t) => t?.faction_a === fid || t?.faction_b === fid);
+    const wars = (world?.wars ?? []).filter((w) => w?.attacker === fid || w?.defender === fid);
+    return { faction: me, provinces, armies, treaties, wars };
+}
+server.tool("crown_ash_world", "Crown & Ash — heraldic world snapshot (provinces, factions, treaties). Returns a stylised text banner with religion glyphs, claim status, and a treaty/war ledger.", {}, async () => {
+    try {
+        const res = await api(`${CROWN_ASH_PATH}/world`);
+        const w = res.data ?? res;
+        const meta = w?.meta ?? {};
+        const factions = w?.factions ?? [];
+        const provinces = w?.provinces ?? [];
+        const armies = w?.armies ?? [];
+        const treaties = w?.treaties ?? [];
+        const wars = w?.wars ?? [];
+        const myWallet = (() => {
+            try {
+                const { seed } = loadSeed({});
+                return deriveKeys(seed).address;
+            }
+            catch {
+                return "";
+            }
+        })();
+        // Province distribution per faction — for the tiny bar chart.
+        const provByFaction = new Map();
+        const armyByFaction = new Map();
+        for (const p of provinces)
+            provByFaction.set(p.controller, (provByFaction.get(p.controller) ?? 0) + 1);
+        for (const a of armies)
+            armyByFaction.set(a.faction, (armyByFaction.get(a.faction) ?? 0) + 1);
+        const maxProv = Math.max(1, ...Array.from(provByFaction.values()));
+        const factionLines = factions.map((f) => {
+            const provCount = provByFaction.get(f.id) ?? 0;
+            const armyCount = armyByFaction.get(f.id) ?? 0;
+            const claimed = !!f.player_wallet;
+            const isMe = myWallet && f.player_wallet === myWallet;
+            const sigil = isMe ? "👑" : (claimed ? "🧙" : "  ");
+            const bar = miniBar(provCount, maxProv, 8);
+            const name = (f.name ?? "?").padEnd(16).slice(0, 16);
+            const rel = (f.religion ?? "?").padEnd(13).slice(0, 13);
+            return `  ${sigil} ${relGlyph(f.religion)} F#${String(f.id).padStart(1)} ${name} ${rel} ${bar} prov ${String(provCount).padStart(2)}  ⚔${String(armyCount).padStart(2)}`;
+        });
+        const treatyLines = treaties.slice(0, 8).map((t) => {
+            const a = factions.find((f) => f.id === t.faction_a)?.name ?? `F#${t.faction_a}`;
+            const b = factions.find((f) => f.id === t.faction_b)?.name ?? `F#${t.faction_b}`;
+            return `  📜 ${a} ↔ ${b}   ${t.treaty_type}   (turn ${t.signed_turn ?? "?"})`;
+        });
+        const warLines = wars.slice(0, 6).map((w_) => {
+            const att = factions.find((f) => f.id === w_.attacker)?.name ?? `F#${w_.attacker}`;
+            const def = factions.find((f) => f.id === w_.defender)?.name ?? `F#${w_.defender}`;
+            return `  ⚔ ${att} → ${def}   (${w_.casus_belli ?? "?"})`;
+        });
+        const banner = [
+            `╔══════════════════════════════════════════════════════════════════╗`,
+            `║   ✦  CROWN  &  ASH  ✦   Turn ${String(meta.turn ?? "?").padEnd(6)}   sim ${meta.sim_version ?? "?"}       ║`,
+            `╚══════════════════════════════════════════════════════════════════╝`,
+        ].join("\n");
+        const lines = [
+            banner,
+            ``,
+            `  players ${meta.player_count ?? 0}   ·   provinces ${provinces.length}   ·   armies ${armies.length}   ·   treaties ${treaties.length}   ·   wars ${wars.length}`,
+            ``,
+            `─── ⚜  FACTIONS  ⚜ ───`,
+            ...(factionLines.length > 0 ? factionLines : ["  (none)"]),
+        ];
+        if (treatyLines.length > 0)
+            lines.push("", `─── 📜  ACTIVE TREATIES ───`, ...treatyLines);
+        if (warLines.length > 0)
+            lines.push("", `─── ⚔   ACTIVE WARS    ───`, ...warLines);
+        // If I'm a player, surface my realm at the bottom as a quick-glance summary.
+        if (myWallet) {
+            const realm = synthesizeRealm(w, myWallet);
+            if (realm) {
+                const totalPop = realm.provinces.reduce((s, p) => s + (p.population ?? 0), 0);
+                const myCol = realm.faction.color_rgb ?? [];
+                const colorHint = myCol.length === 3 ? ` (rgb ${myCol.join(",")})` : "";
+                lines.push("", `─── 👑  YOUR REALM  ${realm.faction.name}${colorHint} ───`);
+                lines.push(`  ${relGlyph(realm.faction.religion)} ${realm.faction.religion}   ${realm.faction.culture ?? "?"} culture`);
+                lines.push(`  provinces ${realm.provinces.length}   armies ${realm.armies.length}   treaties ${realm.treaties.length}   wars ${realm.wars.length}   pop ${totalPop.toLocaleString()}`);
+            }
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Failed to fetch world: ${e.message}` }] };
+    }
+});
+server.tool("crown_ash_realm", "Crown & Ash — heraldic banner for my realm (faction, provinces, armies, diplomacy). Synthesizes from /world snapshot because the server's /realm/<addr> path is not yet implemented.", {
+    wallet: z.string().optional().describe("Wallet address (qnk...). Defaults to the configured seed's address."),
+}, async ({ wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+        // Server's /realm/<addr> currently 404s — synthesize from /world.
+        const res = await api(`${CROWN_ASH_PATH}/world`);
+        const w = res.data ?? res;
+        const realm = synthesizeRealm(w, addr);
+        if (!realm) {
+            return { content: [{ type: "text", text: `No realm for ${addr.slice(0, 18)}…\n` +
+                            `Run crown_ash_join with a faction id (0-6) to claim one.`
+                    }] };
+        }
+        const meta = w?.meta ?? {};
+        const f = realm.faction;
+        const totalPop = realm.provinces.reduce((s, p) => s + (p.population ?? 0), 0);
+        const totalProsperity = realm.provinces.reduce((s, p) => s + (p.prosperity ?? 0), 0);
+        const avgProsperity = realm.provinces.length > 0 ? Math.round(totalProsperity / realm.provinces.length) : 0;
+        const factions = w?.factions ?? [];
+        const banner = [
+            `╔═══════════════════════════════════════════════════════════════════╗`,
+            `║  👑  ${(f.name ?? "?").padEnd(58)}║`,
+            `║      ${relGlyph(f.religion)} ${(f.religion ?? "?").padEnd(13)}   ${(f.culture ?? "?").padEnd(12)} culture${" ".repeat(15)}║`,
+            `║      turn ${String(meta.turn ?? "?").padEnd(8)} · provinces ${String(realm.provinces.length).padStart(2)} · armies ${String(realm.armies.length).padStart(2)} · treaties ${String(realm.treaties.length).padStart(1)} · wars ${String(realm.wars.length).padStart(1)}   ║`,
+            `╚═══════════════════════════════════════════════════════════════════╝`,
+        ].join("\n");
+        const bonuses = f.bonuses ?? {};
+        const maxBonus = Math.max(1, ...Object.values(bonuses).map((v) => Number(v) || 0));
+        const bonusLines = [];
+        for (const k of ["military", "economy", "diplomacy", "intrigue", "clerical", "legitimacy", "cohesion_decay"]) {
+            if (bonuses[k] !== undefined) {
+                bonusLines.push(`  ${k.padEnd(16)} ${miniBar(Number(bonuses[k]), maxBonus, 14)}  ${bonuses[k]}`);
+            }
+        }
+        const lines = [
+            banner,
+            ``,
+            `  📍 wallet:  ${addr}`,
+            `  🏰 total population: ${totalPop.toLocaleString()}   avg prosperity: ${avgProsperity.toLocaleString()}`,
+            ``,
+            `─── ⚜  FACTION BONUSES  ⚜ ───`,
+            ...(bonusLines.length > 0 ? bonusLines : ["  (none)"]),
+            ``,
+            `─── 🏰  PROVINCES  🏰 ───`,
+        ];
+        for (const p of realm.provinces.slice(0, 24)) {
+            const fort = p.fortification ?? 0;
+            const fortGlyph = fort > 0 ? "🛡".repeat(Math.min(fort, 3)) : "·";
+            const impr = (p.improvements ?? []).slice(0, 4).join(", ");
+            const terr = (p.terrain ?? "?").padEnd(8).slice(0, 8);
+            const name = (p.name ?? "?").padEnd(13).slice(0, 13);
+            lines.push(`  #${String(p.id).padStart(2)} ${name} ${terr} pop ${String(p.population ?? 0).padStart(6)}  prosp ${String(p.prosperity ?? 0).padStart(8)}  fort ${fortGlyph.padEnd(4)}  [${impr}]`);
+        }
+        if (realm.armies.length > 0) {
+            lines.push(``, `─── ⚔  ARMIES  ⚔ ───`);
+            for (const a of realm.armies.slice(0, 10)) {
+                lines.push(`  ⚔ army #${a.id ?? "?"}   size ${a.size ?? "?"}   location: province #${a.location ?? a.province ?? "?"}`);
+            }
+        }
+        if (realm.treaties.length > 0) {
+            lines.push(``, `─── 📜  MY TREATIES  📜 ───`);
+            for (const t of realm.treaties.slice(0, 8)) {
+                const other = t.faction_a === f.id ? t.faction_b : t.faction_a;
+                const otherName = factions.find((x) => x.id === other)?.name ?? `F#${other}`;
+                lines.push(`  📜 with ${otherName}   ${t.treaty_type}   (turn ${t.signed_turn ?? "?"})`);
+            }
+        }
+        else {
+            lines.push(``, `  (no active treaties — propose with crown_ash_propose_alliance)`);
+        }
+        if (realm.wars.length > 0) {
+            lines.push(``, `─── ⚔  AT WAR WITH  ⚔ ───`);
+            for (const wr of realm.wars) {
+                const other = wr.attacker === f.id ? wr.defender : wr.attacker;
+                const otherName = factions.find((x) => x.id === other)?.name ?? `F#${other}`;
+                lines.push(`  ⚔ ${otherName}   (${wr.casus_belli ?? "?"})`);
+            }
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Failed to fetch realm: ${e.message}` }] };
+    }
+});
+server.tool("crown_ash_join", "Crown & Ash — claim an unoccupied faction. faction must be 0-6. Pass confirm=true to commit.", {
+    faction: z.number().int().min(0).max(6).describe("Faction ID 0-6"),
+    confirm: z.boolean().optional().describe("Set true to execute; without it, returns a preview"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+}, async ({ faction, confirm, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    if (!confirm) {
+        // Preview: show faction info
+        try {
+            const wr = await api(`${CROWN_ASH_PATH}/faction/${faction}`);
+            const f = wr.data ?? wr;
+            return { content: [{ type: "text", text: `Preview: join faction ${faction}\n` +
+                            `  name: ${f?.name ?? "?"}    religion: ${f?.religion ?? "?"}\n` +
+                            `  status: ${f?.player_wallet ? `ALREADY CLAIMED by ${f.player_wallet.slice(0, 12)}…` : "available"}\n\n` +
+                            `Run again with confirm=true to claim as ${addr.slice(0, 16)}…`
+                    }] };
+        }
+        catch (e) {
+            return { content: [{ type: "text", text: `Could not fetch faction info: ${e.message}` }] };
+        }
+    }
+    try {
+        const res = await api(`${CROWN_ASH_PATH}/join`, "POST", { wallet: addr, faction });
+        if (res.success === false || res.ok === false) {
+            return { content: [{ type: "text", text: `Join failed: ${res.error ?? "unknown"}` }] };
+        }
+        return { content: [{ type: "text", text: `✅ Joined Crown & Ash as faction ${faction}\n` +
+                        `   wallet: ${addr}\n` +
+                        `   Now: crown_ash_realm to see your starting position.`
+                }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Join failed: ${e.message}` }] };
+    }
+});
+const TREATY_TYPES = ["NonAggression", "DefensiveAlliance", "TradeAgreement", "Marriage", "Vassalization", "WhitePeace", "Surrender"];
+server.tool("crown_ash_propose_alliance", "Crown & Ash — propose a treaty to another faction. Default treaty type is DefensiveAlliance. Other options: NonAggression, TradeAgreement, Marriage, Vassalization, WhitePeace, Surrender.", {
+    target_faction: z.number().int().min(0).max(6).describe("Target faction ID 0-6"),
+    treaty: z.enum(TREATY_TYPES).optional().describe("Treaty type (default: DefensiveAlliance)"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+}, async ({ target_faction, treaty, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    const treatyType = treaty ?? "DefensiveAlliance";
+    try {
+        const res = await api(`${CROWN_ASH_PATH}/action`, "POST", {
+            wallet: addr,
+            action: { ProposeTreaty: { target: target_faction, treaty: treatyType } },
+        });
+        if (res.success === false || res.ok === false) {
+            return { content: [{ type: "text", text: `Treaty proposal failed: ${res.error ?? "unknown"}` }] };
+        }
+        const d = res.data ?? res;
+        return { content: [{ type: "text", text: `📜 ${treatyType} proposed to faction ${target_faction}\n` +
+                        `   from: ${addr}\n` +
+                        `   queue position: ${d.queue_position ?? "?"}\n` +
+                        `   submitted at turn: ${d.turn ?? "?"}\n` +
+                        `   Resolves on next sim tick. Watch crown_ash_world for outcome.`
+                }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Treaty proposal failed: ${e.message}` }] };
+    }
+});
+server.tool("crown_ash_accept_treaty", "Crown & Ash — accept an incoming treaty proposal from another faction.", {
+    from_faction: z.number().int().min(0).max(6).describe("Proposing faction ID 0-6"),
+    treaty: z.enum(TREATY_TYPES).describe("Treaty type (must match the incoming proposal)"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+}, async ({ from_faction, treaty, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+        const res = await api(`${CROWN_ASH_PATH}/action`, "POST", {
+            wallet: addr,
+            action: { AcceptTreaty: { from: from_faction, treaty } },
+        });
+        if (res.success === false || res.ok === false) {
+            return { content: [{ type: "text", text: `Accept failed: ${res.error ?? "unknown"}` }] };
+        }
+        return { content: [{ type: "text", text: `🤝 ${treaty} accepted from faction ${from_faction}\n   Queue: ${(res.data ?? res).queue_position ?? "?"}.`
+                }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Accept failed: ${e.message}` }] };
+    }
+});
+server.tool("crown_ash_action", "Crown & Ash — submit ANY GameAction (escape hatch). Pass the action variant as a JSON object: e.g. {\"RaiseArmy\": {\"province\": 12}} or {\"DeclareWar\": {\"target\": 3, \"casus_belli\": \"Conquest\"}}. See crates/crown-ash-types/src/action.rs for full schema.", {
+    action: z.record(z.any()).describe("GameAction enum variant (single-key object, e.g. {RaiseArmy: {province: 12}})"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+}, async ({ action, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+        const res = await api(`${CROWN_ASH_PATH}/action`, "POST", { wallet: addr, action });
+        if (res.success === false || res.ok === false) {
+            return { content: [{ type: "text", text: `Action rejected: ${res.error ?? "unknown"}` }] };
+        }
+        const d = res.data ?? res;
+        const actionName = Object.keys(action)[0] ?? "?";
+        return { content: [{ type: "text", text: `⚔️  ${actionName} queued\n` +
+                        `   wallet: ${addr}\n` +
+                        `   queue position: ${d.queue_position ?? "?"}\n` +
+                        `   turn: ${d.turn ?? "?"}`
+                }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Action failed: ${e.message}` }] };
+    }
+});
+server.tool("crown_ash_turn", "Crown & Ash — turn summary for a specific turn (or latest if omitted). Shows battles, treaties signed, dynasty events.", {
+    turn: z.number().int().nonnegative().optional().describe("Turn number; omit for latest"),
+}, async ({ turn }) => {
+    try {
+        let t = turn;
+        if (t === undefined) {
+            const w = await api(`${CROWN_ASH_PATH}/world`);
+            t = (w.data ?? w)?.meta?.turn ?? 0;
+        }
+        const res = await api(`${CROWN_ASH_PATH}/turn/${t}`);
+        const s = res.data ?? res;
+        const lines = [
+            `=== Crown & Ash — Turn ${t} ===`,
+            ``,
+            `  ended at block: ${s.block_height ?? "?"}`,
+            `  battles: ${(s.battles ?? []).length}   treaties signed: ${(s.treaties_signed ?? []).length}   wars declared: ${(s.wars_declared ?? []).length}`,
+            `  characters born: ${(s.character_events ?? []).filter((e) => e?.kind === "Born").length}   died: ${(s.character_events ?? []).filter((e) => e?.kind === "Died").length}`,
+        ];
+        if ((s.battles ?? []).length > 0) {
+            lines.push("", "--- Battles ---");
+            for (const b of s.battles.slice(0, 6)) {
+                lines.push(`  ${b.attacker_faction}→${b.defender_faction} @ province ${b.province}  winner=${b.winner_faction}  losses A/D ${b.attacker_losses}/${b.defender_losses}`);
+            }
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `Failed to fetch turn: ${e.message}` }] };
     }
 });
 // ============================================================
