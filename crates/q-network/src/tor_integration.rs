@@ -84,6 +84,14 @@ pub struct NetworkTorConfig {
     // Q_TOR_SKIP_SYNC=1 escape hatch: when outbound_via_tor is true, block-pack and
     // turbo-sync requests still go clearnet. Prevents 17M-block bootstrap stall.
     pub skip_sync_via_tor: bool,
+
+    // v10.10.15 — WireGuard fail-honest gate. When `require_wireguard` is true,
+    // `outbound_via_tor` and `stem_via_tor` REFUSE to activate unless the
+    // WireGuard interface (default `wg0`, override `Q_WIREGUARD_INTERFACE`) is
+    // up. Stops the silent "ISP sees you're on Tor" failure mode when a VPN
+    // kill-switch lapses. Operator must explicitly set Q_TOR_REQUIRE_WIREGUARD=0
+    // to accept that risk. See `crate::wireguard_check`.
+    pub require_wireguard: bool,
 }
 
 impl Default for NetworkTorConfig {
@@ -104,6 +112,10 @@ impl Default for NetworkTorConfig {
             stem_via_tor: false,
             outbound_via_tor: false,
             skip_sync_via_tor: true,
+            // v10.10.15: gate defaults OFF (no behavior change for operators
+            // who don't set it; with Tor outbound disabled by default anyway,
+            // this is moot until they enable Phase B/C).
+            require_wireguard: false,
         }
     }
 }
@@ -126,6 +138,10 @@ impl NetworkTorConfig {
             stem_via_tor: false,
             outbound_via_tor: false,
             skip_sync_via_tor: true,
+            // v10.10.15: gate defaults OFF (no behavior change for operators
+            // who don't set it; with Tor outbound disabled by default anyway,
+            // this is moot until they enable Phase B/C).
+            require_wireguard: false,
         }
     }
 
@@ -200,6 +216,11 @@ impl NetworkTorConfig {
         config.skip_sync_via_tor = std::env::var("Q_TOR_SKIP_SYNC")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(true);
+        // v10.10.15: WireGuard fail-honest gate. Default OFF — operators who
+        // care about the ISP-sees-Tor leak must opt in explicitly.
+        config.require_wireguard = std::env::var("Q_TOR_REQUIRE_WIREGUARD")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         if config.listen_onion {
             info!("🧅 [TOR] Phase A enabled — onion listener will be announced");
@@ -211,6 +232,28 @@ impl NetworkTorConfig {
             info!("🧅 [TOR] Phase C enabled — libp2p outbound dials route via Tor SOCKS5");
             if config.skip_sync_via_tor {
                 info!("🧅 [TOR]   (block-pack stays clearnet — Q_TOR_SKIP_SYNC=1)");
+            }
+        }
+
+        // v10.10.15: Run the WireGuard gate at config-load time so the result
+        // (and any refusal) is visible in startup logs. If the gate refuses,
+        // we DOWNGRADE the lifecycle flags to false rather than erroring
+        // out — the node still boots on clearnet without Tor outbound. This
+        // matches the "fail-honest" naming: operator sees the decision, can
+        // act on it. Returning Err would crash-loop the node, which is worse
+        // UX than a clearnet fallback with a loud warning.
+        if config.stem_via_tor || config.outbound_via_tor {
+            match crate::wireguard_check::activation_gate(config.require_wireguard) {
+                Ok(_status) => { /* permitted */ }
+                Err(_status) => {
+                    warn!(
+                        "🛡️  [WG GATE] Downgrading Tor Phase B/C OFF — \
+                         require_wireguard=true but WG not up. Node will boot \
+                         on clearnet. Set Q_TOR_REQUIRE_WIREGUARD=0 to override."
+                    );
+                    config.stem_via_tor = false;
+                    config.outbound_via_tor = false;
+                }
             }
         }
 
