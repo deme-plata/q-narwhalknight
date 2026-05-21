@@ -1,0 +1,601 @@
+// v1.3.0: Settings screen — 8 configurable sections.
+//
+// Visual idioms borrowed from login.slint / send.slint:
+//  - Ambient radial-gradient corners for depth
+//  - Card wrapper per section with ActionCard-style header
+//  - Hover-lift on interactive elements (Theme.QButton already does this)
+//  - Theme tokens throughout — no hex literals so theme switching at
+//    runtime re-paints every component.
+//
+// Section list (top to bottom, scrollable):
+//   1. Mining          (CPU threads, GPU intensity)
+//   2. Network         (RPC URL override + test connection)
+//   3. Appearance      (theme + accent color picker)
+//   4. Auto-update     (toggle, channel, check-now)
+//   5. Auto-startup    (boot toggle, OS-specific note)
+//   6. Password / PIN  (change password modal trigger)
+//   7. Reveal secrets  (mnemonic + private key, re-auth gated)
+//   8. Session         (remember-unlock minutes)
+//
+// All settings persist via the Rust-side callbacks. The UI shows the
+// current value pulled from `WalletConfig` (loaded once at app start
+// and refreshed on settings open).
+
+import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+
+// Lightweight toggle switch — sliding pill with on/off colour. Slint
+// doesn't ship one for the fluent-dark style we use, so this is a
+// minimal in-file component reused across the 4 toggle settings.
+component ToggleSwitch inherits Rectangle {
+    in property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+    background: root.checked ? Theme.accent-green : Theme.bg-input;
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent-green : Theme.border;
+    animate background, border-color { duration: 150ms; }
+
+    TouchArea {
+        clicked => { root.toggled(!root.checked); }
+    }
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 9px;
+        background: white;
+        drop-shadow-blur: 4px;
+        drop-shadow-color: #000000.with-alpha(0.3);
+        animate x { duration: 150ms; easing: ease-out; }
+    }
+}
+
+// Section header row — icon, title, subtitle, optional right-side widget.
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <image> section-icon;
+    in property <color> accent: Theme.accent-cyan;
+
+    height: 48px;
+
+    HorizontalLayout {
+        spacing: Theme.spacing-md;
+        alignment: start;
+        padding-left: Theme.spacing-sm;
+        padding-right: Theme.spacing-sm;
+
+        Rectangle {
+            width: 36px;
+            height: 36px;
+            border-radius: 10px;
+            background: root.accent.with-alpha(0.15);
+            border-width: 1px;
+            border-color: root.accent.with-alpha(0.3);
+            Icon {
+                source: root.section-icon;
+                icon-color: root.accent;
+                width: 18px;
+                height: 18px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: Theme.text-primary;
+                font-size: Theme.font-md;
+                font-weight: 600;
+            }
+            Text {
+                text: root.subtitle;
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+            }
+        }
+    }
+}
+
+export component SettingsScreen inherits Rectangle {
+    background: Theme.bg-primary;
+
+    // ── Mining ───────────────────────────────────────────────────────
+    in property <int> cpu-threads-current: 1;
+    in property <int> cpu-threads-max: 16;
+    in property <int> gpu-intensity-current: 5;
+    callback set-cpu-threads(int);
+    callback set-gpu-intensity(int);
+
+    // ── Network ──────────────────────────────────────────────────────
+    in-out property <string> rpc-url: "https://quillon.xyz";
+    in property <string> rpc-status: ""; // "" | "ok" | "fail"
+    callback set-rpc-url(string);
+    callback test-rpc-connection();
+
+    // ── Appearance ───────────────────────────────────────────────────
+    in-out property <string> current-theme: "dark";
+    in-out property <string> current-accent: "cyan";
+    callback set-theme(string);
+    callback set-accent(string);
+
+    // ── Auto-update ──────────────────────────────────────────────────
+    in-out property <bool> auto-update-enabled: true;
+    in-out property <string> update-channel: "stable";
+    in property <string> last-update-check: "never";
+    callback set-auto-update(bool);
+    callback set-update-channel(string);
+    callback check-for-update-now();
+
+    // ── Autostart on boot ────────────────────────────────────────────
+    in-out property <bool> autostart-enabled: true;
+    callback set-autostart(bool);
+
+    // ── Password ─────────────────────────────────────────────────────
+    callback change-password();
+
+    // ── Reveal secrets ───────────────────────────────────────────────
+    in-out property <string> revealed-secret: "";
+    in-out property <bool> revealing-mnemonic: false;
+    in property <int> reveal-countdown-secs: 0;
+    callback reveal-mnemonic();
+    callback reveal-private-key();
+    callback hide-revealed-secret();
+
+    // ── Session persistence ──────────────────────────────────────────
+    in-out property <int> session-persistence-minutes: 0;
+    callback set-session-persistence(int);
+
+    // Common
+    callback go-back();
+
+    // ── Visuals ──────────────────────────────────────────────────────
+    // Ambient corner accents (mirrors login.slint:114-130)
+    Rectangle {
+        x: 0; y: 0; width: parent.width / 2; height: parent.height / 2;
+        background: @radial-gradient(circle, Theme.accent-cyan.with-alpha(0.06) 0%, transparent 60%);
+    }
+    Rectangle {
+        x: parent.width / 2; y: parent.height / 2;
+        width: parent.width / 2; height: parent.height / 2;
+        background: @radial-gradient(circle, Theme.accent-purple.with-alpha(0.05) 0%, transparent 60%);
+    }
+
+    VerticalLayout {
+        padding: Theme.spacing-md;
+        spacing: Theme.spacing-md;
+
+        // ── Header ───────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: Theme.spacing-md;
+            alignment: start;
+            Rectangle {
+                width: 44px; height: 44px;
+                border-radius: 10px;
+                background: Theme.bg-hover;
+                TouchArea { clicked => { root.go-back(); } }
+                Icon {
+                    source: @image-url("icons/arrow-left.svg");
+                    icon-color: Theme.text-primary;
+                    width: 20px; height: 20px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: "Settings";
+                    color: Theme.text-primary;
+                    font-size: Theme.font-xl;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Mining, network, appearance, security";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+            }
+        }
+
+        // ── Scrollable section list ─────────────────────────────────
+        Flickable {
+            vertical-stretch: 1;
+            viewport-height: settings-stack.preferred-height;
+
+            settings-stack := VerticalLayout {
+                spacing: Theme.spacing-md;
+                padding-right: Theme.spacing-xs;
+
+                // ── 1. MINING ───────────────────────────────────────
+                Card {
+                    height: 200px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Mining";
+                            subtitle: "CPU threads + GPU intensity used when mining";
+                            section-icon: @image-url("icons/pickaxe.svg");
+                            accent: Theme.accent-yellow;
+                        }
+                        // CPU threads
+                        VerticalLayout {
+                            spacing: 4px;
+                            HorizontalLayout {
+                                Text {
+                                    text: "CPU threads";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.cpu-threads-current + " / " + root.cpu-threads-max;
+                                    color: Theme.accent-cyan;
+                                    font-size: Theme.font-sm;
+                                    font-weight: 600;
+                                }
+                            }
+                            Slider {
+                                minimum: 1;
+                                maximum: root.cpu-threads-max;
+                                value: root.cpu-threads-current;
+                                changed value => { root.set-cpu-threads(self.value); }
+                            }
+                        }
+                        // GPU intensity
+                        VerticalLayout {
+                            spacing: 4px;
+                            HorizontalLayout {
+                                Text {
+                                    text: "GPU intensity";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: root.gpu-intensity-current + "%";
+                                    color: Theme.accent-cyan;
+                                    font-size: Theme.font-sm;
+                                    font-weight: 600;
+                                }
+                            }
+                            Slider {
+                                minimum: 1;
+                                maximum: 100;
+                                value: root.gpu-intensity-current;
+                                changed value => { root.set-gpu-intensity(self.value); }
+                            }
+                        }
+                    }
+                }
+
+                // ── 2. NETWORK ──────────────────────────────────────
+                Card {
+                    height: 180px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Network";
+                            subtitle: "Override the default RPC endpoint";
+                            section-icon: @image-url("icons/arrow-up-down.svg");
+                            accent: Theme.accent-blue;
+                        }
+                        QInput {
+                            placeholder: "https://quillon.xyz";
+                            text <=> root.rpc-url;
+                            accepted(t) => { root.set-rpc-url(t); }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            QButton {
+                                label: "Test connection";
+                                button-color: Theme.accent-blue;
+                                horizontal-stretch: 1;
+                                clicked => {
+                                    root.set-rpc-url(root.rpc-url);
+                                    root.test-rpc-connection();
+                                }
+                            }
+                            // Status dot
+                            Rectangle {
+                                width: 12px; height: 12px;
+                                border-radius: 6px;
+                                background: root.rpc-status == "ok" ? Theme.accent-green
+                                    : root.rpc-status == "fail" ? Theme.accent-red
+                                    : Theme.text-muted;
+                                y: (parent.height - self.height) / 2;
+                                animate background { duration: 250ms; }
+                            }
+                        }
+                    }
+                }
+
+                // ── 3. APPEARANCE ───────────────────────────────────
+                Card {
+                    height: 160px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Appearance";
+                            subtitle: "Theme + accent color";
+                            section-icon: @image-url("icons/eye.svg");
+                            accent: Theme.accent-purple;
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            // Dark
+                            Rectangle {
+                                width: 80px; height: 36px;
+                                border-radius: Theme.radius-sm;
+                                background: root.current-theme == "dark" ? Theme.accent-purple.with-alpha(0.25) : Theme.bg-input;
+                                border-width: 1px;
+                                border-color: root.current-theme == "dark" ? Theme.accent-purple : Theme.border;
+                                animate background, border-color { duration: 150ms; }
+                                TouchArea { clicked => { root.current-theme = "dark"; root.set-theme("dark"); } }
+                                Text {
+                                    text: "🌙 Dark";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-sm;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                            // Light
+                            Rectangle {
+                                width: 80px; height: 36px;
+                                border-radius: Theme.radius-sm;
+                                background: root.current-theme == "light" ? Theme.accent-purple.with-alpha(0.25) : Theme.bg-input;
+                                border-width: 1px;
+                                border-color: root.current-theme == "light" ? Theme.accent-purple : Theme.border;
+                                animate background, border-color { duration: 150ms; }
+                                TouchArea { clicked => { root.current-theme = "light"; root.set-theme("light"); } }
+                                Text {
+                                    text: "☀ Light";
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-sm;
+                                    x: (parent.width - self.width) / 2;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                            }
+                        }
+                        // Accent picker
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            for accent[i] in [
+                                { name: "cyan", color: Theme.accent-cyan },
+                                { name: "purple", color: Theme.accent-purple },
+                                { name: "green", color: Theme.accent-green },
+                                { name: "yellow", color: Theme.accent-yellow },
+                                { name: "blue", color: Theme.accent-blue },
+                            ] : Rectangle {
+                                width: 32px; height: 32px;
+                                border-radius: 16px;
+                                background: accent.color;
+                                border-width: 2px;
+                                border-color: root.current-accent == accent.name ? Theme.text-primary : transparent;
+                                animate border-color { duration: 150ms; }
+                                TouchArea { clicked => {
+                                    root.current-accent = accent.name;
+                                    root.set-accent(accent.name);
+                                } }
+                            }
+                        }
+                    }
+                }
+
+                // ── 4. AUTO-UPDATE ──────────────────────────────────
+                Card {
+                    height: 170px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Auto-update";
+                            subtitle: "Background check + self-replace";
+                            section-icon: @image-url("icons/download.svg");
+                            accent: Theme.accent-green;
+                        }
+                        HorizontalLayout {
+                            Text {
+                                text: "Enable auto-update";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            ToggleSwitch {
+                                checked: root.auto-update-enabled;
+                                toggled(v) => {
+                                    root.auto-update-enabled = v;
+                                    root.set-auto-update(v);
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            QButton {
+                                label: "Check now";
+                                button-color: Theme.accent-green;
+                                horizontal-stretch: 1;
+                                clicked => { root.check-for-update-now(); }
+                            }
+                            Text {
+                                text: "Last: " + root.last-update-check;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                    }
+                }
+
+                // ── 5. AUTOSTART ────────────────────────────────────
+                Card {
+                    height: 130px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Auto-startup on boot";
+                            subtitle: "Launch on login (Linux/Windows)";
+                            section-icon: @image-url("icons/play.svg");
+                            accent: Theme.accent-cyan;
+                        }
+                        HorizontalLayout {
+                            Text {
+                                text: "Start with operating system";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            ToggleSwitch {
+                                checked: root.autostart-enabled;
+                                toggled(v) => {
+                                    root.autostart-enabled = v;
+                                    root.set-autostart(v);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── 6. PASSWORD ─────────────────────────────────────
+                Card {
+                    height: 130px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Password";
+                            subtitle: "Change wallet unlock password";
+                            section-icon: @image-url("icons/shield.svg");
+                            accent: Theme.accent-blue;
+                        }
+                        QButton {
+                            label: "Change password";
+                            button-color: Theme.accent-blue;
+                            clicked => { root.change-password(); }
+                        }
+                    }
+                }
+
+                // ── 7. REVEAL SECRETS ───────────────────────────────
+                Card {
+                    height: root.revealed-secret == "" ? 180px : 280px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Reveal mnemonic / private key";
+                            subtitle: "Re-authentication required";
+                            section-icon: @image-url("icons/key.svg");
+                            accent: Theme.accent-red;
+                        }
+                        Text {
+                            text: "⚠ Anyone with this can drain your wallet. Never screenshot. Never paste into a website.";
+                            color: Theme.accent-red;
+                            font-size: Theme.font-xs;
+                            wrap: word-wrap;
+                        }
+                        if root.revealed-secret == "" : HorizontalLayout {
+                            spacing: Theme.spacing-sm;
+                            QButton {
+                                label: "Reveal mnemonic";
+                                button-color: Theme.accent-red.darker(20%);
+                                horizontal-stretch: 1;
+                                clicked => { root.reveal-mnemonic(); }
+                            }
+                            QButton {
+                                label: "Export private key";
+                                button-color: Theme.accent-red.darker(20%);
+                                horizontal-stretch: 1;
+                                clicked => { root.reveal-private-key(); }
+                            }
+                        }
+                        if root.revealed-secret != "" : Rectangle {
+                            height: 80px;
+                            background: Theme.bg-input;
+                            border-width: 1px;
+                            border-color: Theme.accent-red.with-alpha(0.4);
+                            border-radius: Theme.radius-sm;
+                            VerticalLayout {
+                                padding: Theme.spacing-sm;
+                                Text {
+                                    text: root.revealed-secret;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.font-sm;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        if root.revealed-secret != "" : HorizontalLayout {
+                            Text {
+                                text: "Auto-hide in " + root.reveal-countdown-secs + "s";
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            QButton {
+                                label: "Hide now";
+                                button-color: Theme.bg-hover;
+                                clicked => { root.hide-revealed-secret(); }
+                            }
+                        }
+                    }
+                }
+
+                // ── 8. SESSION PERSISTENCE ──────────────────────────
+                Card {
+                    height: 170px;
+                    VerticalLayout {
+                        padding: Theme.spacing-md;
+                        spacing: Theme.spacing-sm;
+                        SectionHeader {
+                            title: "Session persistence";
+                            subtitle: "Remember unlock for N minutes";
+                            section-icon: @image-url("icons/clock.svg");
+                            accent: Theme.accent-purple;
+                        }
+                        HorizontalLayout {
+                            Text {
+                                text: root.session-persistence-minutes == 0 ?
+                                    "Off — password every launch"
+                                    : "Stay unlocked for " + root.session-persistence-minutes + " min";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Slider {
+                            minimum: 0;
+                            maximum: 240;
+                            value: root.session-persistence-minutes;
+                            changed value => {
+                                root.session-persistence-minutes = self.value;
+                                root.set-session-persistence(self.value);
+                            }
+                        }
+                    }
+                }
+
+                // Bottom spacer so last card doesn't hug nav bar
+                Rectangle { height: Theme.spacing-lg; background: transparent; }
+            }
+        }
+    }
+}

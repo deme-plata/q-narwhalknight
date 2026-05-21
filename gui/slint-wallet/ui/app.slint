@@ -11,6 +11,7 @@ import { NavButton } from "theme.slint";
 import { OAuthConsentScreen, OAuthScope } from "oauth_consent.slint";
 import { PosScreen } from "pos.slint";
 import { DexScreen, DexToken, ChartBar, TokenTx } from "dex.slint";
+import { SettingsScreen } from "settings.slint";
 
 // ─── Excluded features (not ready) ───────────────────────────
 // email.slint, calendar.slint, chat.slint are intentionally NOT
@@ -28,7 +29,7 @@ export component AppWindow inherits Window {
     preferred-height: 900px;
     background: Theme.bg-primary;
 
-    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent, 7=pos, 8=dex
+    // Screen state: 0=login, 1=dashboard, 2=send, 3=history, 4=miner, 5=receive, 6=oauth-consent, 7=pos, 8=dex, 9=settings
     in-out property <int> active-screen: 0;
 
     // Login properties
@@ -90,6 +91,33 @@ export component AppWindow inherits Window {
 
     callback set-cpu-threads(int);
     callback set-gpu-intensity(int);
+
+    // v1.3.0: Settings screen (screen 9)
+    in-out property <string> settings-rpc-url: "https://quillon.xyz";
+    in property <string> settings-rpc-status: "";
+    in-out property <string> settings-theme: "dark";
+    in-out property <string> settings-accent: "cyan";
+    in-out property <bool> settings-auto-update: true;
+    in-out property <string> settings-update-channel: "stable";
+    in property <string> settings-last-update-check: "never";
+    in-out property <bool> settings-autostart: true;
+    in-out property <int> settings-session-minutes: 0;
+    in-out property <string> settings-revealed-secret: "";
+    in property <int> settings-reveal-countdown: 0;
+
+    callback set-rpc-url(string);
+    callback test-rpc-connection();
+    callback set-theme-pref(string);
+    callback set-accent-pref(string);
+    callback set-auto-update-pref(bool);
+    callback set-update-channel-pref(string);
+    callback check-for-update-now();
+    callback set-autostart-pref(bool);
+    callback change-password();
+    callback reveal-mnemonic();
+    callback reveal-private-key();
+    callback hide-revealed-secret();
+    callback set-session-persistence-pref(int);
 
     // v11.4.0: Quantum Mixer toggle on Send screen — main.rs reads via get_use_mixer()
     in-out property <bool> use-mixer: false;
@@ -402,6 +430,40 @@ export component AppWindow inherits Window {
                 detail-chart-low: root.dex-detail-chart-low;
                 detail-txns: root.dex-detail-txns;
             }
+
+            if root.active-screen == 9 : SettingsScreen {
+                cpu-threads-current: root.cpu-threads-current;
+                cpu-threads-max: root.cpu-threads-max;
+                gpu-intensity-current: root.gpu-intensity-current;
+                rpc-url <=> root.settings-rpc-url;
+                rpc-status: root.settings-rpc-status;
+                current-theme <=> root.settings-theme;
+                current-accent <=> root.settings-accent;
+                auto-update-enabled <=> root.settings-auto-update;
+                update-channel <=> root.settings-update-channel;
+                last-update-check: root.settings-last-update-check;
+                autostart-enabled <=> root.settings-autostart;
+                session-persistence-minutes <=> root.settings-session-minutes;
+                revealed-secret <=> root.settings-revealed-secret;
+                reveal-countdown-secs: root.settings-reveal-countdown;
+
+                set-cpu-threads(n) => { root.set-cpu-threads(n); }
+                set-gpu-intensity(p) => { root.set-gpu-intensity(p); }
+                set-rpc-url(u) => { root.set-rpc-url(u); }
+                test-rpc-connection => { root.test-rpc-connection(); }
+                set-theme(t) => { root.set-theme-pref(t); }
+                set-accent(a) => { root.set-accent-pref(a); }
+                set-auto-update(b) => { root.set-auto-update-pref(b); }
+                set-update-channel(c) => { root.set-update-channel-pref(c); }
+                check-for-update-now => { root.check-for-update-now(); }
+                set-autostart(b) => { root.set-autostart-pref(b); }
+                change-password => { root.change-password(); }
+                reveal-mnemonic => { root.reveal-mnemonic(); }
+                reveal-private-key => { root.reveal-private-key(); }
+                hide-revealed-secret => { root.hide-revealed-secret(); }
+                set-session-persistence(m) => { root.set-session-persistence-pref(m); }
+                go-back => { root.active-screen = 1; }
+            }
         }
 
         // Bottom nav bar (shown when logged in, hidden on PoS screen)
@@ -462,6 +524,13 @@ export component AppWindow inherits Window {
                     active: root.active-screen == 4;
                     horizontal-stretch: 1;
                     clicked => { root.active-screen = 4; }
+                }
+                NavButton {
+                    nav-icon: @image-url("icons/settings.svg");
+                    label: "Settings";
+                    active: root.active-screen == 9;
+                    horizontal-stretch: 1;
+                    clicked => { root.active-screen = 9; }
                 }
             }
         }

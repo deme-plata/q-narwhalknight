@@ -191,3 +191,109 @@ fn write_atomic(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
     }
     fs::rename(&tmp, path)
 }
+
+// v1.3.0: Settings-driven autostart toggle. Called from the Settings page
+// when the user flips the "Auto-start on boot" switch.
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    if enabled {
+        install_autostart()
+    } else {
+        uninstall_autostart()
+    }
+}
+
+fn install_autostart() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return install_autostart_linux();
+    #[cfg(target_os = "windows")]
+    return install_autostart_windows();
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    return Ok(());
+}
+
+fn uninstall_autostart() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    return uninstall_autostart_linux();
+    #[cfg(target_os = "windows")]
+    return uninstall_autostart_windows();
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    return Ok(());
+}
+
+#[cfg(target_os = "linux")]
+fn install_autostart_linux() -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))?
+        .to_string_lossy()
+        .into_owned();
+    let autostart_dir: PathBuf =
+        [&home, ".config", "autostart"].iter().collect();
+    fs::create_dir_all(&autostart_dir).map_err(|e| format!("mkdir autostart_dir: {e}"))?;
+    let autostart_entry = format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name={name}\n\
+         Comment={comment}\n\
+         Exec={exe} --autostart\n\
+         Icon={icon_name}\n\
+         Terminal=false\n\
+         Hidden=false\n\
+         NoDisplay=false\n\
+         X-GNOME-Autostart-enabled=true\n",
+        name = APP_NAME,
+        comment = APP_COMMENT,
+        exe = exe,
+        icon_name = APP_ID,
+    );
+    let autostart_path = autostart_dir.join(format!("{APP_ID}.desktop"));
+    write_atomic(&autostart_path, autostart_entry.as_bytes())
+        .map_err(|e| format!("write autostart .desktop: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall_autostart_linux() -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let autostart_path: PathBuf =
+        [&home, ".config", "autostart"].iter().collect::<PathBuf>()
+            .join(format!("{APP_ID}.desktop"));
+    if autostart_path.exists() {
+        fs::remove_file(&autostart_path)
+            .map_err(|e| format!("remove autostart: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn install_autostart_windows() -> Result<(), String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("current_exe: {e}"))?
+        .to_string_lossy()
+        .into_owned();
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (run, _) = hkcu
+        .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
+        .map_err(|e| format!("open Run key: {e}"))?;
+    run.set_value(APP_NAME, &format!("\"{exe}\" --autostart"))
+        .map_err(|e| format!("set Run value: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall_autostart_windows() -> Result<(), String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run = hkcu
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            KEY_SET_VALUE,
+        )
+        .map_err(|e| format!("open Run key: {e}"))?;
+    // Ignore NotFound — value may already be absent.
+    let _ = run.delete_value(APP_NAME);
+    Ok(())
+}

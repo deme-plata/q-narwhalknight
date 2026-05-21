@@ -404,7 +404,16 @@ pub fn start_mining(
     }
     eprintln!("[MINER] Address: {}...{}", &miner_address[..10], &miner_address[miner_address.len()-6..]);
 
-    let num_threads = detect_mining_threads();
+    // v1.3.0: respect user's CPU-thread preference from Settings (config.rs),
+    // capped at OS-detected cores. Pre-v1.3.0 this auto-detected and ignored
+    // the slider entirely — the user complaint that started the polish batch.
+    let detected = detect_mining_threads();
+    let configured = crate::config::load().effective_cpu_threads();
+    let num_threads = configured.min(detected).max(1);
+    eprintln!(
+        "[MINER] CPU threads: configured={} detected={} → using {}",
+        configured, detected, num_threads
+    );
     state.active_threads.store(num_threads as u64, Ordering::SeqCst);
 
     // Shared challenge behind RwLock so all threads read the same challenge

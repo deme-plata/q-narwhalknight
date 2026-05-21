@@ -609,7 +609,18 @@ fn _gpu_worker_loop_opencl(
 
     // Mining state
     let mut nonce: u64 = rand::random::<u64>().wrapping_add(gpu_idx as u64 * 10_000_000_000);
-    let mut adaptive_work_size: usize = DEFAULT_WORK_SIZE;
+    // v1.3.0: respect user's GPU intensity preference from Settings (config.rs).
+    // Map 1..=100% onto MIN_WORK_SIZE..=MAX_WORK_SIZE for the initial dispatch.
+    // Pre-v1.3.0 this used hard-coded DEFAULT_WORK_SIZE and ignored the slider.
+    let intensity_pct = crate::config::load().effective_gpu_intensity_pct() as usize;
+    let intensity_pct = intensity_pct.clamp(1, 100);
+    let intensity_range = MAX_WORK_SIZE.saturating_sub(MIN_WORK_SIZE);
+    let mut adaptive_work_size: usize =
+        MIN_WORK_SIZE.saturating_add((intensity_range / 100).saturating_mul(intensity_pct));
+    eprintln!(
+        "[GPU-{}] Intensity: {}% → initial work_size {} (range {}..{})",
+        gpu_idx, intensity_pct, adaptive_work_size, MIN_WORK_SIZE, MAX_WORK_SIZE
+    );
     let mut cached_challenge = [0u8; 32];
     let mut cached_target = [0u8; 32];
     let mut last_hashrate_time = Instant::now();

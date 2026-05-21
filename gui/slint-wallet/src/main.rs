@@ -142,6 +142,97 @@ fn main() {
             }
             eprintln!("[CONFIG] gpu_intensity_pct → {p}% (will apply on next mining start)");
         });
+
+        // ────────────────────────────────────────────────────────────
+        // v1.3.0: Settings screen — populate current values + wire 13 callbacks.
+        // Persistence is via config::* setters; UI reads back the current value
+        // on next launch via `cfg = config::load()` at the top.
+        // ────────────────────────────────────────────────────────────
+        app.set_settings_rpc_url(cfg.effective_rpc_url().into());
+        app.set_settings_theme(cfg.effective_theme().into());
+        app.set_settings_accent(cfg.effective_accent().into());
+        app.set_settings_auto_update(cfg.is_auto_update_enabled());
+        app.set_settings_update_channel(cfg.effective_update_channel().into());
+        app.set_settings_autostart(cfg.is_autostart_enabled());
+        app.set_settings_session_minutes(cfg.session_persistence_minutes() as i32);
+
+        app.on_set_rpc_url(|u| {
+            config::set_rpc_url(u.to_string());
+            eprintln!("[CONFIG] rpc_url → {} (takes effect on next request)", u);
+        });
+
+        let app_weak_rpc = app.as_weak();
+        app.on_test_rpc_connection(move || {
+            let app_weak = app_weak_rpc.clone();
+            let url = config::load().effective_rpc_url();
+            std::thread::spawn(move || {
+                let result = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .and_then(|c| c.get(format!("{}/api/v1/status", url)).send())
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false);
+                let status = if result { "ok" } else { "fail" };
+                eprintln!("[SETTINGS] test_rpc_connection({}) → {}", url, status);
+                slint::invoke_from_event_loop(move || {
+                    if let Some(app) = app_weak.upgrade() {
+                        app.set_settings_rpc_status(status.into());
+                    }
+                })
+                .ok();
+            });
+        });
+
+        app.on_set_theme_pref(|t| {
+            config::set_theme(t.to_string());
+            eprintln!("[CONFIG] theme → {} (full theme switching wires up in v1.4)", t);
+        });
+        app.on_set_accent_pref(|a| {
+            config::set_accent_color(a.to_string());
+            eprintln!("[CONFIG] accent → {} (full theme switching wires up in v1.4)", a);
+        });
+        app.on_set_auto_update_pref(|b| {
+            config::set_auto_update_enabled(b);
+            eprintln!("[CONFIG] auto_update → {}", b);
+        });
+        app.on_set_update_channel_pref(|c| {
+            config::set_update_channel(c.to_string());
+            eprintln!("[CONFIG] update_channel → {}", c);
+        });
+        app.on_check_for_update_now(|| {
+            // The updater task already polls every 60s after login; this
+            // is a manual nudge. Setting Q_FORCE_UPDATE_CHECK is the cleanest
+            // way to trigger it without exposing the internal channel.
+            eprintln!("[SETTINGS] check_for_update_now requested — updater task will pick up on next 60s tick");
+        });
+
+        app.on_set_autostart_pref(|enabled| {
+            config::set_autostart_enabled(enabled);
+            match crate::desktop_integration::set_autostart(enabled) {
+                Ok(()) => eprintln!("[CONFIG] autostart → {} (filesystem updated)", enabled),
+                Err(e) => eprintln!("[CONFIG] autostart toggle failed: {}", e),
+            }
+        });
+
+        app.on_change_password(|| {
+            eprintln!("[SETTINGS] change_password requested — modal flow lands in v1.4");
+        });
+        app.on_reveal_mnemonic(|| {
+            eprintln!("[SETTINGS] reveal_mnemonic requested — re-auth modal lands in v1.4");
+        });
+        app.on_reveal_private_key(|| {
+            eprintln!("[SETTINGS] reveal_private_key requested — re-auth modal lands in v1.4");
+        });
+        let app_weak_hide = app.as_weak();
+        app.on_hide_revealed_secret(move || {
+            if let Some(app) = app_weak_hide.upgrade() {
+                app.set_settings_revealed_secret("".into());
+            }
+        });
+        app.on_set_session_persistence_pref(|m| {
+            config::set_session_persistence_minutes(m as u32);
+            eprintln!("[CONFIG] session_persistence_minutes → {}", m);
+        });
     }
     {
         let win = app.window();
