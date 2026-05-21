@@ -1037,14 +1037,14 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                     const priceUsd = token.priceUsd ?? 0;
                     const addrShort = `${token.contractAddress.substring(0, 8)}…${token.contractAddress.substring(token.contractAddress.length - 6)}`;
 
+                    // No `layout` prop on the motion.div below — that triggered
+                    // a spring on EVERY re-render (poll-refresh causes new array
+                    // references even when contents are identical, and the spring
+                    // fired each time, causing the "nervewrecking" motion).
+                    // initial/animate/exit still fire when a row is genuinely
+                    // added or removed because AnimatePresence + stable
+                    // contractAddress keys detect that. Hover stays.
                     return (
-                      {/* No `layout` prop — that triggered a spring on EVERY
-                          re-render (poll-refresh causes new array references
-                          even when contents are identical, and the spring fired
-                          each time, causing the "nervewrecking" motion).
-                          initial/animate/exit still fire when a row is genuinely
-                          added or removed because AnimatePresence + stable
-                          contractAddress keys detect that. Hover stays. */}
                       <motion.div
                         key={token.contractAddress}
                         initial={{ opacity: 0, x: -10 }}
