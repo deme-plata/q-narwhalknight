@@ -1,20 +1,20 @@
-//! Nova `StepCircuit` wrapper around the δ-circuit.
+//! Step-circuit wrapper around the δ-circuit (framework-agnostic).
 //!
-//! This is the **Phase 2 boundary** for the recursive-lattice zk-SNARK.
+//! This is the **Phase B1 boundary** for the recursive-lattice zk-SNARK.
 //! `DeltaBlockCircuit` (in `crates/q-ivc/src/circuits/delta_block.rs`)
-//! enforces per-block validity; this file wraps it as a Nova-style step
-//! circuit so a folding driver can chain proofs across the entire chain
-//! into a single constant-size proof verifiable in ~5–10 ms.
+//! enforces per-block validity; this file wraps it as a step circuit so a
+//! lattice folding driver can chain proofs across the entire chain into a
+//! single constant-size proof verifiable in ~5–10 ms.
 //!
 //! ## What a step circuit is
 //!
 //! A step circuit is an R1CS predicate that takes a fixed-shape public
 //! input vector `z_in`, a private witness, and emits a public output
 //! vector `z_out` such that there exists a witness satisfying the
-//! constraints. Nova's folding scheme accumulates a chain of such
-//! step-circuit instances into a relaxed R1CS instance whose verification
-//! cost is independent of the chain length. A final SNARK compresses
-//! the accumulated instance into a constant-size proof.
+//! constraints. A folding scheme accumulates a chain of such step-circuit
+//! instances into a relaxed instance whose verification cost is independent
+//! of the chain length. A final SNARK compresses the accumulated instance
+//! into a constant-size proof.
 //!
 //! For Quillon Graph's δ-circuit, the step shape is:
 //!
@@ -37,19 +37,17 @@
 //! - [x] `fold_native` host-side helper — drives the OFF-CIRCUIT state
 //!       advance one block at a time. Returns the chain of z_out values
 //!       a folding prover would need to advance against.
-//! - [x] Trait `StepCircuitAdapter` — abstract boundary that subsequent
-//!       commits will implement against the chosen Nova crate
-//!       (`nova-snark` for Microsoft's impl, or `arkworks-rs/nova` for
-//!       the community one — the choice is made via a feature flag in a
-//!       subsequent commit).
-//! - [ ] Concrete `impl nova_snark::traits::StepCircuit for
-//!       DeltaStepCircuit` (Job N2 in the Phase 2 board) — adds the
-//!       trait bound + the `generate_constraints` adapter; nova-snark
-//!       dep is added at that point.
-//! - [ ] `NovaFolder::fold_block` (Job N3) — the driver that calls the
-//!       step circuit per block and stores the accumulated proof. Once
-//!       landed, the `PHASE2-WIRE-POINT` marker in `tip_watcher.rs:114`
-//!       gets replaced with one line.
+//! - [x] Trait `StepCircuitAdapter` — framework-agnostic abstract boundary.
+//!       Backed by `LatticeStepFolder` in Phase B1 (lattice-only path; see
+//!       `/root/.claude/plans/optimized-frolicking-bubble.md`).
+//! - [ ] `LatticeStepFolder` impl (Phase B1) — backs the trait via
+//!       `q_lattice_guard::LatticeGuardProver` over an arkworks-R1CS →
+//!       `ArithmeticCircuit` bridge. Lands in
+//!       `crates/q-ivc/src/recursion/lattice_folder.rs`.
+//! - [ ] Module-SIS folding driver (Phase C) — replaces per-step proofs
+//!       with one constant-size `FoldedInstance`. Once landed, the
+//!       `LATTICE-FOLD-WIRE-POINT` marker in `tip_watcher.rs` gets
+//!       replaced with one line.
 //!
 //! ## Cost / latency targets (whitepaper §4.2/4.3)
 //!
@@ -79,7 +77,12 @@ pub const STEP_Z_LEN: usize = 9;
 ///
 /// One of these per block in the chain. The folding driver maintains
 /// `z_current` and advances it block-by-block.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Copy` is derived deliberately: `StepIO` is the chain's "small,
+/// passed-by-value" type — closures, adapter constructors, and the
+/// folding driver pass it across function boundaries dozens of times
+/// per fold and any clone overhead would hurt the hot path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StepIO {
     /// SMT root at this point in the chain.
     pub state_root: [u8; 32],
@@ -126,21 +129,19 @@ impl StepIO {
     }
 }
 
-/// Trait that subsequent commits implement against the chosen Nova crate.
+/// Framework-agnostic step-circuit trait, backed by a lattice folder.
 ///
-/// The Phase 2 board (jobs N1..N3) decides whether to use Microsoft's
-/// `nova-snark` or `arkworks-rs/nova`. Whichever one wins, it provides
-/// its own `StepCircuit` trait with this same shape — the adapter
-/// commit just maps this trait's methods 1:1.
+/// Phase B1 wires this trait to `LatticeStepFolder` (in
+/// `recursion/lattice_folder.rs`), which proves each step via
+/// `q_lattice_guard::LatticeGuardProver`. Phase C swaps the per-step
+/// prover for a Module-SIS folding accumulator (`q_lattice_guard::folding`).
 ///
 /// Keeping the trait local lets us:
-///   • Test the step circuit's constraint logic NOW (this commit),
-///     without pulling in the Nova crate's heavy dependency graph yet.
-///   • Swap the underlying Nova implementation later by changing only the
-///     adapter file.
-///   • Phase 4 lattice migration: re-implement this trait against
-///     LatticeFold / LaBRADOR / Greyhound — the δ-circuit itself doesn't
-///     change.
+///   • Test the step circuit's constraint logic without pulling in the
+///     lattice folder's heavier dependency graph.
+///   • Evolve the backing prover (per-step LatticeGuard → folding → terminal
+///     SNARK) by changing only the adapter file — the δ-circuit itself
+///     doesn't change.
 pub trait StepCircuitAdapter<F: PrimeField> {
     /// Number of public-input words per step. Always `STEP_Z_LEN` (9) for
     /// the δ-step; trait parameter for future flexibility.
@@ -475,6 +476,7 @@ mod tests {
         AnchorWitness {
             claimed_producer_id: 0,
             ntt_witness: Vec::new(),
+            public_commitment: Fr::from(0u32), // binding disabled
             _marker: core::marker::PhantomData,
         }
     }

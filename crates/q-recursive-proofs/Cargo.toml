@@ -8,22 +8,37 @@ license = "MIT"
 readme = "README.md"
 
 [features]
-default = ["parallel"]
-parallel = ["rayon"]
+# Default enables the full runtime — q-api-server's expected feature set.
+default = ["parallel", "runtime"]
+# rayon-based parallel NTT in q-lattice-guard.
+parallel = ["rayon", "q-lattice-guard/parallel", "q-ivc/parallel"]
+# Tokio + libp2p — required for block_producer_task, light_client,
+# and the P2P protocol module. Wasm consumers disable this to drop
+# the heavy network-runtime deps.
+runtime = ["tokio", "libp2p", "futures", "q-ivc/runtime"]
 gpu = []  # Future GPU acceleration
 benchmarks = ["dep:criterion"]
 
 [dependencies]
 # Core Q-NarwhalKnight crates
-q-lattice-guard = { path = "../q-lattice-guard" }
+q-lattice-guard = { path = "../q-lattice-guard", default-features = false }
 q-types = { path = "../q-types" }
+# Phase B1: tip_proof_v2 wraps the per-step LatticeStepProof from q-ivc.
+# q-ivc depends on q-lattice-guard (not on q-recursive-proofs) so this
+# dependency is acyclic. `default-features = false` so q-ivc's tokio
+# usage is gated by the `runtime` feature below.
+q-ivc = { path = "../q-ivc", default-features = false }
+ark-ff = { workspace = true }
+ark-relations = { workspace = true }
 
 # Core dependencies
 anyhow = { workspace = true }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 bincode = "1.3"
 bytes = "1.5"
+hex = "0.4"
 
 # Cryptographic foundations
 sha3 = "0.10"
@@ -41,12 +56,12 @@ num-integer = "0.1"
 rayon = { version = "1.10", optional = true }
 num_cpus = "1.16"
 
-# Async runtime
-tokio = { workspace = true, features = ["full", "sync"] }
-futures = "0.3"
+# Async runtime — feature-gated to `runtime` for wasm compat.
+tokio = { workspace = true, features = ["full", "sync"], optional = true }
+futures = { version = "0.3", optional = true }
 
-# libp2p for decentralized proving
-libp2p = { workspace = true }
+# libp2p for decentralized proving — feature-gated to `runtime`.
+libp2p = { workspace = true, optional = true }
 
 # Serialization
 rmp-serde = "1.1"

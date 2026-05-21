@@ -220,6 +220,14 @@ use crate::handshake::ServerRole;
 use crate::distributed_ai::DistributedAITopics;
 use crate::address_filter::{is_routable_peer_address, log_filter_configuration, get_external_address, get_external_wss_address};
 use q_types::QBlock;
+use q_types::rate_limited_log::RateLimitedLog;
+
+/// v10.10.11: Rate-limit the gossipsub forward-failure warn at line ~4085.
+/// 10-second window per topic — failures still hit the Prometheus counter
+/// `qnk_gossipsub_forward_failed{topic, reason}` on every occurrence, but
+/// the log line emits at most once per topic per window so we don't DoS
+/// journalctl when the consumer dies (the May-20 v10.10.10 incident).
+static GOSSIP_FWD_FAIL: RateLimitedLog = RateLimitedLog::new(10);
 
 /// 🔥 v1.3.5-beta: DYNAMIC BOOTSTRAP DISCOVERY - NO HARDCODED PEER IDs
 ///
@@ -4081,14 +4089,41 @@ impl UnifiedNetworkManager {
                     let data = msg_data;
 
                     // v6.0.10: Use try_send() on bounded channel - drop message if buffer full
-                    // This prevents unbounded memory growth that caused OOM on 8GB servers
+                    // This prevents unbounded memory growth that caused OOM on 8GB servers.
+                    // v10.10.11: rate-limit the warn! AND count every drop in Prometheus.
+                    // Counters survive even when logs are suppressed.
                     if let Err(e) = tx.try_send((topic_str.clone(), data)) {
-                        if matches!(e, tokio::sync::mpsc::error::TrySendError::Full(_)) {
-                            warn!("⚠️ Gossipsub channel FULL (10k cap) - dropping message on topic {}", topic_str);
-                        } else {
-                            warn!("⚠️ Failed to forward gossipsub message on topic {}: {}", topic_str, e);
+                        let reason = match &e {
+                            tokio::sync::mpsc::error::TrySendError::Full(_) => "full",
+                            tokio::sync::mpsc::error::TrySendError::Closed(_) => "closed",
+                        };
+                        self.metrics
+                            .gossipsub_forward_failed
+                            .get_or_create(&crate::metrics::GossipForwardLabels {
+                                topic: topic_str.clone(),
+                                reason: reason.to_string(),
+                            })
+                            .inc();
+                        if let Some(suppressed) = GOSSIP_FWD_FAIL.check(&topic_str) {
+                            if suppressed > 0 {
+                                warn!(
+                                    "⚠️ Gossipsub forward FAILED topic={} reason={} (+{} suppressed in last 10s)",
+                                    topic_str, reason, suppressed
+                                );
+                            } else {
+                                warn!(
+                                    "⚠️ Gossipsub forward FAILED topic={} reason={}",
+                                    topic_str, reason
+                                );
+                            }
                         }
                     } else {
+                        self.metrics
+                            .gossipsub_messages_forwarded
+                            .get_or_create(&crate::metrics::TopicLabels {
+                                topic: topic_str.clone(),
+                            })
+                            .inc();
                         // 🔇 v0.6.9-beta: Changed to DEBUG to prevent log spam
                         // v0.9.7-beta: Enhanced with block height information
                         if topic_str.contains("/blocks") {

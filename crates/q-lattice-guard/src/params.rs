@@ -85,6 +85,45 @@ impl RlweParams {
         }
     }
 
+    /// **Phase C scaffold** — wider-modulus parameters intended for
+    /// Module-SIS folding (see `crate::folding`). The widening from
+    /// `pq128`'s 32-bit modulus to a 60-bit modulus closes plan
+    /// risk **R5** (the arkworks-Fr → u64 Scalar truncation in the
+    /// Phase B1 R1csBridge effectively dropped soundness to ~32 bits);
+    /// at 60 bits the projection retains ≥ 60-bit residual hardness
+    /// after the bridge truncates.
+    ///
+    /// - n = 1024 (same dimension as `pq128` — Phase C optimises along
+    ///   the modulus axis first, dimension second)
+    /// - q ≈ 2^60 Goldilocks-friendly prime
+    /// - σ = 3.2
+    ///
+    /// Concrete prime choice: `0x0FFFFFFFEFFE0001` = 1 152 920 405 095 219 201
+    /// — a 60-bit prime with q ≡ 1 (mod 2048) for NTT compatibility.
+    /// This value is provisional; the final Phase C parameter set
+    /// requires soundness analysis (see `crate::folding::ParameterNotes`).
+    pub fn pq128_folding() -> Self {
+        // Provisional 60-bit prime: 2^60 - 2^32 * 256 - 2^16 * 16 + 1.
+        // The `(mod 2n)` condition with n=1024 means q ≡ 1 (mod 2048).
+        // FINAL PARAMETER SELECTION DEFERRED — see the Phase C research
+        // risk register in `/root/.claude/plans/optimized-frolicking-bubble.md`.
+        let modulus = 0x0FFFFFFFEFFE0001u64;
+        let dimension = 1024;
+
+        Self {
+            dimension,
+            modulus,
+            std_dev: 3.2,
+            // Folding inflates the witness norm step by step; this bound
+            // tracks ~10^6 folds before exhaustion. Periodic
+            // re-aggregation (LatticeFold §5) extends past this.
+            error_bound: 1 << 40,
+            modulus_bits: 60,
+            security_level: SecurityLevel::PQ128,
+            ntt_root: Self::find_primitive_root(modulus, 2 * dimension as u64),
+        }
+    }
+
     /// 192-bit post-quantum security parameters
     ///
     /// Based on Kyber-768:

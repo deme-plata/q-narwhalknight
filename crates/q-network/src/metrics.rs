@@ -98,6 +98,14 @@ pub struct TopicLabels {
     pub topic: String,
 }
 
+/// Label-set: gossipsub forward failure cause.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct GossipForwardLabels {
+    pub topic: String,
+    /// `full` (channel at capacity, dropped) | `closed` (receiver gone)
+    pub reason: String,
+}
+
 /// The full network metrics registry plus app-level counter families.
 ///
 /// One instance per process, held in an `Arc` and shared between the
@@ -162,6 +170,26 @@ pub struct NetworkMetrics {
 
     /// Total blocks ingested by libp2p sync path since process start.
     pub blocks_synced_total: Counter,
+
+    /// v10.10.11: Gossipsub forward failures from the swarm event handler into
+    /// the consumer task's mpsc channel. Labels: topic × reason (`full|closed`).
+    /// `closed` indicates the consumer task died — see
+    /// `gossipsub_consumer_restarts` for the supervisor's recovery counter.
+    pub gossipsub_forward_failed: Family<GossipForwardLabels, Counter>,
+
+    /// v10.10.11: Messages successfully forwarded from swarm → consumer task.
+    /// Denominator for the drop ratio (forward_failed / forwarded).
+    pub gossipsub_messages_forwarded: Family<TopicLabels, Counter>,
+
+    /// v10.10.11: Times the gossipsub consumer-task supervisor restarted the
+    /// inner task after a panic. Should be 0 in steady state. If non-zero,
+    /// pair with the most recent ERROR log to find the panic site.
+    pub gossipsub_consumer_restarts: Counter,
+
+    /// v10.10.11: Times turbo_sync detected "no peers available" and aborted
+    /// the chunk-fetch attempt. Paired with the rate-limited log site at
+    /// turbo_sync.rs:4510.
+    pub sync_no_peers_total: Counter,
 
     /// Process resident set size in bytes (refreshed once per HTTP scrape
     /// from /proc/self/statm or sysinfo).
@@ -315,6 +343,35 @@ impl NetworkMetrics {
             blocks_synced_total.clone(),
         );
 
+        // v10.10.11: Gossipsub forward + consumer health
+        let gossipsub_forward_failed: Family<GossipForwardLabels, Counter> = Family::default();
+        registry.register(
+            "qnk_gossipsub_forward_failed",
+            "Gossipsub messages dropped on the way from swarm event handler to consumer task",
+            gossipsub_forward_failed.clone(),
+        );
+
+        let gossipsub_messages_forwarded: Family<TopicLabels, Counter> = Family::default();
+        registry.register(
+            "qnk_gossipsub_messages_forwarded",
+            "Gossipsub messages successfully forwarded to the consumer task",
+            gossipsub_messages_forwarded.clone(),
+        );
+
+        let gossipsub_consumer_restarts = Counter::default();
+        registry.register(
+            "qnk_gossipsub_consumer_restarts",
+            "Times the gossipsub consumer-task supervisor restarted after a panic",
+            gossipsub_consumer_restarts.clone(),
+        );
+
+        let sync_no_peers_total = Counter::default();
+        registry.register(
+            "qnk_sync_no_peers_total",
+            "Times turbo_sync aborted due to no peers available",
+            sync_no_peers_total.clone(),
+        );
+
         let rss_bytes = Gauge::default();
         registry.register(
             "qnk_process_rss_bytes",
@@ -361,6 +418,10 @@ impl NetworkMetrics {
             network_max_height,
             gap_to_tip,
             blocks_synced_total,
+            gossipsub_forward_failed,
+            gossipsub_messages_forwarded,
+            gossipsub_consumer_restarts,
+            sync_no_peers_total,
             rss_bytes,
             db_size_bytes,
             open_fds,
@@ -524,6 +585,10 @@ mod tests {
             "qnk_network_max_height",
             "qnk_gap_to_tip",
             "qnk_blocks_synced_total",
+            "qnk_gossipsub_forward_failed",
+            "qnk_gossipsub_messages_forwarded",
+            "qnk_gossipsub_consumer_restarts",
+            "qnk_sync_no_peers_total",
             "qnk_process_rss_bytes",
             "qnk_db_size_bytes",
             "qnk_open_file_descriptors",

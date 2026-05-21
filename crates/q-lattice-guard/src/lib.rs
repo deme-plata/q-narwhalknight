@@ -42,6 +42,7 @@
 pub mod approximate_product;
 pub mod commitment;
 pub mod errors;
+pub mod folding;
 pub mod ntt;
 pub mod params;
 pub mod prover;
@@ -53,6 +54,10 @@ pub mod verifier;
 pub use approximate_product::{ApproximateProductProof, ApproximateProductProver};
 pub use commitment::{LatticeCommitment, OpeningProof};
 pub use errors::LatticeGuardError;
+pub use folding::{
+    AjtaiCommitment, FoldedInstance, FoldingError, FoldingParams, FoldingResult,
+    LatticeFolder, ParameterNotes, SOUNDNESS_NOTES as FOLDING_SOUNDNESS_NOTES,
+};
 pub use params::{RlweParams, SecurityLevel};
 pub use prover::{LatticeGuardProof, LatticeGuardProver};
 pub use rlwe::{RlweCiphertext, RlweKeypair, RlwePublicKey, RlweSecretKey};

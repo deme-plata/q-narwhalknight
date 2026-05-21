@@ -43,13 +43,68 @@
 
 pub mod circuits;
 pub mod gadgets;
+#[cfg(feature = "runtime")]
 pub mod light_client;
+#[cfg(feature = "runtime")]
 pub mod protocol;
 pub mod tip_proof_v1;
+pub mod tip_proof_v2;
+pub mod tip_proof_v3;
+pub mod tip_proof_persistence;
+pub mod tip_proof_service;
+pub mod tip_proof_client;
+#[cfg(feature = "runtime")]
+pub mod block_producer_task;
+pub mod tip_proof_http;
+pub mod tip_proof_metrics;
 
 pub use tip_proof_v1::{
     anchor as tip_anchor, extend as tip_extend, verify as tip_verify, LatticeTipProof,
     VerifyError as TipVerifyError,
+};
+
+pub use tip_proof_v2::{
+    anchor as tip_anchor_v2, extend_with_step_proof as tip_extend_v2,
+    verify_chain_structure as tip_verify_v2, verify_with_folder as tip_verify_v2_full,
+    LatticeTipProofV2, VerifyErrorV2, PROOF_VERSION as TIP_PROOF_V2_VERSION,
+    SOUNDNESS_NOTES as TIP_PROOF_V2_SOUNDNESS_NOTES,
+};
+
+pub use tip_proof_v3::{
+    anchor_v3, verify_chain_structure_v3, verify_with_folder_v3, LatticeTipProofV3,
+    VerifyErrorV3, PROOF_VERSION_V3,
+};
+
+pub use tip_proof_service::{
+    TipProofService, TipProofServiceConfig, TipProofServiceStats,
+};
+
+pub use tip_proof_client::{
+    TipProofClient, TipProofClientError, TipProofClientStats,
+};
+
+pub use tip_proof_persistence::{
+    FilePersistence, MemoryPersistence, PersistenceError, PersistenceResult,
+    PersistenceStats, TipProofPersistence, load_or_warn as load_persistence_or_warn,
+    save_with_retry as save_persistence_with_retry,
+};
+
+#[cfg(feature = "runtime")]
+pub use block_producer_task::{
+    BlockEvent, BlockProducerHandle, BlockProducerTask, BlockProducerTaskConfig,
+    BlockProducerTaskStats, StepProofError, StepProofSource, StubStepProofSource,
+    folder_strategy,
+};
+
+pub use tip_proof_http::{
+    compute_etag, handle_get_tip_bytes, handle_get_tip_health, handle_get_tip_json,
+    handle_get_tip_stats, if_none_match_matches, HttpResponse, TipProofHealthJson,
+    TipProofJson,
+};
+
+pub use tip_proof_metrics::{
+    pump_client_stats, pump_service_stats, MetricsSink, NopSink, Observation,
+    ObservationKind, StdoutSink, VecSink,
 };
 
 // Re-exports
@@ -58,7 +113,9 @@ pub use circuits::{
     StateTransitionCircuit,
 };
 pub use gadgets::{DilithiumVerifierGadget, MerkleTreeGadget, PoseidonGadget};
+#[cfg(feature = "runtime")]
 pub use light_client::LightClient;
+#[cfg(feature = "runtime")]
 pub use protocol::{EpochProofSubmission, EpochProofTask, ProverNode};
 
 use q_lattice_guard::{ArithmeticCircuit, LatticeGuardProof, R1CSConstraint, Scalar};

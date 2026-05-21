@@ -13,6 +13,9 @@
 //!      format.
 //!   3. An `allocate` method that takes the off-circuit struct and a
 //!      `ConstraintSystemRef`, returns the in-circuit allocated form.
+//!   4. (Phase A onward) A native helper that computes the off-circuit
+//!      value of any Poseidon binding the in-circuit gadget enforces —
+//!      see `compute_anchor_commitment_native`.
 //!
 //! Splitting the unpacking from the allocation means the bit-fiddly
 //! parsing is unit-testable in plain Rust (fast), and the gadget call
@@ -22,4 +25,7 @@ pub mod dilithium_witness;
 pub mod anchor_witness;
 
 pub use dilithium_witness::{DilithiumKeyBytes, DilithiumSigBytes};
-pub use anchor_witness::AnchorVdfBytes;
+pub use anchor_witness::{
+    AnchorVdfBytes, ANCHOR_BIND_SAMPLES, ANCHOR_COEFF_BYTES, ANCHOR_NTT_DIM,
+    ANCHOR_NTT_Q, compute_anchor_commitment_native,
+};

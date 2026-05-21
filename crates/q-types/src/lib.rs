@@ -345,6 +345,11 @@ pub mod validator_registry;
 /// with quorum verification (2-of-3 trusted bootstrap signers)
 pub mod update_announcement;
 
+/// v10.10.11: Rate-limited tracing helper for high-volume log sites.
+/// Generalizes the LAST_LOG: AtomicU64 suppression pattern at
+/// handlers.rs:9705 so multiple call sites share it without re-implementing.
+pub mod rate_limited_log;
+
 // Re-export block types for convenience
 pub use block::{
     QBlock, BlockHeader, BlockHash, DagRound, MiningSolution,

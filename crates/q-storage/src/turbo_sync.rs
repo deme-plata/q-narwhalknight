@@ -47,6 +47,18 @@ static SYNC_RAYON_POOL: once_cell::sync::Lazy<rayon::ThreadPool> = once_cell::sy
 });
 
 use q_types::block::QBlock;
+use q_types::rate_limited_log::RateLimitedLog;
+
+// v10.10.11: Rate-limiters for the high-volume turbo_sync spam sites.
+// Each one is keyed per-site; the subkey passed to `.check()` further
+// narrows by peer / height / chunk range as appropriate. See the call
+// sites below (NO PEERS, P2P direct errors, chunk-retry banners) for
+// the chosen subkey + window rationale.
+static NO_PEERS_LIMITER: RateLimitedLog = RateLimitedLog::new(30);
+static CHECKPOINT_PROBE_LIMITER: RateLimitedLog = RateLimitedLog::new(10);
+static P2P_DIRECT_ERROR_LIMITER: RateLimitedLog = RateLimitedLog::new(10);
+static CHUNK_RETRY_LIMITER: RateLimitedLog = RateLimitedLog::new(60);
+static DOWNLOAD_FAILED_LIMITER: RateLimitedLog = RateLimitedLog::new(60);
 
 // Import QStorage from parent module
 // v0.8.0-beta: Import balance consensus for Turbo Sync integration

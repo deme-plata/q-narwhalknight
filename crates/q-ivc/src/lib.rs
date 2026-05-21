@@ -27,3 +27,8 @@ pub mod host;
 pub mod recursion;
 
 pub use circuits::EpochTransitionCircuit;
+pub use recursion::{
+    DeltaStepCircuit, FoldError, StepCircuitAdapter, StepIO, STEP_Z_LEN, fold_native,
+};
+#[cfg(feature = "runtime")]
+pub use recursion::{TipWatcher, TipWatcherState};

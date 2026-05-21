@@ -21,12 +21,19 @@ blake3 = { workspace = true }
 sha3 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
-tokio = { workspace = true }
+# tokio is feature-gated to the `runtime` feature so q-ivc-verifier-wasm
+# (and any other wasm32 consumer) can pull q-ivc with `default-features =
+# false` and skip the tokio-dependent modules entirely. The
+# tip_watcher module is the only consumer of tokio in this crate.
+tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 
-# Internal: existing ZK and lattice primitives
-q-zk-snark = { path = "../q-zk-snark" }
-q-lattice-guard = { path = "../q-lattice-guard" }
+# q-lattice-guard is required because `LatticeStepProof.proof` carries
+# a `LatticeGuardProof` — every consumer (including the wasm verifier)
+# needs the type to deserialize tip proofs. `default-features = false`
+# turns off the rayon-based parallel NTT; q-ivc's own `parallel`
+# feature re-enables it for native builds.
+q-lattice-guard = { path = "../q-lattice-guard", default-features = false }
 q-types = { path = "../q-types" }
 
 [dev-dependencies]
@@ -34,7 +41,20 @@ criterion = { workspace = true }
 # ark-r1cs-std 0.4 requires ark-ff 0.4; ark-bls12-381 0.5 uses ark-ff 0.5 — incompatible.
 # Use 0.4 here so test-only Fr matches the Field bound expected by UInt32<Fr>.
 ark-bls12-381 = "0.4"
+# Tests reach the runtime module's tokio paths.
+tokio = { workspace = true }
+# Phase A task #7 conformance — sign with real Dilithium5 + unpack
+# through our host helpers to validate the byte format.
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
 
 [features]
-default = []
+# Default-on so existing consumers (q-api-server, the workspace tests)
+# keep getting the full feature set without an opt-in.
+default = ["runtime", "parallel"]
+# Enables the tokio-backed `recursion::tip_watcher` module.
+runtime = ["tokio"]
+# Forwards the rayon-based parallel NTT to q-lattice-guard. Native
+# consumers want this; wasm consumers leave it off.
+parallel = ["q-lattice-guard/parallel"]
 benchmarks = []

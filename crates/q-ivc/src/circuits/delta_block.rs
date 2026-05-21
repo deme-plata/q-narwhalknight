@@ -162,12 +162,26 @@ pub struct CoinbaseWitness<F: PrimeField> {
 /// The Quillon Graph anchor election uses a verifiable NTT-based randomness
 /// beacon. The δ-circuit verifies that the producer claimed in the block
 /// header is the legitimate anchor for the round.
+///
+/// `public_commitment` is the Poseidon binding that ties the polynomial
+/// witness, `claimed_producer_id`, and `block_height` (= round) together.
+/// Compute it off-circuit via
+/// `crate::host::anchor_witness::compute_anchor_commitment_native`.
+///
+/// **Backward-compat sentinel:** if `public_commitment == F::zero()`, the
+/// in-circuit binding check is disabled (the verifier still allocates the
+/// polynomial + enforces the norm bound). Set to a real Poseidon value to
+/// activate the full producer-id binding; this is the Phase A → Phase 5
+/// migration path that ships incrementally.
 #[derive(Clone)]
 pub struct AnchorWitness<F: PrimeField> {
     /// The producer claimed in the block header.
     pub claimed_producer_id: u32,
     /// VDF / NTT witness data; consumed by NttVerifierGadget.
     pub ntt_witness: Vec<u8>,
+    /// Public Poseidon commitment binding the witness, producer id, and
+    /// round together. `F::zero()` disables the binding (backward-compat).
+    pub public_commitment: F,
     pub _marker: core::marker::PhantomData<F>,
 }
 
@@ -332,16 +346,20 @@ impl<F: PrimeField> DeltaBlockCircuit<F> {
         Blake3Gadget::verify_hash(cs.clone(), &header_preimage, &expected_hash_fp)?;
 
         // ╔═══════════════════════════════════════════════════════════════════╗
-        // ║  PHASE 2 — anchor-election NTT verification (1B — wired stub)     ║
+        // ║  PHASE 2 — anchor-election NTT verification (1B — Phase A live)   ║
         // ╚═══════════════════════════════════════════════════════════════════╝
         //
-        // Calls into `host::anchor_witness::verify_anchor_election` which is
-        // currently a stub returning constant-true (see that file for the
-        // unpacking spec). When the host-helper body lands, this call's
-        // returned Boolean must be enforced == true. Until then the anchor
-        // check is non-enforcing at the recursive level; the API server's
-        // accept_block path validates it block-by-block during the advisory
-        // window. Constraint cost when filled in: ~50M.
+        // Calls into `host::anchor_witness::verify_anchor_election`, which:
+        //   • allocates the ntt_witness as a 256-coefficient polynomial,
+        //     enforces each coeff in [0, ANCHOR_NTT_Q) (~51K constraints),
+        //   • when `public_commitment != F::zero()`, enforces the in-circuit
+        //     Poseidon hash over (poly[..K] || claimed_producer_id || round)
+        //     equals the public commitment.
+        // The off-chain `crate::host::anchor_witness::compute_anchor_commitment_native`
+        // produces the matching commitment. Setting it to zero disables the
+        // binding (backward-compat for pre-Phase-A test fixtures); the API
+        // server's accept_block path still validates anchor election
+        // block-by-block during the advisory window.
         let anchor_ok = crate::host::anchor_witness::verify_anchor_election::<F>(
             cs.clone(),
             &[crate::host::anchor_witness::AnchorVdfBytes::new(
@@ -349,10 +367,8 @@ impl<F: PrimeField> DeltaBlockCircuit<F> {
             )],
             self.inputs.anchor.claimed_producer_id,
             self.inputs.block_height,
+            self.inputs.anchor.public_commitment,
         )?;
-        // Enforcing == true is currently a no-op (stub returns constant-true)
-        // but keeps the call site in canonical form so 1B-final lands as a
-        // single-file change to anchor_witness.rs.
         anchor_ok.enforce_equal(&Boolean::constant(true))?;
 
         // ╔═══════════════════════════════════════════════════════════════════╗
@@ -781,6 +797,7 @@ mod tests {
         AnchorWitness {
             claimed_producer_id: 0,
             ntt_witness: Vec::new(),
+            public_commitment: Fr::from(0u32), // binding disabled
             _marker: core::marker::PhantomData,
         }
     }

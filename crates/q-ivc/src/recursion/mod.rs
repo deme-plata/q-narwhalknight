@@ -28,11 +28,18 @@
 //! `TipWatcher::fold_block` — see the marker comment in
 //! `tip_watcher.rs`.
 
+#[cfg(feature = "runtime")]
 pub mod tip_watcher;
 pub mod step_circuit;
+pub mod lattice_folder;
 
+#[cfg(feature = "runtime")]
 pub use tip_watcher::{TipWatcher, TipWatcherState};
 pub use step_circuit::{
     DeltaStepCircuit, FoldError, StepCircuitAdapter, StepIO, STEP_Z_LEN,
     fold_native,
+};
+pub use lattice_folder::{
+    FolderError, FolderResult, LatticeStepFolder, LatticeStepProof, R1csBridge,
+    prove_delta_step, tiny_params,
 };
