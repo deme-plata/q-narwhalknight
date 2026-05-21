@@ -5585,6 +5585,14 @@ pub async fn send_transaction_signed(
         &hex::encode(tx.id)[..16],
     );
 
+    // 🛡 v10.11.0a: mark this tx as trusted-by-API-auth so the mempool's
+    // perform_validation skips the inner-signature check (which would
+    // otherwise reject because we leave tx.signature empty — the
+    // X-Wallet-Auth header IS the proof of authorization here).
+    if let Some(mp) = state.production_mempool.as_ref() {
+        mp.mark_auth_trusted(tx.id, from_address);
+    }
+
     // 8. Submit unsigned tx to mempool (same path /dex/swap uses)
     let result = transaction_utils::submit_transaction(
         tx,
@@ -5836,6 +5844,11 @@ pub async fn send_transactions_batch(
         if let Some(memo) = entry.memo {
             tx.memo = Some(memo);
             tx.id = transaction_utils::compute_transaction_id(&tx);
+        }
+
+        // 🛡 v10.11.0a: per-tx auth-trust marker (same fix as send_transaction_signed)
+        if let Some(mp) = state.production_mempool.as_ref() {
+            mp.mark_auth_trusted(tx.id, from_address);
         }
 
         let result = transaction_utils::submit_transaction(
