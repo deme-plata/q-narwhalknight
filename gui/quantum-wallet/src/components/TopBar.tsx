@@ -2816,9 +2816,22 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
       {/* Agent deep-dive modal — opens when user clicks an agent row in
           the Connected Agents panel. Shows trade diary with X-algo-style
-          scoring per entry + a strategic AskUserQuestion-style action card. */}
+          scoring per entry + a strategic AskUserQuestion-style action card.
+          Note the snake_case → camelCase remap for the API shape. */}
       <AgentDetailModal
-        agent={selectedAgent ? { ...selectedAgent, alias: selectedAgent.alias ?? 'Anonymous', diary: CLAUDE_OPUS_DIARY, bornAtBlock: 18113553 } : null}
+        agent={
+          selectedAgent
+            ? {
+                address: selectedAgent.address,
+                alias: selectedAgent.alias ?? 'Anonymous',
+                pvl: selectedAgent.pvl ?? 0,
+                txCount24h: selectedAgent.tx_count_24h ?? 0,
+                winRate: selectedAgent.win_rate,
+                bornAtBlock: 18113553,
+                diary: CLAUDE_OPUS_DIARY,
+              }
+            : null
+        }
         onClose={() => setSelectedAgent(null)}
       />
 
