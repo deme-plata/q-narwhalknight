@@ -25749,7 +25749,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/bridge/admin/safety-status", get(q_api_server::bridge_safety::admin_safety_status))
 
         // ── Integrity & Decentralization Diagnostics (v10.7.0) ──────────────
-        .route("/api/v1/integrity/balance-root",  get(q_api_server::integrity_api::get_balance_root))
+        // NOTE 2026-05-21: /balance-root removed from this block — main.rs:25572
+        // already registers it with the v10.11.0 handlers::balance_root_integrity
+        // (BalanceRootV2 visibility). Keeping both caused axum panic at startup
+        // ("Overlapping method route"). Caught by docker sync test v10.11.3-latest.
         .route("/api/v1/integrity/chain-tip",     get(q_api_server::integrity_api::get_chain_tip))
         .route("/api/v1/integrity/emission",      get(q_api_server::integrity_api::get_emission))
         .route("/api/v1/integrity/storage",       get(q_api_server::integrity_api::get_storage_health))
