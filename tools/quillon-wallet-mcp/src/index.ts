@@ -2877,6 +2877,270 @@ server.tool(
 );
 
 // ────────────────────────────────────────────────────────────────────
+// v2.6.0: deploy_smart_contract — multi-step wizard for the 27 contract
+// templates the server's parse_contract_type (contracts_api.rs:1775)
+// accepts. Designed to be driven by Claude Code's AskUserQuestion field
+// tool: each response declares what's still needed (`template`,
+// `parameters`, `confirm`) and supplies the option set as plain strings
+// so Claude can build a clean choice prompt without parsing free text.
+// ────────────────────────────────────────────────────────────────────
+//
+// Flow (Claude Code orchestrates the questions):
+//   1. claude → deploy_smart_contract()                                → needs: "template", templates: [...]
+//   2. claude → AskUserQuestion("which template?")                    → user picks "advanced_token"
+//   3. claude → deploy_smart_contract(template="advanced_token")       → needs: "parameters", required+features
+//   4. claude → AskUserQuestion("name? symbol? features?")             → user picks values
+//   5. claude → deploy_smart_contract(template, parameters)            → needs: "confirm", shows preview
+//   6. claude → AskUserQuestion("confirm?")                            → user picks yes
+//   7. claude → deploy_smart_contract(template, parameters, confirm)   → deploys + returns contract addr
+//
+// The legacy deploy_token tool stays as a one-shot quick-path for
+// commemoratives (it hardcodes secure_token internally now).
+
+interface ContractTemplate {
+  id: string;          // snake_case ID accepted by parse_contract_type
+  label: string;       // human-readable display name
+  category: "Token" | "DeFi" | "RWA" | "Derivative" | "Utility";
+  description: string; // one-line explainer for AskUserQuestion
+  features?: string[]; // boolean toggles this template supports
+  required?: string[]; // non-feature parameters (name, symbol, supply, etc.)
+}
+
+const CONTRACT_TEMPLATES: ContractTemplate[] = [
+  // Core Token Contracts — most users start here.
+  { id: "advanced_token",    label: "Advanced Token (PACI-style)",  category: "Token",      description: "Full-featured ERC20 with toggleable reflection + staking + mint + burn + airdrop. Recommended for new launches.",
+    features: ["mintable", "burnable", "reflection", "staking", "governance", "airdrops", "upgrades"],
+    required: ["name", "symbol", "decimals", "initial_supply"] },
+  { id: "secure_token",      label: "Secure Token (basic ERC20)",    category: "Token",      description: "Minimal ERC20 — name, symbol, supply. Cheapest deploy. Used for commemoratives + simple utility tokens.",
+    features: [],
+    required: ["name", "symbol", "decimals", "initial_supply"] },
+  { id: "rwa_token",         label: "Real-World-Asset Token",        category: "RWA",        description: "Tokenized real-world claim — backed by off-chain custody, with KYC/AML hooks.",
+    features: ["transferable", "kyc_required", "compliance_locked"],
+    required: ["name", "symbol", "underlying", "custody_proof_uri"] },
+  { id: "orbusd_stablecoin", label: "OrbUSD-style Stablecoin",       category: "Token",      description: "CDP-backed stablecoin with on-chain collateral vault.",
+    features: ["mintable", "burnable", "liquidatable"],
+    required: ["name", "symbol", "collateral_token", "min_collateral_ratio_bps"] },
+  // DeFi Infrastructure.
+  { id: "multisig_wallet",   label: "Multisig Wallet",               category: "DeFi",       description: "N-of-M owner signature scheme for shared treasuries.",
+    features: ["timelock", "spending_limit", "social_recovery"],
+    required: ["owners", "threshold"] },
+  { id: "governance",        label: "Governance / DAO",              category: "DeFi",       description: "Token-weighted voting + proposal execution.",
+    features: ["quadratic_voting", "delegation", "snapshot_voting"],
+    required: ["voting_token", "proposal_threshold", "voting_period_blocks"] },
+  { id: "private_dex",       label: "Private DEX",                   category: "DeFi",       description: "Constant-product AMM with optional privacy primitives.",
+    features: ["ring_signatures", "stealth_addresses", "zk_orders"],
+    required: ["fee_bps"] },
+  { id: "timelock_vault",    label: "Timelock Vault",                category: "DeFi",       description: "Funds released only after a delay — vesting + treasury cliffs.",
+    features: ["cancellable", "extendable"],
+    required: ["beneficiary", "unlock_unix"] },
+  { id: "oracle_feed",       label: "Oracle Price Feed",             category: "DeFi",       description: "Push-based price feed, multi-signer signed.",
+    features: ["circuit_breaker", "deviation_check"],
+    required: ["asset_id", "signers", "threshold"] },
+  // Advanced DeFi.
+  { id: "lending_pool",      label: "Lending Pool",                  category: "DeFi",       description: "Single-asset lending market with utilization-based interest.",
+    features: ["flash_loans", "isolated_mode"],
+    required: ["underlying_token", "max_utilization_bps"] },
+  { id: "liquidity_pool",    label: "Liquidity Pool",                category: "DeFi",       description: "Standalone constant-product pool — pair any two tokens.",
+    features: ["custom_fee_bps"],
+    required: ["token_a", "token_b", "fee_bps"] },
+  { id: "yield_farming",     label: "Yield Farming Vault",           category: "DeFi",       description: "Staked LP earns emissions over time.",
+    features: ["boost", "lock_periods"],
+    required: ["stake_token", "reward_token", "emission_per_block"] },
+  { id: "staking_contract",  label: "Staking Contract",              category: "DeFi",       description: "Stake any token to earn rewards. Linear or exponential schedules.",
+    features: ["compounding", "early_withdrawal_penalty"],
+    required: ["stake_token", "reward_token", "duration_blocks"] },
+  { id: "insurance_protocol",label: "Insurance Protocol",            category: "DeFi",       description: "On-chain mutual-insurance pool with payout-on-claim.",
+    features: ["dao_governed_claims", "premium_burning"],
+    required: ["underlying_token", "premium_bps"] },
+  // Real-world assets.
+  { id: "real_estate_token", label: "Real Estate Token",             category: "RWA",        description: "Tokenized property ownership, deed-backed.",          required: ["property_id", "appraised_value_qugusd"] },
+  { id: "commodity_token",   label: "Commodity Token",               category: "RWA",        description: "Tokenized gold/oil/wheat with vault attestation.",   required: ["commodity_code", "vault_id"] },
+  { id: "carbon_credit_token", label: "Carbon Credit Token",         category: "RWA",        description: "Verified emission offsets — burnable on retirement.", required: ["registry", "vintage_year", "tonnes_co2"] },
+  { id: "art_collectible_token", label: "Art / Collectible NFT",     category: "RWA",        description: "1-of-1 or limited-edition with provenance.",         required: ["artist", "title", "edition_size"] },
+  { id: "equity_token",      label: "Equity Token",                  category: "RWA",        description: "Cap-table share representation — KYC-gated transfers.", required: ["company_id", "shares_outstanding"] },
+  { id: "fixed_income_token",label: "Fixed Income Token",            category: "RWA",        description: "Coupon-bearing bond, scheduled payouts.",            required: ["issuer", "maturity_unix", "coupon_bps"] },
+  { id: "ip_revenue_token",  label: "IP Revenue Token",              category: "RWA",        description: "Royalty-stream share — receives a % of declared revenue.", required: ["ip_id", "royalty_bps"] },
+  { id: "physical_goods_token", label: "Physical Goods Token",       category: "RWA",        description: "Sealed-warehouse goods (luxury, wine, watches) with redemption.", required: ["item_id", "custody_url"] },
+  // Derivatives & Trading.
+  { id: "options_contract",  label: "Options Contract",              category: "Derivative", description: "European-style cash-settled options.",                required: ["underlying", "strike", "expiry_unix"] },
+  { id: "prediction_market", label: "Prediction Market",             category: "Derivative", description: "Yes/No outcome market with oracle resolution.",       required: ["question", "resolver", "close_unix"] },
+  { id: "derivatives_platform", label: "Derivatives Platform",       category: "Derivative", description: "Margin-trading venue, perp + futures.",               required: ["base_asset"] },
+  { id: "synthetic_assets",  label: "Synthetic Assets",              category: "Derivative", description: "Tracks an off-chain price (sBTC, sAPPL, etc.) via oracle.", required: ["tracked_asset", "oracle"] },
+  // Utility & Infrastructure.
+  { id: "nft_marketplace",   label: "NFT Marketplace",               category: "Utility",    description: "Listings + auctions, escrow + royalties.",            required: ["fee_bps"] },
+  { id: "identity_contract", label: "Identity Contract",             category: "Utility",    description: "On-chain ENS-style + verified-credentials.",          required: ["root_authority"] },
+  { id: "bridge_contract",   label: "Bridge Contract",               category: "Utility",    description: "Multi-sig escrow with relayer attestation for cross-chain.", required: ["foreign_chain_id", "validators"] },
+  { id: "proxy_contract",    label: "Proxy Contract",                category: "Utility",    description: "Upgradeable-impl proxy (transparent + UUPS).",        required: ["implementation_address"] },
+];
+
+server.tool(
+  "deploy_smart_contract",
+  "Multi-step deploy wizard. Call once with no args to get the template list (Claude Code surfaces it via AskUserQuestion). Call again with `template` to get required parameters + feature toggles. Call with `template` + `parameters` to see a deploy preview. Call with `confirm: true` to actually deploy. v2.6.0: replaces deploy_token's hardcoded contract_type — supports all 27 templates accepted by the server's parse_contract_type.",
+  {
+    template: z.string().optional().describe("snake_case template ID (e.g., 'advanced_token'). Omit to get the list."),
+    parameters: z.record(z.any()).optional().describe("Deployment parameters keyed by name. Omit to get the required-fields list for the chosen template."),
+    confirm: z.boolean().optional().describe("Set true to actually deploy. Without it, returns a preview."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+  },
+  async ({ template, parameters, confirm, seed }) => {
+    try {
+      // ── Step 1: template missing → return list grouped by category ────
+      if (!template) {
+        const byCategory: Record<string, ContractTemplate[]> = {};
+        for (const t of CONTRACT_TEMPLATES) {
+          (byCategory[t.category] ??= []).push(t);
+        }
+        const lines: string[] = [
+          `=== deploy_smart_contract (step 1/3) — pick a template ===`,
+          ``,
+          `Choose from ${CONTRACT_TEMPLATES.length} contract templates. Recommended starting points:`,
+          ``,
+          `  • advanced_token  — full-featured ERC20 (mint + burn + reflection + staking) — for new token launches`,
+          `  • secure_token    — minimal ERC20 — cheapest deploy, for commemoratives`,
+          `  • multisig_wallet — shared treasury`,
+          `  • timelock_vault  — vesting + cliffs`,
+          ``,
+          `JSON for Claude Code (use these IDs as options when asking the user):`,
+          JSON.stringify({
+            needs: "template",
+            templates: CONTRACT_TEMPLATES.map(t => ({ id: t.id, label: t.label, category: t.category, description: t.description })),
+          }, null, 2),
+        ];
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // Validate template ID.
+      const tpl = CONTRACT_TEMPLATES.find(t => t.id === template);
+      if (!tpl) {
+        return { content: [{ type: "text", text: `Unknown template '${template}'. Call deploy_smart_contract() with no args to see the list.` }] };
+      }
+
+      // ── Step 2: template chosen, parameters missing → return required + features ──
+      if (!parameters) {
+        const lines: string[] = [
+          `=== deploy_smart_contract (step 2/3) — template '${tpl.id}' (${tpl.label}) ===`,
+          ``,
+          `${tpl.description}`,
+          ``,
+          `Required parameters: ${(tpl.required ?? []).join(", ") || "(none)"}`,
+          `Optional feature toggles: ${(tpl.features ?? []).join(", ") || "(none)"}`,
+          ``,
+          `Pass {parameters: { <values> }} to see the deploy preview. Example for advanced_token:`,
+          `  { name: "Pacioli", symbol: "PACI", decimals: 24, initial_supply: "100000000000000000000000000000000",`,
+          `    mintable: true, burnable: true, reflection: true, staking: true,`,
+          `    reflection_fee_bps: 100, max_tx_bps: 10000, max_wallet_bps: 10000 }`,
+          ``,
+          `JSON for Claude Code (split each into its own AskUserQuestion):`,
+          JSON.stringify({
+            needs: "parameters",
+            template: tpl.id,
+            required: tpl.required ?? [],
+            features: (tpl.features ?? []).map(f => ({ id: f, label: f, default: false })),
+          }, null, 2),
+        ];
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      }
+
+      // Validate required parameters are present.
+      const missing = (tpl.required ?? []).filter(k => !(k in parameters));
+      if (missing.length > 0) {
+        return { content: [{ type: "text", text: `Missing required parameters for '${tpl.id}': ${missing.join(", ")}` }] };
+      }
+
+      // Derive signer.
+      let signerAddress: string;
+      try {
+        const { seed: rawSeed } = loadSeed({ seedArg: seed });
+        signerAddress = deriveKeys(rawSeed).address;
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `No wallet seed available: ${e.message}` }] };
+      }
+      const ownerHex = signerAddress.startsWith("qnk") ? signerAddress.slice(3) : signerAddress;
+
+      // ── Step 3: dry-run preview (no confirm) ─────────────────────────
+      if (!confirm) {
+        const previewLines: string[] = [
+          `⚠ DEPLOY DRY RUN — pass confirm=true to execute`,
+          ``,
+          `  Template:  ${tpl.id} (${tpl.label})`,
+          `  Deployer:  ${signerAddress}`,
+          ``,
+          `Parameters:`,
+        ];
+        for (const [k, v] of Object.entries(parameters)) {
+          previewLines.push(`  ${k.padEnd(24)} ${typeof v === "string" && v.length > 60 ? v.slice(0, 57) + "..." : JSON.stringify(v)}`);
+        }
+        previewLines.push(``, `Cost: 1 QUG (deployment fee) + variable gas. Confirm with deploy_smart_contract(...args, confirm: true).`);
+        return { content: [{ type: "text", text: previewLines.join("\n") }] };
+      }
+
+      // ── Step 4: actually deploy ──────────────────────────────────────
+      const res = await apiSigned("/contracts/deploy", "POST", {
+        contract_type: tpl.id,
+        owner: ownerHex,
+        parameters,
+      }, { seed }) as any;
+
+      if (res?.success === false) {
+        return { content: [{ type: "text", text: `Deploy failed: ${res.error ?? "unknown error"}` }] };
+      }
+      const data = res?.data ?? res;
+      const tx = data.deployment_tx ?? data.transaction_hash ?? data.tx_hash ?? "(none)";
+      const ca = data.contract_address ?? data.address ?? "(pending)";
+
+      // ASCII celebration art — deploy is a milestone event, so we render
+      // a rocket + sparkle banner sized to feel weighty (mirrors the
+      // txn-incoming celebration the wallet UI shows on send confirmations).
+      const params: any = parameters;
+      const tokenSymbol = typeof params?.symbol === "string" ? params.symbol : tpl.id.toUpperCase();
+      const tokenName   = typeof params?.name   === "string" ? params.name   : tpl.label;
+
+      const sparkLeft  = ["✦", "·", "✧", "✺", "✦"];
+      const sparkRight = ["✧", "✦", "·", "✦", "✧"];
+      const banner = [
+        `                              ✺`,
+        `                          ╱│╲`,
+        `                         ╱ │ ╲`,
+        `                        ╱  │  ╲     ${sparkLeft.join(" ")}`,
+        `                       │   │   │`,
+        `                       │  ╱│╲  │     L A U N C H`,
+        `                       │ ╱ │ ╲ │`,
+        `                       ╲╱  │  ╲╱     ${sparkRight.join(" ")}`,
+        `                        \\__│__/`,
+        `                          ▲▲▲`,
+        `                        ░▒▓██▓▒░`,
+        `                      ░▒▓██████▓▒░`,
+      ];
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            banner.join("\n"),
+            ``,
+            `                  ✦  ${tokenName.toUpperCase()} (${tokenSymbol}) IS LIVE  ✦`,
+            ``,
+            `  Template:   ${tpl.label}`,
+            `  Contract:   ${ca}`,
+            `  Deploy tx:  ${tx}`,
+            `  Deployer:   ${signerAddress.slice(0, 24)}…`,
+            ``,
+            `Next:  tx_status tx_hash=${tx}   (confirm it landed)`,
+            `       add_liquidity ${tokenSymbol}/QUGUSD (if tradeable)`,
+            ``,
+            `${tpl.id === "advanced_token" && (params as any)?.reflection === true
+              ? "Reflection enabled: every transfer redistributes a slice to holders, including yours."
+              : ""}`.trim(),
+          ].filter(Boolean).join("\n"),
+        }],
+      };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `deploy_smart_contract failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ────────────────────────────────────────────────────────────────────
 // v2.4.0: mining_calculator — earnings projection with honest caveats
 // ────────────────────────────────────────────────────────────────────
 // Adds what the MiningDashboard.tsx web calculator does, plus what it
