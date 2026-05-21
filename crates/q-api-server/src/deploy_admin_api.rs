@@ -1433,17 +1433,23 @@ pub async fn admin_dev_fee_status(
 }
 
 /// POST /api/v1/admin/dev-fee/config
-/// Update the dev fee percentage (master wallet only)
+/// Update the dev fee percentage. v10.10.12: gated by AEGIS-QL
+/// post-quantum founder-signature middleware applied at the router level
+/// in main.rs:25539. The handler itself no longer checks auth — by the time
+/// execution reaches here, `verify_founder_signature` has already verified
+/// the X-Wallet-Address matches the founder, the X-Timestamp is within the
+/// 5-minute replay window, and the X-AEGIS-Signature is valid over the
+/// (operation, timestamp) tuple against the founder's registered public
+/// key. Pre-v10.10.12 this used `is_master_wallet` which only string-matched
+/// the public founder address from X-Wallet-Auth — anyone who knew the
+/// address could spoof the request.
 pub async fn admin_dev_fee_config(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<DevFeeConfigRequest>,
 ) -> Result<Json<ApiResponse<DevFeeStatus>>, StatusCode> {
-    if !is_master_wallet(&headers, &state) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Validate: 0-1000 bps (0% to 10% max)
+    // Validate: 0-1000 bps (0% to 10% max).
+    // Even with the middleware gate, keep the ceiling as a typo-safety net.
     if req.fee_bps > 1000 {
         return Ok(Json(ApiResponse::error(
             "Dev fee must be 0-1000 basis points (0%-10%)".to_string(),
@@ -1451,10 +1457,23 @@ pub async fn admin_dev_fee_config(
     }
 
     let old_bps = state.dev_fee_bps.swap(req.fee_bps, std::sync::atomic::Ordering::SeqCst);
+
+    // Audit trail: structured target so journalctl can filter exactly these
+    // events. Includes the actor wallet from the middleware-verified
+    // X-Wallet-Address header so the trail names the founder of record.
+    let actor = headers
+        .get("X-Wallet-Address")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
     info!(
-        "💰 [ADMIN] Dev fee updated: {} bps ({:.2}%) → {} bps ({:.2}%)",
+        target: "audit.dev_fee",
+        actor = %actor,
+        old_bps = old_bps,
+        new_bps = req.fee_bps,
+        "🔐 [DEV-FEE-CHANGE] {} bps ({:.2}%) → {} bps ({:.2}%)",
         old_bps, old_bps as f64 / 100.0,
-        req.fee_bps, req.fee_bps as f64 / 100.0
+        req.fee_bps, req.fee_bps as f64 / 100.0,
     );
 
     // Return updated status

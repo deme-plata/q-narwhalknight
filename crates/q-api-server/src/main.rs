@@ -25536,8 +25536,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/admin/deploy/rollback", post(q_api_server::deploy_admin_api::deploy_rollback))
         .route("/api/v1/admin/deploy/convergence", get(q_api_server::deploy_admin_api::deploy_convergence))
         // v7.1.5: Dev Fee admin - verification, measurement, and config
+        // GET is open (read-only status); POST /config goes through AEGIS-QL
+        // post-quantum founder-signature middleware. v10.10.12: closes the
+        // spoofing hole where the old `is_master_wallet` check only did a
+        // string match on the public founder address from X-Wallet-Auth,
+        // so anyone could flip the fee. Now the request must carry a real
+        // AEGIS-QL signature over the (operation, timestamp) tuple, valid
+        // for 5 minutes, against the founder's registered public key.
         .route("/api/v1/admin/dev-fee", get(q_api_server::deploy_admin_api::admin_dev_fee_status))
-        .route("/api/v1/admin/dev-fee/config", post(q_api_server::deploy_admin_api::admin_dev_fee_config))
+        .nest(
+            "/api/v1/admin/dev-fee",
+            axum::Router::new()
+                .route("/config", post(q_api_server::deploy_admin_api::admin_dev_fee_config))
+                .layer(axum::middleware::from_fn_with_state(
+                    app_state.aegis_auth_state.clone(),
+                    aegis_auth_middleware::verify_founder_signature,
+                )),
+        )
         // 🔄 v8.5.0: Auto-update announcement + status + toggle + notifications
         .route("/api/v1/admin/update/announce", post(q_api_server::deploy_admin_api::admin_announce_update))
         .route("/api/v1/admin/update/status", get(q_api_server::deploy_admin_api::admin_update_status))

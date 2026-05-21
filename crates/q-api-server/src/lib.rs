@@ -2878,7 +2878,7 @@ impl AppState {
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
             sharkgod_block_wake: Some(Arc::new(tokio::sync::Notify::new())), // 🦈 SharkGod block producer wake
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(500)), // v10.10.12: 500 bps = 5.00% mainnet dev fee (was 190/1.9% in v8.8.1)
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
@@ -4272,7 +4272,7 @@ impl AppState {
             last_peer_height_update: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v5.2.0: Peer height staleness
             sync_trigger: Arc::new(tokio::sync::Notify::new()), // v5.2.0: Immediate sync wake-up
             sharkgod_block_wake: Some(Arc::new(tokio::sync::Notify::new())), // 🦈 SharkGod block producer wake
-            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(190)), // v8.8.1: 190 bps = 1.9% mainnet dev fee
+            dev_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(500)), // v10.10.12: 500 bps = 5.00% mainnet dev fee (was 190/1.9% in v8.8.1)
             node_operator_fee_promille: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v7.3.1: disabled by default
             dex_protocol_fee_bps: Arc::new(std::sync::atomic::AtomicU64::new(5)), // v7.3.1: 5 bps = 0.05% protocol fee from swaps
             operator_fees_earned_session: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v8.1.1
