@@ -189,7 +189,19 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
 
   const onSwitch = (addr: string) => {
     if (addr === activeAddress) return;
-    try { localStorage.setItem('walletAddress', addr); } catch {}
+    try {
+      localStorage.setItem('walletAddress', addr);
+      // CRITICAL: copy the per-wallet seed (quillon:seed:<addr>) to the
+      // canonical `walletSeed` key the single-wallet auth flow reads.
+      // Without this, X-Wallet-Auth signing silently uses the OLD seed
+      // after switching → all signed calls (send, dex_swap) hit the wrong
+      // wallet on the server. This was the original "+ Wallet just opens
+      // standard wallet" bug — switch happened but the seed didn't follow.
+      const newSeed = localStorage.getItem(`quillon:seed:${addr}`);
+      if (newSeed) {
+        localStorage.setItem('walletSeed', newSeed);
+      }
+    } catch {}
     // Hard reload so all components re-read the new wallet from localStorage.
     // Soft state-switch would require threading the address through dozens of
     // existing hooks; reload is honest about the scope of the change.
@@ -212,13 +224,27 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
         createdAt: new Date().toISOString(),
       };
       // Store the new wallet's seed under a per-address key so X-Wallet-Auth
-      // signing for THIS wallet works once it's selected. The existing single-
-      // wallet flows read `walletSeed` — we copy seed there if/when we switch.
+      // signing for THIS wallet works once it's selected.
       try { localStorage.setItem(`quillon:seed:${address}`, seedHex); } catch {}
       const next = [...wallets, entry];
       setWallets(next);
       saveWallets(next);
       setShowTemplates(false);
+
+      // FIX (2026-05-21): auto-switch to the newly created wallet. Without
+      // this, the user picked a template, saw no UI change, and reported
+      // "+ Wallet just opens the standard original wallet" — because the
+      // drawer created an entry but never made it active. Switching here
+      // also copies the seed to the canonical `walletSeed` key (see
+      // onSwitch) so signing works immediately.
+      try {
+        localStorage.setItem('walletAddress', address);
+        localStorage.setItem('walletSeed', seedHex);
+      } catch {}
+      // Hard reload — same model as onSwitch — so every hook re-reads the
+      // new wallet from localStorage. Without this, the surrounding TopBar
+      // still shows the old wallet's balance/avatar.
+      window.location.reload();
     } catch (e: any) {
       setCreateError(e?.message ?? 'Wallet generation failed.');
     } finally {

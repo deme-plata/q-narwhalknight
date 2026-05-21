@@ -16,6 +16,7 @@ import PapersLibraryModal from './PapersLibraryModal';
 import QFluxStatsPill from './QFluxStatsPill';
 import AgentDetailModal, { CLAUDE_OPUS_DIARY } from './AgentDetailModal';
 import MultiWalletDrawer from './MultiWalletDrawer';
+import BlockStreamBar from './BlockStreamBar';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
 
@@ -1631,11 +1632,14 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
               transition={{ duration: 2, repeat: Infinity }}
             />
 
-            {/* Block height — flashes amber on each new block */}
-            <div className="flex flex-col items-center px-3 py-1 rounded-xl border min-w-[72px] bg-amber-500/8 border-amber-500/20">
-              <span className="text-sm font-bold font-mono leading-tight text-amber-100">#{liveBlockHeight.toLocaleString()}</span>
-              <span className="text-amber-400/50 text-[9px] font-semibold uppercase tracking-wider">Block</span>
-            </div>
+            {/* Block height — replaced 2026-05-21 with BlockStreamBar:
+                deep-void background, constellation, drifting DAG threads,
+                cube-stream flowing right-to-left (newest pulses), glitch-
+                animated height readout, tempo sparkline. SVG-only, GPU-
+                friendly. liveBlockHeight state above still drives other
+                pieces (per-block flash effects); BlockStreamBar polls
+                /api/v1/status independently. */}
+            <BlockStreamBar compact />
 
             {/* q-flux edge analytics — public pill, hover for full breakdown */}
             <QFluxStatsPill />
