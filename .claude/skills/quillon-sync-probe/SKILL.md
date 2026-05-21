@@ -170,6 +170,122 @@ Concentrate findings into a 6-section report:
   ONE sentence: "Sync is broken because <root cause>." with cited evidence.
 ```
 
+## Sparse-chain expertise (mandatory mental model)
+
+**This skill is an expert on `docs/technical-review-sparse-chain-truth-v1.md`**
+— the 2026-05-18 read-only investigation that closed three previous wrong
+diagnoses. Internalize before probing:
+
+### The chain is sparse by BOTH design AND damage
+
+| Height range | % present | Cause |
+|---|---|---|
+| 0 – 7M | ~3% | Compaction loss (kill -9, Mar 2026) + v10.2.8 cleanup |
+| 7M – 14M | ~50% | v10.2.8 cleanup dominates |
+| 14M – 15M | 78% | Cleanup tail + protocol sparsity |
+| **15M – 18.1M (tip)** | **93-96%** | **Pure DAG-Knight design — no anchor every round** |
+
+Decisive fact: 15M-16M has 584,366 gaps but only 73,835 missing heights —
+**average gap is 0.13**. That is not damage; that is DAG-Knight legitimately
+not finalizing an anchor at every integer round number.
+
+### What this means for sync diagnosis
+
+1. **"Height N+1 missing after N" is NOT a bug** in the post-14M range.
+   It's protocol behavior. A sync layer that demands contiguous heights
+   stalls forever. The v10.9.55 fix shipped `synced_through` pointer +
+   `h_present` marker exactly to fix this.
+
+2. **Pre-7M historical loss is permanent and irrelevant.** Beta + Gamma
+   have the same loss. No peer has the data. Blocks are coinbase-only
+   and balances are intact via P2P state sync.
+
+3. **A node "stuck at 26K"** is almost always one of two causes:
+   - Pre-v10.9.55 binary missing the sparse-chain pointers
+   - v10.10.11/.12 dial regression preventing block-pack retrieval
+
+4. **`Q_KNOWN_PERMANENT_GAPS=25988:100440`** is the canonical first
+   gap-bypass for fresh nodes. v10.9.50 made it default-on; pre-v10.9.50
+   nodes need it explicitly.
+
+### Three previous wrong diagnoses to avoid repeating
+
+The TR documents three TRs that reached different wrong conclusions:
+
+| Date | TR | Wrong conclusion | Why it was wrong |
+|---|---|---|---|
+| 2026-04-16 | `epsilon-block-gap-forensics-v1.md` | "8.4M blocks gone, 1.6M-10M empty" | Used `ldb scan` with `prefix_iterator_cf` → bloom-filter false negatives on CF_BLOCKS overstated the gap |
+| 2026-04-17 | `http-block-endpoint-fix-v1.md` | "HTTP endpoint returns 404 — Axum interception bug" | Symptom real, cause inverted: the underlying `scan_prefix` hit the bloom-filter bug. Indirectly fixed by v10.3.7 `scan_prefix_seek` |
+| 2026-05-17 | "1M → 13M jump in fresh-node sync" | Needs permanent_gap framework | Half-right: the "jump" wasn't a jump — lex order on decimal heights is non-numeric |
+
+**The shared mistake**: treating missing-height-N as a bug when it's largely
+protocol behavior in the recent chain, plus localized historical damage
+in pre-14M.
+
+### Rules to never break (from §7 of the TR)
+
+1. **Never delete from CF_BLOCKS / CF_TRANSACTIONS / CF_QUANTUM_METADATA
+   in any hot read/sync path.** Deserialization failure → log + skip +
+   return None. The v10.2.8 cleanup destroyed ~5.8M blocks via this.
+
+2. **Never `kill -9` a running node.** Use SIGTERM with 60s timeout. The
+   Mar 2026 compaction loss came from `kill -9` interrupting in-flight
+   SST writes.
+
+3. **Never assume `ldb scan` finds all keys without verifying.** Use
+   `iterator_cf(IteratorMode::From)` or `scan_prefix_seek`. Bloom-filter
+   false negatives on CFs without prefix extractors will silently miss
+   keys.
+
+4. **Never sort decimal-string heights lexicographically.** "1000000" <
+   "10000031" but heights 1,000,001..9,999,999 sort between them. Always
+   parse to integer first.
+
+### Reproducible measurement command (read-only, no DB lock)
+
+If you need to verify the per-million-bucket coverage yourself:
+
+```bash
+DB=/home/orobit/data-mainnet-genesis/hot
+SEC=/home/orobit/tmp/ldb_sec_$$
+mkdir -p $SEC
+
+# Format 1: canonical chain pointer (qblock:height:N)
+ldb --db=$DB --column_family=blocks --try_load_options --secondary_path=$SEC \
+    scan --from='qblock:height:' --max_keys=20000000 2>/dev/null \
+  | awk -F':' '/^qblock:height:[0-9]+/ {gsub(/ ==>.*/, "", $0); print $3}' \
+  | sort -un > /home/orobit/tmp/heights_canonical.txt
+
+# Format 2: DAG layer (qblock:dag:N:proposer_hex)
+ldb --db=$DB --column_family=blocks --try_load_options --secondary_path=$SEC \
+    scan --from='qblock:dag:' --max_keys=20000000 2>/dev/null \
+  | awk -F':' '/^qblock:dag:[0-9]+:/ {print $3}' \
+  | sort -un > /home/orobit/tmp/heights_dag.txt
+
+# Per-million-bucket coverage
+sort -un /home/orobit/tmp/heights_*.txt | awk '
+  NR==1 { prev=$1; next }
+  $1 == prev + 1 { prev=$1; next }
+  $1 > prev + 1 {
+    bucket = int(prev / 1000000); g = $1 - prev - 1
+    missing[bucket] += g; gaps[bucket]++
+    prev=$1
+  }
+  END {
+    for (b=0; b<=18; b++) {
+      m = missing[b]+0; gc = gaps[b]+0
+      avg = (gc > 0) ? m/gc : 0
+      printf "%2dM-%dM: %8d missing %7d gaps avg_gap=%.2f\n", b, b+1, m, gc, avg
+    }
+  }'
+
+rm -rf $SEC
+```
+
+Expected output matches the §1 table of the TR. If pre-7M starts to fill
+in over time → evidence of P2P refill. If post-15M density drops → that's
+a regression to investigate.
+
 ## Hard-won lessons encoded in this skill
 
 - **tshark on `docker0` may show 0 frames when the container is on a
