@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen, Bot, Code2, Coins, GitBranch, Network, Layers, ShieldCheck, Workflow, ArrowRight, Atom, Repeat } from 'lucide-react';
+import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen, Bot, Code2, Coins, GitBranch, Network, Layers, ShieldCheck, Workflow, ArrowRight, Atom, Repeat, Eye } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
 // 2026-05-17: BIP39 validation imports for brainwallet hotfix (see validateSeedPhrase).
@@ -1797,7 +1797,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   transition={{ duration: 2.5, repeat: Infinity }}
                   style={{ boxShadow: '0 0 20px rgba(217, 70, 239, 0.6)' }}
                 >
-                  v2.2.0 — 44 tools
+                  v2.5.0 — 50+ tools
                 </motion.div>
               </motion.div>
 
@@ -1856,6 +1856,30 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                       title: 'Agentic loops',
                       desc: 'Closed-loop derive → mine → swap → confirm. AI scores its own tx via score_tx_dry.',
                       color: 'pink',
+                    },
+                    {
+                      icon: Zap,
+                      title: 'Batch transfers (v10.11.0)',
+                      desc: 'send_batch: up to 100K transfers per HTTPS POST. O(1) auth/balance/nonce per N txs. Astronomical u128 amounts.',
+                      color: 'amber',
+                    },
+                    {
+                      icon: ShieldCheck,
+                      title: 'PQ-hybrid VPN (Rosenpass)',
+                      desc: 'q-wg-hybrid: Kyber-1024 rotates WireGuard PSK every epoch. Wire bytes look vanilla; session needs BOTH Curve25519 AND Kyber broken.',
+                      color: 'lime',
+                    },
+                    {
+                      icon: Eye,
+                      title: 'Pre-Tor egress audit',
+                      desc: 'q-egress-audit: regex-redacts IPv4/IPv6/onion/peer_id from every outbound surface. Strict mode under Q_TOR_REQUIRE_WIREGUARD.',
+                      color: 'rose',
+                    },
+                    {
+                      icon: BookOpen,
+                      title: 'Skills + 4 papers',
+                      desc: 'quillon-docker-test skill (compile + deploy automation). Skin in the Cathedral, Entangled DAG, Mirror Five, Forest-Leaf-Maintainer.',
+                      color: 'teal',
                     },
                   ].map((cap, i) => (
                     <motion.div
