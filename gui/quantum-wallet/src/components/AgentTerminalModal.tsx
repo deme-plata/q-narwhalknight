@@ -3,8 +3,9 @@
 // Full impl tracked in feature backlog (Niveau 1: ~4-6 weeks per spec).
 
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Code, Terminal, Sparkles } from 'lucide-react';
+import { X, Code, Terminal, Sparkles, Crown } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import CrownAshPanel from './CrownAshPanel';
 
 interface AgentTerminalModalProps {
   isOpen: boolean;
@@ -25,8 +26,11 @@ const DEMO_LINES = [
   { type: 'output', text: '📊 NAV: 1.0234 QUG · Market: 1.487 QUG · ratio: 1.452 (below mint threshold)' },
 ];
 
+type AgentTab = 'terminal' | 'crown-ash';
+
 export default function AgentTerminalModal({ isOpen, onClose, walletAddress }: AgentTerminalModalProps) {
   const [visibleLines, setVisibleLines] = useState(0);
+  const [activeTab, setActiveTab] = useState<AgentTab>('terminal');
 
   useEffect(() => {
     if (!isOpen) {
@@ -59,15 +63,43 @@ export default function AgentTerminalModal({ isOpen, onClose, walletAddress }: A
             <div className="flex items-center justify-between p-4 border-b border-cyan-500/20 bg-cyan-500/5">
               <div className="flex items-center gap-2">
                 <Terminal className="w-5 h-5 text-cyan-400" />
-                <h2 className="text-lg font-bold text-cyan-200">Agent Terminal</h2>
-                <span className="text-xs px-2 py-0.5 bg-amber-500/20 text-amber-300 rounded">Coming Soon</span>
+                <h2 className="text-lg font-bold text-cyan-200">Agent Detail</h2>
               </div>
               <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            {/* Tab strip */}
+            <div className="flex gap-2 px-4 pt-3 border-b border-cyan-500/10 bg-slate-900/40">
+              <button
+                onClick={() => setActiveTab('terminal')}
+                className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-all ${
+                  activeTab === 'terminal'
+                    ? 'bg-cyan-500/20 text-cyan-100 border border-cyan-500/40 border-b-transparent'
+                    : 'text-cyan-300/60 hover:text-cyan-300 hover:bg-cyan-500/10'
+                }`}
+              >
+                <Terminal className="w-3.5 h-3.5 inline mr-1.5" />
+                Terminal <span className="text-[10px] opacity-60 ml-1">preview</span>
+              </button>
+              <button
+                onClick={() => setActiveTab('crown-ash')}
+                className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-all ${
+                  activeTab === 'crown-ash'
+                    ? 'bg-amber-500/20 text-amber-100 border border-amber-500/40 border-b-transparent'
+                    : 'text-amber-300/60 hover:text-amber-300 hover:bg-amber-500/10'
+                }`}
+              >
+                <Crown className="w-3.5 h-3.5 inline mr-1.5" />
+                Crown &amp; Ash
+              </button>
+            </div>
+
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {activeTab === 'crown-ash' && <CrownAshPanel walletAddress={walletAddress} />}
+              {activeTab === 'terminal' && (
+              <>
               <div className="flex items-start gap-3 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
                 <Sparkles className="w-5 h-5 text-cyan-400 flex-shrink-0 mt-0.5" />
                 <div>
@@ -128,6 +160,8 @@ export default function AgentTerminalModal({ isOpen, onClose, walletAddress }: A
                 <Code className="w-4 h-4" />
                 Launch Terminal (coming soon)
               </button>
+              </>
+              )}
             </div>
           </motion.div>
         </motion.div>

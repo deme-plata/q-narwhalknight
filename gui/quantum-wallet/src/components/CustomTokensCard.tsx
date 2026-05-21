@@ -1003,7 +1003,12 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                 // Token category drives the left-stripe color (Core / Stable / Wrapped / RWA / Yield / Meme).
                 // Address becomes click-to-copy chip — no longer a full row.
                 <div className="space-y-2">
-                  <AnimatePresence mode="popLayout" initial={false}>
+                  {/* No mode="popLayout" — that aggressively re-runs layout
+                      springs every render, including data-identical refreshes,
+                      which felt like the list was twitching. Plain
+                      AnimatePresence with stable contractAddress keys means
+                      enter/exit animate only on REAL list changes. */}
+                  <AnimatePresence initial={false}>
                   {tokensWithBalance.map((token) => {
                     const sym = (token.symbol ?? '').toUpperCase();
                     // Category → visual identity
@@ -1033,14 +1038,20 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                     const addrShort = `${token.contractAddress.substring(0, 8)}…${token.contractAddress.substring(token.contractAddress.length - 6)}`;
 
                     return (
+                      {/* No `layout` prop — that triggered a spring on EVERY
+                          re-render (poll-refresh causes new array references
+                          even when contents are identical, and the spring fired
+                          each time, causing the "nervewrecking" motion).
+                          initial/animate/exit still fire when a row is genuinely
+                          added or removed because AnimatePresence + stable
+                          contractAddress keys detect that. Hover stays. */}
                       <motion.div
                         key={token.contractAddress}
-                        layout
                         initial={{ opacity: 0, x: -10 }}
                         animate={{ opacity: 1, x: 0 }}
                         exit={{ opacity: 0, scale: 0.95 }}
                         whileHover={{ y: -1 }}
-                        transition={{ duration: 0.2, layout: { duration: 0.3, type: 'spring', stiffness: 300, damping: 30 } }}
+                        transition={{ duration: 0.2 }}
                         className={`relative overflow-hidden rounded-xl border ${(isVault || isForge) ? 'cursor-pointer' : ''}`}
                         style={{ background: accent.bg, borderColor: accent.ring }}
                         onClick={() => {

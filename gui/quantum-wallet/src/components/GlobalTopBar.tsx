@@ -4,6 +4,7 @@ import { Search, Loader, Zap, Gift, Hash, Blocks, User, X, Copy, Check, CheckCir
 import { qnkAPI, type MiningRewardEvent } from '../services/api';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import NetworkSelector from './NetworkSelector';
+import BlockStreamBar from './BlockStreamBar';
 
 interface GlobalTopBarProps {
   authenticated?: boolean;
@@ -357,6 +358,8 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
 
             {/* Mining Hash Rate Indicator & Status */}
             <div className="flex items-center gap-4">
+              {/* v10.11.0: wicked-cool live block-counter stream */}
+              <BlockStreamBar compact />
               <NetworkSelector />
 
               <motion.button

@@ -3213,6 +3213,273 @@ server.tool(
 );
 
 // ============================================================
+// CROWN & ASH — medieval grand strategy game on Quillon
+// ============================================================
+//
+// Server endpoints: GET /api/v1/crown-ash/{world,realm/:wallet,faction/:id,
+//                       province/:id,turn/:n,history/:province}
+//                   POST /api/v1/crown-ash/{action,join}
+//
+// Action types (from crown-ash-types/src/action.rs):
+//   RaiseArmy, MoveArmy, MoveArmyPath, DisbandArmy,
+//   DeclareWar, ProposeTreaty, AcceptTreaty,
+//   BuildImprovement, SetTaxRate, AssignCouncilor, DesignateHeir,
+//   ArrangeMarriage, ConvertProvince, LaunchPlot, BackPlot,
+//   InvestigatePlot, EstablishTradeRoute, DisruptTradeRoute
+//
+// Treaty types: NonAggression, DefensiveAlliance, TradeAgreement,
+//               Marriage, Vassalization, WhitePeace, Surrender
+//
+// Casus belli: Conquest, HolyWar, Reconquest, Rebellion, Succession, Insult
+
+const CROWN_ASH_PATH = "/crown-ash"; // appended to API_BASE (already includes /api/v1)
+
+function gameAddress(seedArg?: string): string {
+  const { seed } = loadSeed({ seedArg });
+  return deriveKeys(seed).address;
+}
+
+server.tool(
+  "crown_ash_world",
+  "Crown & Ash — read the full game world snapshot (provinces, factions, turn, characters, armies, treaties). No auth required.",
+  {},
+  async () => {
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/world`) as any;
+      const w = res.data ?? res;
+      const meta = w?.meta ?? {};
+      const factionLines: string[] = (w?.factions ?? []).slice(0, 16).map((f: any) => {
+        const player = f.player_wallet ? `🧙 ${f.player_wallet.slice(0, 12)}…` : "  (unclaimed)";
+        return `  faction ${String(f.id).padStart(2)} · ${(f.name ?? "?").padEnd(20)} · religion ${f.religion ?? "?"} · ${player}`;
+      });
+      const treaties = (w?.treaties ?? []).slice(0, 12).map((t: any) =>
+        `  ${t.faction_a}↔${t.faction_b}  ${t.treaty_type}  (turn ${t.signed_turn})`
+      );
+      const lines = [
+        `=== Crown & Ash — World Snapshot ===`,
+        ``,
+        `  turn: ${meta.turn ?? "?"}    genesis_block: ${meta.genesis_block ?? "?"}    sim: ${meta.sim_version ?? "?"}`,
+        `  players: ${meta.player_count ?? 0}    initialized: ${meta.initialized ?? false}`,
+        `  provinces: ${(w?.provinces ?? []).length}    factions: ${(w?.factions ?? []).length}    armies: ${(w?.armies ?? []).length}`,
+        `  treaties active: ${(w?.treaties ?? []).length}    wars: ${(w?.wars ?? []).length}`,
+        ``,
+        `--- Factions ---`,
+        ...(factionLines.length > 0 ? factionLines : ["  (none)"]),
+      ];
+      if (treaties.length > 0) {
+        lines.push("", "--- Treaties (most recent) ---", ...treaties);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Failed to fetch world: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "crown_ash_realm",
+  "Crown & Ash — read my realm (faction + provinces + treasury + diplomacy) by wallet. Uses the configured seed unless wallet is provided.",
+  {
+    wallet: z.string().optional().describe("Wallet address (qnk...). Defaults to the configured seed's address."),
+  },
+  async ({ wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/realm/${addr}`) as any;
+      if (res.success === false || res.ok === false) {
+        return { content: [{ type: "text", text: `No realm for ${addr.slice(0, 16)}… — call crown_ash_join first.` }] };
+      }
+      const r = res.data ?? res;
+      const lines = [
+        `=== Crown & Ash — My Realm ===`,
+        ``,
+        `  wallet:   ${addr}`,
+        `  faction:  ${r.faction ?? r.faction_id ?? "?"} (${r.faction_name ?? "?"})`,
+        `  treasury: ${r.treasury ?? "?"}    prestige: ${r.prestige ?? "?"}`,
+        `  provinces controlled: ${(r.provinces ?? []).length}`,
+        `  armies:   ${(r.armies ?? []).length}`,
+        `  treaties: ${(r.treaties ?? []).length}    wars: ${(r.wars ?? []).length}`,
+      ];
+      if (r.provinces && r.provinces.length > 0) {
+        lines.push("", "--- Provinces ---");
+        for (const p of r.provinces.slice(0, 20)) {
+          lines.push(`  #${p.id ?? "?"} ${(p.name ?? "?").padEnd(18)} pop=${p.population ?? "?"}  tax=${p.tax_rate ?? "?"}`);
+        }
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Failed to fetch realm: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "crown_ash_join",
+  "Crown & Ash — claim an unoccupied faction. faction must be 0-6. Pass confirm=true to commit.",
+  {
+    faction: z.number().int().min(0).max(6).describe("Faction ID 0-6"),
+    confirm: z.boolean().optional().describe("Set true to execute; without it, returns a preview"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+  },
+  async ({ faction, confirm, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    if (!confirm) {
+      // Preview: show faction info
+      try {
+        const wr = await api(`${CROWN_ASH_PATH}/faction/${faction}`) as any;
+        const f = wr.data ?? wr;
+        return { content: [{ type: "text", text:
+          `Preview: join faction ${faction}\n` +
+          `  name: ${f?.name ?? "?"}    religion: ${f?.religion ?? "?"}\n` +
+          `  status: ${f?.player_wallet ? `ALREADY CLAIMED by ${f.player_wallet.slice(0,12)}…` : "available"}\n\n` +
+          `Run again with confirm=true to claim as ${addr.slice(0,16)}…`
+        }] };
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `Could not fetch faction info: ${e.message}` }] };
+      }
+    }
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/join`, "POST", { wallet: addr, faction }) as any;
+      if (res.success === false || res.ok === false) {
+        return { content: [{ type: "text", text: `Join failed: ${res.error ?? "unknown"}` }] };
+      }
+      return { content: [{ type: "text", text:
+        `✅ Joined Crown & Ash as faction ${faction}\n` +
+        `   wallet: ${addr}\n` +
+        `   Now: crown_ash_realm to see your starting position.`
+      }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Join failed: ${e.message}` }] };
+    }
+  }
+);
+
+const TREATY_TYPES = ["NonAggression", "DefensiveAlliance", "TradeAgreement", "Marriage", "Vassalization", "WhitePeace", "Surrender"] as const;
+
+server.tool(
+  "crown_ash_propose_alliance",
+  "Crown & Ash — propose a treaty to another faction. Default treaty type is DefensiveAlliance. Other options: NonAggression, TradeAgreement, Marriage, Vassalization, WhitePeace, Surrender.",
+  {
+    target_faction: z.number().int().min(0).max(6).describe("Target faction ID 0-6"),
+    treaty: z.enum(TREATY_TYPES).optional().describe("Treaty type (default: DefensiveAlliance)"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+  },
+  async ({ target_faction, treaty, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    const treatyType = treaty ?? "DefensiveAlliance";
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/action`, "POST", {
+        wallet: addr,
+        action: { ProposeTreaty: { target: target_faction, treaty: treatyType } },
+      }) as any;
+      if (res.success === false || res.ok === false) {
+        return { content: [{ type: "text", text: `Treaty proposal failed: ${res.error ?? "unknown"}` }] };
+      }
+      const d = res.data ?? res;
+      return { content: [{ type: "text", text:
+        `📜 ${treatyType} proposed to faction ${target_faction}\n` +
+        `   from: ${addr}\n` +
+        `   queue position: ${d.queue_position ?? "?"}\n` +
+        `   submitted at turn: ${d.turn ?? "?"}\n` +
+        `   Resolves on next sim tick. Watch crown_ash_world for outcome.`
+      }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Treaty proposal failed: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "crown_ash_accept_treaty",
+  "Crown & Ash — accept an incoming treaty proposal from another faction.",
+  {
+    from_faction: z.number().int().min(0).max(6).describe("Proposing faction ID 0-6"),
+    treaty: z.enum(TREATY_TYPES).describe("Treaty type (must match the incoming proposal)"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+  },
+  async ({ from_faction, treaty, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/action`, "POST", {
+        wallet: addr,
+        action: { AcceptTreaty: { from: from_faction, treaty } },
+      }) as any;
+      if (res.success === false || res.ok === false) {
+        return { content: [{ type: "text", text: `Accept failed: ${res.error ?? "unknown"}` }] };
+      }
+      return { content: [{ type: "text", text:
+        `🤝 ${treaty} accepted from faction ${from_faction}\n   Queue: ${(res.data ?? res).queue_position ?? "?"}.`
+      }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Accept failed: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "crown_ash_action",
+  "Crown & Ash — submit ANY GameAction (escape hatch). Pass the action variant as a JSON object: e.g. {\"RaiseArmy\": {\"province\": 12}} or {\"DeclareWar\": {\"target\": 3, \"casus_belli\": \"Conquest\"}}. See crates/crown-ash-types/src/action.rs for full schema.",
+  {
+    action: z.record(z.any()).describe("GameAction enum variant (single-key object, e.g. {RaiseArmy: {province: 12}})"),
+    wallet: z.string().optional().describe("Override wallet (else: configured seed)"),
+  },
+  async ({ action, wallet }) => {
+    const addr = wallet ?? gameAddress();
+    try {
+      const res = await api(`${CROWN_ASH_PATH}/action`, "POST", { wallet: addr, action }) as any;
+      if (res.success === false || res.ok === false) {
+        return { content: [{ type: "text", text: `Action rejected: ${res.error ?? "unknown"}` }] };
+      }
+      const d = res.data ?? res;
+      const actionName = Object.keys(action)[0] ?? "?";
+      return { content: [{ type: "text", text:
+        `⚔️  ${actionName} queued\n` +
+        `   wallet: ${addr}\n` +
+        `   queue position: ${d.queue_position ?? "?"}\n` +
+        `   turn: ${d.turn ?? "?"}`
+      }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Action failed: ${e.message}` }] };
+    }
+  }
+);
+
+server.tool(
+  "crown_ash_turn",
+  "Crown & Ash — turn summary for a specific turn (or latest if omitted). Shows battles, treaties signed, dynasty events.",
+  {
+    turn: z.number().int().nonnegative().optional().describe("Turn number; omit for latest"),
+  },
+  async ({ turn }) => {
+    try {
+      let t = turn;
+      if (t === undefined) {
+        const w = await api(`${CROWN_ASH_PATH}/world`) as any;
+        t = (w.data ?? w)?.meta?.turn ?? 0;
+      }
+      const res = await api(`${CROWN_ASH_PATH}/turn/${t}`) as any;
+      const s = res.data ?? res;
+      const lines = [
+        `=== Crown & Ash — Turn ${t} ===`,
+        ``,
+        `  ended at block: ${s.block_height ?? "?"}`,
+        `  battles: ${(s.battles ?? []).length}   treaties signed: ${(s.treaties_signed ?? []).length}   wars declared: ${(s.wars_declared ?? []).length}`,
+        `  characters born: ${(s.character_events ?? []).filter((e: any) => e?.kind === "Born").length}   died: ${(s.character_events ?? []).filter((e: any) => e?.kind === "Died").length}`,
+      ];
+      if ((s.battles ?? []).length > 0) {
+        lines.push("", "--- Battles ---");
+        for (const b of s.battles.slice(0, 6)) {
+          lines.push(`  ${b.attacker_faction}→${b.defender_faction} @ province ${b.province}  winner=${b.winner_faction}  losses A/D ${b.attacker_losses}/${b.defender_losses}`);
+        }
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `Failed to fetch turn: ${e.message}` }] };
+    }
+  }
+);
+
+// ============================================================
 // START SERVER
 // ============================================================
 
