@@ -4409,11 +4409,26 @@ pub async fn get_transaction(
                 }
             }
 
-            let confirmations = if let Some(block_height) = found_block_height {
-                (current_height - block_height + 1) as u32
+            // v10.11.3 FIX: do NOT lie about confirmation status.
+            //
+            // Pre-v10.11.3 bug: when `found_block_height` was None (tx loaded
+            // from storage but the block-scan loop failed to locate the tx in
+            // any block within the search_depth window), the handler returned
+            // `confirmations = current_height as u32` — literally the entire
+            // chain tip — and `status = "confirmed"` with `block_height = None`.
+            // That made every never-settled tx render as
+            //   "confirmed (18,177,340 confirmations)" with amount=null
+            // in the wallet UI, which is what made today's send_signed +
+            // dex_swap appear successful while doing nothing on-chain.
+            //
+            // Honest semantics: storage-only with no block reference = the tx
+            // is in the mempool (or was, and was never finalised). Report
+            // `in_mempool` with zero confirmations. The wallet UI then
+            // correctly shows "pending" instead of fake-confirmed.
+            let (status_str, confirmations) = if let Some(block_height) = found_block_height {
+                ("confirmed".to_string(), (current_height - block_height + 1) as u32)
             } else {
-                // Transaction confirmed but block not found - use high confirmation count
-                current_height as u32
+                ("in_mempool".to_string(), 0)
             };
 
             // ZK-STARK Privacy: Check if user can see full details
@@ -4421,7 +4436,7 @@ pub async fn get_transaction(
                 debug!("🔓 User authorized to see full transaction details");
                 let details = TransactionDetails {
                     hash: tx_hash_str.clone(),
-                    status: "confirmed".to_string(),
+                    status: status_str,
                     block_height: found_block_height,
                     confirmations: Some(confirmations),
                     timestamp: Some(tx.timestamp.timestamp() as u64),
@@ -4436,7 +4451,7 @@ pub async fn get_transaction(
                 debug!("🔒 ZK-STARK Privacy: Transaction details encrypted");
                 return Ok(Json(ApiResponse::success(build_privacy_response(
                     tx_hash_str.clone(),
-                    "confirmed".to_string(),
+                    status_str,
                     found_block_height,
                     confirmations,
                     Some(tx.timestamp.timestamp() as u64),
