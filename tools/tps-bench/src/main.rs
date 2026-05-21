@@ -98,7 +98,7 @@ struct Args {
     verbose: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 struct SendSignedBody {
     from: String,
     to: String,
