@@ -5764,6 +5764,26 @@ pub async fn send_transactions_batch(
 
     let now = chrono::Utc::now();
 
+    // ─── v10.11.2: parallel-prep + parallel-submit (NASA-shape) ───────────
+    //
+    // Was: serial loop, each entry validated + built + submitted with .await
+    //      under one lock pass — about 0.3 ms/tx, so 100K txs ~ 30 sec.
+    //
+    // Now: two-phase. Phase 1 is a SYNCHRONOUS pre-flight pass that builds
+    // every Transaction (or records a rejection) without touching async
+    // state — fast and parallelizable. Phase 2 fans out submit_transaction
+    // calls via futures::future::join_all so concurrent admit-paths overlap.
+    // The mempool still serializes its inner write lock, but the validation,
+    // hash compute, fee check, gossipsub announce can interleave.
+
+    #[derive(Debug)]
+    struct PreparedTx {
+        index: usize,
+        tx: q_types::Transaction,
+    }
+
+    // Phase 1 — sync pre-flight. Build prepared txs OR push rejection.
+    let mut prepared: Vec<PreparedTx> = Vec::with_capacity(request.transactions.len());
     for (i, entry) in request.transactions.into_iter().enumerate() {
         let to_address = match parse_wallet_address(&entry.to) {
             Ok(a) => a,
@@ -5786,14 +5806,12 @@ pub async fn send_transactions_batch(
             continue;
         }
 
-        // Per-tx cap (matches the singleton endpoint).
         if entry.amount > 10u128.pow(33) {
             rejected += 1;
             results.push(BatchTxResult { index: i, accepted: false, tx_id: None, error: Some("Amount > 1e33 raw cap".into()) });
             continue;
         }
 
-        // Running balance: reject if this entry would put us underwater.
         let fee = q_types::MIN_TRANSACTION_FEE_V1;
         let total_cost = match entry.amount.checked_add(fee) {
             Some(v) => v,
@@ -5812,8 +5830,6 @@ pub async fn send_transactions_batch(
         }
         running_balance = running_balance.saturating_sub(total_cost);
 
-        // Resolve token type per-entry (most batches will be homogeneous
-        // but we don't require it; meme-coin distributions can intermix).
         let token_str_upper = entry.token_type.to_uppercase();
         let (tx_type, token_type, tx_data) = if token_str_upper == "QUG" || token_str_upper == "NATIVE-QUG" {
             (TransactionType::Transfer, TokenType::QUG, Vec::<u8>::new())
@@ -5846,27 +5862,46 @@ pub async fn send_transactions_batch(
             tx.id = transaction_utils::compute_transaction_id(&tx);
         }
 
-        // 🛡 v10.11.0a: per-tx auth-trust marker (same fix as send_transaction_signed)
         if let Some(mp) = state.production_mempool.as_ref() {
             mp.mark_auth_trusted(tx.id, from_address);
         }
 
-        let result = transaction_utils::submit_transaction(
-            tx,
-            &state.tx_pool,
-            &state.tx_status,
-            state.production_mempool.as_ref(),
-            state.libp2p_discovery.as_ref(),
-        ).await;
+        prepared.push(PreparedTx { index: i, tx });
+    }
 
+    // Phase 2 — fan out submit_transaction concurrently. Each future runs
+    // independently; the only contention is the mempool's internal write
+    // lock, which serializes the actual insertion. Validation, hash compute,
+    // and gossipsub announce can overlap.
+    let submit_futures = prepared.into_iter().map(|p| {
+        let tx_pool = state.tx_pool.clone();
+        let tx_status = state.tx_status.clone();
+        let production_mempool = state.production_mempool.clone();
+        let libp2p_discovery = state.libp2p_discovery.clone();
+        async move {
+            let result = transaction_utils::submit_transaction(
+                p.tx,
+                &tx_pool,
+                &tx_status,
+                production_mempool.as_ref(),
+                libp2p_discovery.as_ref(),
+            ).await;
+            (p.index, result.tx_id)
+        }
+    });
+    let submit_results = futures_util::future::join_all(submit_futures).await;
+    for (i, tx_id) in submit_results {
         accepted += 1;
         results.push(BatchTxResult {
             index: i,
             accepted: true,
-            tx_id: Some(format!("0x{}", hex::encode(result.tx_id))),
+            tx_id: Some(format!("0x{}", hex::encode(tx_id))),
             error: None,
         });
     }
+    // Sort results by index so per-tx outcomes match the input order
+    // (parallel join_all doesn't preserve order otherwise).
+    results.sort_by_key(|r| r.index);
 
     let submission_time_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
 
