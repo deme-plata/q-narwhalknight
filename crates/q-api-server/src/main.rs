@@ -6528,6 +6528,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // v7.4.0: Clone OAuth2 storage for consent transaction processing during sync
         let oauth2_storage_sync = state.oauth2_storage.clone();
 
+        // v10.11.5: Clone the SwapIndexer Arc so the three save_qblock paths
+        // inside this spawn (fallback @ 6745, batch-sync @ 6927, fallback @ 7020)
+        // can call index_block after committing. Without this every block path
+        // OTHER than gossipsub-direct (already wired at 12752) silently skipped
+        // swap indexing, so a wallet that synced via this path had a tx history
+        // that excluded its own swaps.
+        let swap_indexer_sync = state.swap_indexer.clone();
+
         tokio::spawn(async move {
             info!("🔄 Starting block sync receiver task...");
             while let Some(blocks) = block_sync_rx.recv().await {
@@ -6756,6 +6764,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             if let Some(rocks_db) = storage_clone.get_rocks_db_handle() {
                                                 q_storage::replay_block_state_changes(&rocks_db, &block);
                                             }
+                                            // v10.11.5: index swaps after fast-sync fallback commit
+                                            let bh = block.calculate_hash();
+                                            let bt = block.header.timestamp as i64;
+                                            if let Err(e) = swap_indexer_sync
+                                                .index_block(block.header.height, bh, bt, &block.transactions)
+                                                .await
+                                            {
+                                                warn!("⚠️  [SWAP INDEXER] fast-sync-fallback index_block({}) failed: {}", block.header.height, e);
+                                            }
                                         }
                                         Err(e) => {
                                             error!(
@@ -6944,6 +6961,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
                             }
 
+                            // v10.11.5: index swaps for each batch-synced block so a fresh
+                            // node's wallet tx history catches up via this path too.
+                            for block in batch_chunk {
+                                let bh = block.calculate_hash();
+                                let bt = block.header.timestamp as i64;
+                                if let Err(e) = swap_indexer_sync
+                                    .index_block(block.header.height, bh, bt, &block.transactions)
+                                    .await
+                                {
+                                    warn!("⚠️  [SWAP INDEXER] batch-sync index_block({}) failed: {}", block.header.height, e);
+                                }
+                            }
+
                             balance_updates_total += batch_balance_updates;
                             blocks_committed += batch_blocks_saved;
                             blocks_already_processed += batch_already_processed;
@@ -7022,6 +7052,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             // v8.7.3: State replay for fallback path
                                             if let Some(rocks_db) = storage_clone.get_rocks_db_handle() {
                                                 q_storage::replay_block_state_changes(&rocks_db, block);
+                                            }
+                                            // v10.11.5: index swaps for per-block fallback path
+                                            let bh = block.calculate_hash();
+                                            let bt = block.header.timestamp as i64;
+                                            if let Err(e) = swap_indexer_sync
+                                                .index_block(block.header.height, bh, bt, &block.transactions)
+                                                .await
+                                            {
+                                                warn!("⚠️  [SWAP INDEXER] per-block-fallback index_block({}) failed: {}", block.header.height, e);
                                             }
                                             blocks_committed += 1;
                                             blocks_failed -= 1;
@@ -11678,6 +11717,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // Step 7: Commit transaction atomically
                         tx.commit().await?;
 
+                        // v10.11.5: index swaps in the new block after a reorg so wallet
+                        // tx history reflects the canonical chain. See main.rs:12752 for
+                        // the gossipsub-path equivalent.
+                        {
+                            let bh = new_block.calculate_hash();
+                            let bt = new_block.header.timestamp as i64;
+                            if let Err(e) = app_state_gossip.swap_indexer
+                                .index_block(new_block.header.height, bh, bt, &new_block.transactions)
+                                .await
+                            {
+                                warn!("⚠️  [SWAP INDEXER] reorg index_block({}) failed: {}", new_block.header.height, e);
+                            }
+                        }
+
                         debug!("✅ [BALANCE REORG] Completed at height {}", old_block.header.height);
                         Ok(())
                     }
@@ -13814,6 +13867,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         if let Some(rocks_db) = storage.get_rocks_db_handle() {
                                             for block in &blocks {
                                                 q_storage::replay_block_state_changes(&rocks_db, block);
+                                            }
+                                        }
+
+                                        // v10.11.5: index swaps for every block in the just-committed
+                                        // batch. Without this, fresh-node turbo-sync would produce
+                                        // a wallet whose tx history is empty for everything before
+                                        // it joined the gossipsub mesh, even though state was replayed.
+                                        for block in &blocks {
+                                            let bh = block.calculate_hash();
+                                            let bt = block.header.timestamp as i64;
+                                            if let Err(e) = app_state_gossip.swap_indexer
+                                                .index_block(block.header.height, bh, bt, &block.transactions)
+                                                .await
+                                            {
+                                                warn!("⚠️  [SWAP INDEXER] batch-sync index_block({}) failed: {}", block.header.height, e);
                                             }
                                         }
 
