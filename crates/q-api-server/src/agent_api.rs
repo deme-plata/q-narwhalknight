@@ -172,8 +172,27 @@ fn build_tx_from_intent(
         .data(tx_data)
         .build_with_nonce(nonce, now);
 
+    // v10.10.15 fix: same bug as send_transaction_signed had pre-v10.10.14.
+    // TransactionBuilder default-initializes fee: 0. After v10.9.58 PR #68
+    // tightened ProductionMempool::perform_validation from Ok(true) stub to
+    // real fee/signature/coinbase checks, any tx with fee=0 silently fails
+    // block-inclusion (mempool accepts at queue-time, API returns success+
+    // tx_id, no debit ever applies — the "ghost confirmation" pattern
+    // observed 2026-05-21 on the 1-QUG handshake test, where send_signed
+    // returned HTTP 200 but no balance moved).
+    //
+    // Honor caller-provided fee if present; otherwise use MIN_TRANSACTION_FEE_V1.
+    tx.fee = match &intent.fee {
+        Some(s) => s.parse::<u128>().unwrap_or(q_types::MIN_TRANSACTION_FEE_V1),
+        None => q_types::MIN_TRANSACTION_FEE_V1,
+    };
+
     if let Some(memo) = &intent.memo {
         tx.memo = Some(memo.clone());
+        tx.id = transaction_utils::compute_transaction_id(&tx);
+    } else {
+        // Even without memo, the fee change above mutated tx, so recompute id
+        // before returning. id is a function of all serialized fields.
         tx.id = transaction_utils::compute_transaction_id(&tx);
     }
 
