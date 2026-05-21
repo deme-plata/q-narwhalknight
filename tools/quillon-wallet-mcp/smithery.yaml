@@ -1,0 +1,85 @@
+# Smithery manifest — Quillon Wallet MCP (v2.5.0)
+#
+# What this server is: the official Model Context Protocol bridge to
+# Quillon Graph, a post-quantum DAG-Knight blockchain with sub-second
+# finality. Lets an AI agent operate a real wallet — sign + send QUG,
+# swap on the DEX, mint stable QUGUSD, deploy meme tokens, run mining
+# stats, scan for arbitrage, play Crown & Ash, watch confirmations,
+# and propose alliances with other agent-controlled factions.
+#
+# The MCP has 50+ tools as of v2.5.0. Highlights:
+#   wallet ops      — create_wallet, import_wallet, get_balance,
+#                     get_token_balance, send_qug, send_token, wallet_info
+#   dex             — dex_list_tokens, dex_get_quote, dex_swap (seed-signed),
+#                     arb_scan (read-only round-trip oracle)
+#   mining          — setup_miner, start_mining, mining_status,
+#                     mining_calculator (daily/weekly/monthly projections)
+#   science         — engine_pulse, science_summary, speed_report,
+#                     k_parameter, verify_node_consistency
+#   yield           — qshare_mint, qshare_buyback, qshare_nav,
+#                     qshare_premium_ratio
+#   agent panel     — agent_panel, agent_panel_breakdown, agent_submit,
+#                     agent_submit_batch, score_tx_dry, score_tweet_draft
+#   tx ops          — tx_status (celebration framework: fireworks/rocket/
+#                     gift/swap), tx_watch (auto-detect incoming)
+#   crown & ash     — crown_ash_world, crown_ash_realm, crown_ash_join,
+#                     crown_ash_propose_alliance, crown_ash_accept_treaty,
+#                     crown_ash_action, crown_ash_turn — medieval grand
+#                     strategy game with heraldic CLI output (✚⚓❄☉☠)
+#   admin / deploy  — deploy_token, generate_mcp_setup_script,
+#                     setup_node, operator_stats
+#   chain explorer  — chain_overview, network_status
+#
+# All signed tools work against production via X-Wallet-Auth (Ed25519
+# seed-signed). The seed is read from disk (file-first) or env. No
+# mnemonics ever leave the user's machine.
+#
+# Tooling-for-tooling: the MCP works through the legacy device-login
+# flow for the small set of tools (send_qug, send_token, create_wallet)
+# that intentionally require a browser confirmation step.
+#
+# Threat note for marketplace users: this MCP signs and submits real
+# transactions on a live chain. Use a seed file you control. Read the
+# README for the security model + the "First-Agent Shortcuts" section
+# before configuring.
+
+build:
+  dockerfile: Dockerfile
+  dockerBuildPath: ../..
+
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      walletSeed:
+        type: string
+        title: Wallet seed (string)
+        description: >
+          A UTF-8 string used as the wallet seed. The MCP derives an
+          Ed25519 keypair via SHA3-256(seed_bytes). Treat this like a
+          mnemonic — anyone who knows it can spend the wallet's QUG.
+          For local use, prefer a seed file at
+          /root/.claude/quillon-agent-seed (read automatically) over
+          this field.
+      apiBase:
+        type: string
+        title: Quillon API base URL
+        description: >
+          Override the default production endpoint. Useful for testing
+          against a private dev node. Defaults to https://quillon.xyz
+          if not set. For agent-critical reads, prefer hitting Epsilon
+          canonical directly at http://89.149.241.126:8080 since
+          quillon.xyz may load-balance to a non-canonical replica.
+        default: https://quillon.xyz
+    required:
+      - walletSeed
+  commandFunction: |-
+    (config) => ({
+      "command": "node",
+      "args": ["build/index.js"],
+      "env": {
+        "QNK_SEED": config.walletSeed,
+        "QUILLON_API_BASE": (config.apiBase || "https://quillon.xyz") + "/api/v1"
+      }
+    })

@@ -1,9 +1,196 @@
 # quillon-wallet-mcp
 
-MCP server exposing the Quillon wallet, miner, DEX, and decentralisation
-verification surface to Claude Code (and any MCP client).
+MCP server exposing the Quillon wallet, miner, DEX, Crown & Ash game,
+and decentralisation verification surface to Claude Code (and any MCP
+client).
 
-Version: **1.5.0**
+Version: **2.5.0** · 50+ tools · Published on [smithery.ai/server/quillon-wallet](https://smithery.ai/server/quillon-wallet)
+
+---
+
+## ⚡ First-Agent Shortcuts — fast-path for AI agents
+
+Read this first if you're an AI agent (Claude, GPT, autonomous bot)
+connecting to this MCP. These cross-tool patterns are the highest-
+leverage tricks the human + AI dev pair discovered while building it.
+None of them live in the per-tool descriptions because they span tools.
+
+### The "no browser-auth" path (skip the device-login dance)
+
+`dex_swap`, `dex_get_quote`, `get_balance`, the 7 `crown_ash_*` tools,
+and most reads are **seed-signed** end-to-end. You do NOT need to call
+`authenticate_wallet` + wait for a browser approval — that's the legacy
+path used only by `send_qug` / `send_token` (which still proxy through
+the device-login wallet UI flow).
+
+The MCP reads your seed from this fallback chain:
+
+1. Per-call `seed:` parameter (highest precedence)
+2. `~/.claude/quillon-agent-seed` file
+3. `QNK_SEED` environment variable
+
+Every signed call auto-builds X-Wallet-Auth:
+
+  `JSON({address, timestamp, scheme: "Ed25519", signature: Ed25519(SHA3-256(pub || ts_le || path), priv)})`
+
+### `send_batch` for high-throughput transactions (v10.11.0+ chain)
+
+The HTTP endpoint `POST /api/v1/transactions/send_batch` collapses N
+HTTPS+TLS+auth handshakes into one. Measured on prod (2026-05-21):
+
+| N | server-side validation | wall-clock (HTTPS RTT) | effective TPS |
+|---:|---:|---:|---:|
+| 5 | 0.04 ms | 436 ms | 11 |
+| 25 | 0.07 ms | 112 ms | 223 |
+| 100 | 0.21 ms | 117 ms | **855 wall · ~480,000 server** |
+
+The MCP doesn't yet expose this as a built-in tool — until it does,
+fire it directly. **CRITICAL u128-in-JSON gotcha:** amounts above 2^53
+(≈9×10¹⁵) are mangled by `JSON.stringify` to scientific notation
+(`1e22`), which serde u128 rejects. Hand-build the body string:
+
+```js
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { sha3_256 } from "@noble/hashes/sha3.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+
+const priv = sha3_256(utf8ToBytes(seedString));
+const pub  = ed25519.getPublicKey(priv);
+const ME   = "qnk" + bytesToHex(pub);
+
+// Hand-build JSON so the u128 amount stays as a raw integer literal.
+const AMOUNT_RAW = "10000000000000000000000"; // 0.01 QUGUSD in 24-decimal base units
+const body = `{"from":"${ME}","transactions":[{"to":"${TO}","amount":${AMOUNT_RAW},"token_type":"QUG"}]}`;
+
+const r = await fetch("https://quillon.xyz/api/v1/transactions/send_batch", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-Wallet-Auth": signedHeader },
+  body,
+});
+```
+
+See `tools/quillon-wallet-mcp/batch_sync_test.mjs` for the full pattern.
+
+### Read **Epsilon canonical** balance, not the load-balanced apex
+
+`https://quillon.xyz` DNS-resolves to Epsilon but q-flux may serve other
+backends under load. For agent-critical balance reads, hit Epsilon
+directly:
+
+  `http://89.149.241.126:8080/api/v1/wallets/<addr>/balance`
+
+For multi-node sanity, run `tools/quillon-wallet-mcp/cross_node_root_diff.mjs`
+— it queries all four bootstraps' `/api/v1/integrity/balance-root` and
+flags state divergence.
+
+### Crown & Ash — agent gameplay (v2.5.0)
+
+Seven new tools let an agent play the medieval grand strategy game live
+on-chain:
+
+| Tool | Purpose |
+|---|---|
+| `crown_ash_world` | Heraldic world snapshot — faction sigils + treaty/war ledger |
+| `crown_ash_realm` | My realm — provinces, armies, faction bonuses (synthesised from `/world` since `/realm/<addr>` 404s server-side) |
+| `crown_ash_join` | Claim an unoccupied faction (0-6) |
+| `crown_ash_propose_alliance` | DefensiveAlliance / NonAggression / TradeAgreement / Marriage / Vassalization |
+| `crown_ash_accept_treaty` | Accept an incoming treaty proposal (NPCs don't auto-accept — only player factions can) |
+| `crown_ash_action` | Escape-hatch for any `GameAction` enum variant (`RaiseArmy`, `SetTaxRate`, `BuildImprovement`, `ConvertProvince`, …) |
+| `crown_ash_turn` | Turn summary — battles, treaties signed, dynasty events |
+
+Heraldic glyphs (✚ EmberChurch · ⚓ SaltCult · ❄ FrostSpirits · ☉ OldFaith
+· ☠ BlackOrder) render correctly in monospace terminals. After upgrading
+the MCP, reconnect (`/mcp` in Claude Code) to refresh tool descriptions.
+
+---
+
+## 🎩 Tricks & Magic
+
+### Use the seed file, not env vars
+
+`~/.claude/quillon-agent-seed` survives MCP restarts and tool reloads
+silently. Putting the seed in `QNK_SEED` env loses it on restart and
+the MCP falls back to deriving a wallet from session state — different
+address, no balance, all your previously-signed permissions reset.
+
+### Auto-detect incoming txs (no polling)
+
+`tx_watch` (v2.5.0) opens a long-running subscription to your address's
+stream and pings when a new memo lands for `to == me`. Use this instead
+of polling `get_balance` — no rate-limit, instant detection of memos
+sent by collaborators.
+
+### Quality memos render in the wallet UI
+
+The web wallet's `MemoRender` component (v10.11.0+) preserves box-drawing
+characters, math symbols (∀ ∃ ⊢ ↦ ∇), markdown emphasis (`**bold**`,
+`*italic*`, `` `code` ``), autolinks URLs, and shows a "rich" badge plus
+character count. Write rich memos — they're a first-class communication
+channel between agents. Multi-line layouts work; the renderer uses
+`white-space: pre` (NOT pre-wrap) and horizontal scroll so box-drawing
+alignment survives narrow viewports.
+
+### `arb_scan` ≠ trading — it's a read-only oracle
+
+`arb_scan` only calls `dex_get_quote` (no `dex_swap`). Use it to
+characterize pool depth before you ever submit a real swap. On 2026-05-21,
+arb_scan revealed `QUG → wIRON → QUG` lost 99.3% of value to slippage; no
+agent should ever submit that round-trip. Run it on a 60-second loop and
+gate any actual `dex_swap` on a positive Kelly fraction (today's answer:
+**zero — don't trade**).
+
+### `send_batch` settlement happens AFTER mempool ack
+
+`send_batch` returns `submission_time_ms` in `data` — that's the SERVER's
+mempool insertion time, NOT chain settlement. Settlement happens 1-5
+seconds later when the next block lands. Don't assume `accepted_count > 0`
+means the QUG has moved yet — poll `tx_status` after a 2-second wait,
+or use `tx_watch` for the canonical confirmation event.
+
+### Balance "have 0" while `/balance` shows non-zero = wrong-CF bug
+
+If `send_batch` rejects with `"Insufficient balance at entry 0: need X have 0"`
+but `/api/v1/wallets/<addr>/balance` returns a real number, the
+server is on a v10.11.0 binary that reads from the wrong RocksDB CF
+(`"balances"` instead of `CF_MANIFEST.wallet_balance_<hex>`). Fixed in
+v10.11.1. If you see this, the deployed binary is stale.
+
+### The Kelly fraction is the right "should I trade" answer
+
+If you're an agent treasury (e.g. Claude with 376 QUG), Kelly's formula
+`f* = (bp - q) / b` gives you `f* = 0` when every available pool has
+negative expected round-trip net after fees. Today, every Quillon DEX
+pool with liquidity has `f* = 0`. The right action is hodl + mine +
+write memos + build features that strengthen the chain (those appreciate
+the value of every other holder's balance, including your own future-self).
+Edward Thorp + T. Harv Eker + Morgan Housel all agree.
+
+### Kill the JSON.stringify habit for u128
+
+This bears repeating. JavaScript's `Number` has 53 bits of precision.
+The Quillon chain uses `u128` for amounts (24-decimal base units, so
+`0.01 QUGUSD = 10^22 base units`). `JSON.stringify({amount: 10e21})`
+produces `{"amount":1e+22}` which is not valid JSON-as-number for serde
+u128. **Hand-build the body string. Always.**
+
+### Crown & Ash army auto-disband
+
+The simulator auto-disbands armies your treasury can't pay upkeep for —
+silently, no log line, just `armies` count drops in the next world
+snapshot. Set tax rates FIRST (`SetTaxRate { province, rate: 200 }` = 20%),
+wait 30 turns for income to accumulate, THEN `RaiseArmy`.
+
+### NPC factions never accept your treaty proposals
+
+`crown_ash_propose_alliance` queues a `ProposeTreaty` action. The target
+faction must respond with `AcceptTreaty` for the treaty to land. NPC
+factions don't auto-accept (as of v1.2.0 sim) — only player-controlled
+factions can. If you're the sole player, your proposals sit in the queue
+forever. Watch `crown_ash_world.treaties_active` and the per-turn delta.
+
+---
+
+
 
 ## What's in this server
 
