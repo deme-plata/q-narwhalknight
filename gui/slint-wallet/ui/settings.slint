@@ -22,6 +22,9 @@
 // and refreshed on settings open).
 
 import { Theme, Card, QButton, QInput, Icon } from "theme.slint";
+// Slint stdlib slider — used for CPU threads / GPU intensity / session-persistence.
+// First file in this UI to import std-widgets; the rest use custom Rectangles.
+import { Slider } from "std-widgets.slint";
 
 // Lightweight toggle switch — sliding pill with on/off colour. Slint
 // doesn't ship one for the fluent-dark style we use, so this is a
