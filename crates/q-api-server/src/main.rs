@@ -10032,6 +10032,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // inner task and be re-locked on respawn.
         let app_state_gossip_outer = app_state.clone();
         let response_map_for_gossipsub_outer = turbo_sync_response_map.clone();
+        let balance_engine_outer = balance_engine.clone();
         let gossipsub_rx_arc =
             std::sync::Arc::new(tokio::sync::Mutex::new(gossipsub_rx));
         tokio::spawn(async move {
@@ -10040,6 +10041,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 let rx_inner = gossipsub_rx_arc.clone();
                 let app_state_gossip = app_state_gossip_outer.clone();
                 let response_map_for_gossipsub = response_map_for_gossipsub_outer.clone();
+                let balance_engine = balance_engine_outer.clone();
                 let handle = tokio::spawn(async move {
                     let mut gossipsub_rx_guard = rx_inner.lock().await;
                     let gossipsub_rx: &mut tokio::sync::mpsc::Receiver<(String, Vec<u8>)> =
