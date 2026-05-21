@@ -147,12 +147,20 @@ export function QFluxStatsPill() {
   useEffect(() => {
     let cancelled = false;
 
+    // Matches the pattern from NodeSettingsModal/getAuthHeaders (v9.0.3) —
+    // X-Wallet-Auth carries the address; Authorization: Bearer carries
+    // either the OAuth token or the wallet address as fallback.
     function getAuthHeaders(): Record<string, string> {
       try {
-        const raw = localStorage.getItem('walletAuth') || sessionStorage.getItem('walletAuth');
-        if (raw) return { 'X-Wallet-Auth': raw, accept: 'application/json' };
-      } catch { /* localStorage may throw under privacy mode */ }
-      return { accept: 'application/json' };
+        const wallet = localStorage.getItem('walletAddress') || '';
+        const authToken = localStorage.getItem('authToken') || '';
+        if (!wallet && !authToken) return { accept: 'application/json' };
+        return {
+          'X-Wallet-Auth': wallet,
+          Authorization: `Bearer ${authToken || wallet}`,
+          accept: 'application/json',
+        };
+      } catch { return { accept: 'application/json' }; }
     }
 
     async function tick() {
