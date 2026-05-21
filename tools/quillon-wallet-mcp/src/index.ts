@@ -3239,36 +3239,117 @@ function gameAddress(seedArg?: string): string {
   return deriveKeys(seed).address;
 }
 
+// Religion → single-cell heraldic glyph (kept narrow so columns align).
+const RELIGION_GLYPH: Record<string, string> = {
+  EmberChurch:  "✚",   // ember + cross
+  SaltCult:     "⚓",   // anchor of brine
+  FrostSpirits: "❄",   // snowflake
+  OldFaith:     "☉",   // sun-disc
+  BlackOrder:   "☠",   // skull rite
+};
+function relGlyph(r?: string): string { return (r && RELIGION_GLYPH[r]) ?? "·"; }
+
+// Tiny inline bar — "█████░░░░░" — proportion of total.
+function miniBar(value: number, max: number, width = 10): string {
+  if (max <= 0) return "·".repeat(width);
+  const filled = Math.max(0, Math.min(width, Math.round((value / max) * width)));
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+// Synthesize a realm view from a world snapshot. Used both as the
+// crown_ash_realm response (since the server's /realm/<addr> path
+// currently 404s) and inline anywhere we want "my faction at a glance".
+function synthesizeRealm(world: any, wallet: string) {
+  const factions: any[] = world?.factions ?? [];
+  const me = factions.find((f) => f?.player_wallet === wallet);
+  if (!me) return null;
+  const fid = me.id;
+  const provinces = (world?.provinces ?? []).filter((p: any) => p?.controller === fid);
+  const armies = (world?.armies ?? []).filter((a: any) => a?.faction === fid);
+  const treaties = (world?.treaties ?? []).filter((t: any) => t?.faction_a === fid || t?.faction_b === fid);
+  const wars = (world?.wars ?? []).filter((w: any) => w?.attacker === fid || w?.defender === fid);
+  return { faction: me, provinces, armies, treaties, wars };
+}
+
 server.tool(
   "crown_ash_world",
-  "Crown & Ash — read the full game world snapshot (provinces, factions, turn, characters, armies, treaties). No auth required.",
+  "Crown & Ash — heraldic world snapshot (provinces, factions, treaties). Returns a stylised text banner with religion glyphs, claim status, and a treaty/war ledger.",
   {},
   async () => {
     try {
       const res = await api(`${CROWN_ASH_PATH}/world`) as any;
       const w = res.data ?? res;
       const meta = w?.meta ?? {};
-      const factionLines: string[] = (w?.factions ?? []).slice(0, 16).map((f: any) => {
-        const player = f.player_wallet ? `🧙 ${f.player_wallet.slice(0, 12)}…` : "  (unclaimed)";
-        return `  faction ${String(f.id).padStart(2)} · ${(f.name ?? "?").padEnd(20)} · religion ${f.religion ?? "?"} · ${player}`;
+      const factions: any[] = w?.factions ?? [];
+      const provinces: any[] = w?.provinces ?? [];
+      const armies: any[] = w?.armies ?? [];
+      const treaties: any[] = w?.treaties ?? [];
+      const wars: any[] = w?.wars ?? [];
+
+      const myWallet = ((): string => {
+        try { const { seed } = loadSeed({}); return deriveKeys(seed).address; } catch { return ""; }
+      })();
+
+      // Province distribution per faction — for the tiny bar chart.
+      const provByFaction = new Map<number, number>();
+      const armyByFaction = new Map<number, number>();
+      for (const p of provinces) provByFaction.set(p.controller, (provByFaction.get(p.controller) ?? 0) + 1);
+      for (const a of armies) armyByFaction.set(a.faction, (armyByFaction.get(a.faction) ?? 0) + 1);
+      const maxProv = Math.max(1, ...Array.from(provByFaction.values()));
+
+      const factionLines = factions.map((f) => {
+        const provCount = provByFaction.get(f.id) ?? 0;
+        const armyCount = armyByFaction.get(f.id) ?? 0;
+        const claimed = !!f.player_wallet;
+        const isMe = myWallet && f.player_wallet === myWallet;
+        const sigil = isMe ? "👑" : (claimed ? "🧙" : "  ");
+        const bar = miniBar(provCount, maxProv, 8);
+        const name = (f.name ?? "?").padEnd(16).slice(0, 16);
+        const rel = (f.religion ?? "?").padEnd(13).slice(0, 13);
+        return `  ${sigil} ${relGlyph(f.religion)} F#${String(f.id).padStart(1)} ${name} ${rel} ${bar} prov ${String(provCount).padStart(2)}  ⚔${String(armyCount).padStart(2)}`;
       });
-      const treaties = (w?.treaties ?? []).slice(0, 12).map((t: any) =>
-        `  ${t.faction_a}↔${t.faction_b}  ${t.treaty_type}  (turn ${t.signed_turn})`
-      );
+
+      const treatyLines = treaties.slice(0, 8).map((t) => {
+        const a = factions.find((f) => f.id === t.faction_a)?.name ?? `F#${t.faction_a}`;
+        const b = factions.find((f) => f.id === t.faction_b)?.name ?? `F#${t.faction_b}`;
+        return `  📜 ${a} ↔ ${b}   ${t.treaty_type}   (turn ${t.signed_turn ?? "?"})`;
+      });
+      const warLines = wars.slice(0, 6).map((w_) => {
+        const att = factions.find((f) => f.id === w_.attacker)?.name ?? `F#${w_.attacker}`;
+        const def = factions.find((f) => f.id === w_.defender)?.name ?? `F#${w_.defender}`;
+        return `  ⚔ ${att} → ${def}   (${w_.casus_belli ?? "?"})`;
+      });
+
+      const banner = [
+        `╔══════════════════════════════════════════════════════════════════╗`,
+        `║   ✦  CROWN  &  ASH  ✦   Turn ${String(meta.turn ?? "?").padEnd(6)}   sim ${meta.sim_version ?? "?"}       ║`,
+        `╚══════════════════════════════════════════════════════════════════╝`,
+      ].join("\n");
+
       const lines = [
-        `=== Crown & Ash — World Snapshot ===`,
+        banner,
         ``,
-        `  turn: ${meta.turn ?? "?"}    genesis_block: ${meta.genesis_block ?? "?"}    sim: ${meta.sim_version ?? "?"}`,
-        `  players: ${meta.player_count ?? 0}    initialized: ${meta.initialized ?? false}`,
-        `  provinces: ${(w?.provinces ?? []).length}    factions: ${(w?.factions ?? []).length}    armies: ${(w?.armies ?? []).length}`,
-        `  treaties active: ${(w?.treaties ?? []).length}    wars: ${(w?.wars ?? []).length}`,
+        `  players ${meta.player_count ?? 0}   ·   provinces ${provinces.length}   ·   armies ${armies.length}   ·   treaties ${treaties.length}   ·   wars ${wars.length}`,
         ``,
-        `--- Factions ---`,
+        `─── ⚜  FACTIONS  ⚜ ───`,
         ...(factionLines.length > 0 ? factionLines : ["  (none)"]),
       ];
-      if (treaties.length > 0) {
-        lines.push("", "--- Treaties (most recent) ---", ...treaties);
+      if (treatyLines.length > 0) lines.push("", `─── 📜  ACTIVE TREATIES ───`, ...treatyLines);
+      if (warLines.length > 0)    lines.push("", `─── ⚔   ACTIVE WARS    ───`, ...warLines);
+
+      // If I'm a player, surface my realm at the bottom as a quick-glance summary.
+      if (myWallet) {
+        const realm = synthesizeRealm(w, myWallet);
+        if (realm) {
+          const totalPop = realm.provinces.reduce((s: number, p: any) => s + (p.population ?? 0), 0);
+          const myCol = realm.faction.color_rgb ?? [];
+          const colorHint = myCol.length === 3 ? ` (rgb ${myCol.join(",")})` : "";
+          lines.push("", `─── 👑  YOUR REALM  ${realm.faction.name}${colorHint} ───`);
+          lines.push(`  ${relGlyph(realm.faction.religion)} ${realm.faction.religion}   ${realm.faction.culture ?? "?"} culture`);
+          lines.push(`  provinces ${realm.provinces.length}   armies ${realm.armies.length}   treaties ${realm.treaties.length}   wars ${realm.wars.length}   pop ${totalPop.toLocaleString()}`);
+        }
       }
+
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (e: any) {
       return { content: [{ type: "text", text: `Failed to fetch world: ${e.message}` }] };
@@ -3278,34 +3359,94 @@ server.tool(
 
 server.tool(
   "crown_ash_realm",
-  "Crown & Ash — read my realm (faction + provinces + treasury + diplomacy) by wallet. Uses the configured seed unless wallet is provided.",
+  "Crown & Ash — heraldic banner for my realm (faction, provinces, armies, diplomacy). Synthesizes from /world snapshot because the server's /realm/<addr> path is not yet implemented.",
   {
     wallet: z.string().optional().describe("Wallet address (qnk...). Defaults to the configured seed's address."),
   },
   async ({ wallet }) => {
     const addr = wallet ?? gameAddress();
     try {
-      const res = await api(`${CROWN_ASH_PATH}/realm/${addr}`) as any;
-      if (res.success === false || res.ok === false) {
-        return { content: [{ type: "text", text: `No realm for ${addr.slice(0, 16)}… — call crown_ash_join first.` }] };
+      // Server's /realm/<addr> currently 404s — synthesize from /world.
+      const res = await api(`${CROWN_ASH_PATH}/world`) as any;
+      const w = res.data ?? res;
+      const realm = synthesizeRealm(w, addr);
+      if (!realm) {
+        return { content: [{ type: "text", text:
+          `No realm for ${addr.slice(0, 18)}…\n` +
+          `Run crown_ash_join with a faction id (0-6) to claim one.`
+        }] };
       }
-      const r = res.data ?? res;
-      const lines = [
-        `=== Crown & Ash — My Realm ===`,
-        ``,
-        `  wallet:   ${addr}`,
-        `  faction:  ${r.faction ?? r.faction_id ?? "?"} (${r.faction_name ?? "?"})`,
-        `  treasury: ${r.treasury ?? "?"}    prestige: ${r.prestige ?? "?"}`,
-        `  provinces controlled: ${(r.provinces ?? []).length}`,
-        `  armies:   ${(r.armies ?? []).length}`,
-        `  treaties: ${(r.treaties ?? []).length}    wars: ${(r.wars ?? []).length}`,
-      ];
-      if (r.provinces && r.provinces.length > 0) {
-        lines.push("", "--- Provinces ---");
-        for (const p of r.provinces.slice(0, 20)) {
-          lines.push(`  #${p.id ?? "?"} ${(p.name ?? "?").padEnd(18)} pop=${p.population ?? "?"}  tax=${p.tax_rate ?? "?"}`);
+      const meta = w?.meta ?? {};
+      const f = realm.faction;
+      const totalPop = realm.provinces.reduce((s: number, p: any) => s + (p.population ?? 0), 0);
+      const totalProsperity = realm.provinces.reduce((s: number, p: any) => s + (p.prosperity ?? 0), 0);
+      const avgProsperity = realm.provinces.length > 0 ? Math.round(totalProsperity / realm.provinces.length) : 0;
+      const factions: any[] = w?.factions ?? [];
+
+      const banner = [
+        `╔═══════════════════════════════════════════════════════════════════╗`,
+        `║  👑  ${(f.name ?? "?").padEnd(58)}║`,
+        `║      ${relGlyph(f.religion)} ${(f.religion ?? "?").padEnd(13)}   ${(f.culture ?? "?").padEnd(12)} culture${" ".repeat(15)}║`,
+        `║      turn ${String(meta.turn ?? "?").padEnd(8)} · provinces ${String(realm.provinces.length).padStart(2)} · armies ${String(realm.armies.length).padStart(2)} · treaties ${String(realm.treaties.length).padStart(1)} · wars ${String(realm.wars.length).padStart(1)}   ║`,
+        `╚═══════════════════════════════════════════════════════════════════╝`,
+      ].join("\n");
+
+      const bonuses = f.bonuses ?? {};
+      const maxBonus = Math.max(1, ...Object.values(bonuses).map((v: any) => Number(v) || 0));
+      const bonusLines: string[] = [];
+      for (const k of ["military","economy","diplomacy","intrigue","clerical","legitimacy","cohesion_decay"]) {
+        if (bonuses[k] !== undefined) {
+          bonusLines.push(`  ${k.padEnd(16)} ${miniBar(Number(bonuses[k]), maxBonus, 14)}  ${bonuses[k]}`);
         }
       }
+
+      const lines: string[] = [
+        banner,
+        ``,
+        `  📍 wallet:  ${addr}`,
+        `  🏰 total population: ${totalPop.toLocaleString()}   avg prosperity: ${avgProsperity.toLocaleString()}`,
+        ``,
+        `─── ⚜  FACTION BONUSES  ⚜ ───`,
+        ...(bonusLines.length > 0 ? bonusLines : ["  (none)"]),
+        ``,
+        `─── 🏰  PROVINCES  🏰 ───`,
+      ];
+      for (const p of realm.provinces.slice(0, 24)) {
+        const fort = p.fortification ?? 0;
+        const fortGlyph = fort > 0 ? "🛡".repeat(Math.min(fort, 3)) : "·";
+        const impr = (p.improvements ?? []).slice(0, 4).join(", ");
+        const terr = (p.terrain ?? "?").padEnd(8).slice(0, 8);
+        const name = (p.name ?? "?").padEnd(13).slice(0, 13);
+        lines.push(`  #${String(p.id).padStart(2)} ${name} ${terr} pop ${String(p.population ?? 0).padStart(6)}  prosp ${String(p.prosperity ?? 0).padStart(8)}  fort ${fortGlyph.padEnd(4)}  [${impr}]`);
+      }
+
+      if (realm.armies.length > 0) {
+        lines.push(``, `─── ⚔  ARMIES  ⚔ ───`);
+        for (const a of realm.armies.slice(0, 10)) {
+          lines.push(`  ⚔ army #${a.id ?? "?"}   size ${a.size ?? "?"}   location: province #${a.location ?? a.province ?? "?"}`);
+        }
+      }
+
+      if (realm.treaties.length > 0) {
+        lines.push(``, `─── 📜  MY TREATIES  📜 ───`);
+        for (const t of realm.treaties.slice(0, 8)) {
+          const other = t.faction_a === f.id ? t.faction_b : t.faction_a;
+          const otherName = factions.find((x) => x.id === other)?.name ?? `F#${other}`;
+          lines.push(`  📜 with ${otherName}   ${t.treaty_type}   (turn ${t.signed_turn ?? "?"})`);
+        }
+      } else {
+        lines.push(``, `  (no active treaties — propose with crown_ash_propose_alliance)`);
+      }
+
+      if (realm.wars.length > 0) {
+        lines.push(``, `─── ⚔  AT WAR WITH  ⚔ ───`);
+        for (const wr of realm.wars) {
+          const other = wr.attacker === f.id ? wr.defender : wr.attacker;
+          const otherName = factions.find((x) => x.id === other)?.name ?? `F#${other}`;
+          lines.push(`  ⚔ ${otherName}   (${wr.casus_belli ?? "?"})`);
+        }
+      }
+
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (e: any) {
       return { content: [{ type: "text", text: `Failed to fetch realm: ${e.message}` }] };
