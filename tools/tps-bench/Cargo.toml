@@ -1,8 +1,8 @@
 [package]
 name = "tps-bench"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Production-honest live TPS benchmark for Quillon Graph — 8 parallel executors, SIMD batch sign, real HTTP path"
+description = "Production-honest live TPS benchmark for Quillon Graph — 8 parallel executors, SIMD batch sign, --batch-size for v10.11.0 send_batch endpoint"
 authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
 
 [dependencies]

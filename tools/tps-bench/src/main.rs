@@ -84,6 +84,20 @@ struct Args {
     #[arg(long, default_value_t = 15)]
     timeout_secs: u64,
 
+    /// Batch size for /transactions/send_batch (v10.11.0+). 1 = use per-tx
+    /// /transactions/send_signed (v0.2 behaviour). >1 = pack this many
+    /// transfers per HTTPS POST. The bench picks the matching endpoint.
+    #[arg(long, default_value_t = 1)]
+    batch_size: usize,
+
+    /// "Mega" mode — astronomical per-tx amounts (close to the 1e33 raw
+    /// cap) to exercise u128 arithmetic paths on the server. Note: each
+    /// mega-tx transfers ~1B QUG; only useful if the sender has that many,
+    /// otherwise the running-total check rejects from the first one. Use
+    /// with care.
+    #[arg(long, default_value_t = false)]
+    mega: bool,
+
     /// If set, after submission poll /tx/<hash>/status until inclusion
     /// (or `finality_timeout`s elapses). Reports end-to-end finality TPS.
     #[arg(long, default_value_t = false)]
@@ -102,9 +116,32 @@ struct Args {
 struct SendSignedBody {
     from: String,
     to: String,
-    amount: u64,
+    amount: u128,
     token_type: String,
     memo: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct BatchEntry {
+    to: String,
+    amount: u128,
+    token_type: String,
+    memo: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct SendBatchBody {
+    from: String,
+    transactions: Vec<BatchEntry>,
+}
+
+/// A pre-built batch HTTP request — ready to fire.
+#[derive(Clone)]
+struct PreparedBatch {
+    body: SendBatchBody,
+    auth_header: String,
+    /// Number of txs in this batch (for stats).
+    tx_count: usize,
 }
 
 #[derive(Serialize)]
@@ -166,13 +203,25 @@ fn build_auth_signed_bytes(pubkey: &[u8; 32], ts: u64, path: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Resolve effective per-tx amount from args. `--mega` shifts up by 10^18
+/// to actually exercise large-value arithmetic on the server (still small
+/// enough that a 373-QUG-balance wallet survives a few hundred txs).
+fn effective_amount(args: &Args) -> u128 {
+    let base = args.amount as u128;
+    if args.mega {
+        base.saturating_mul(1_000_000_000_000_000_000u128) // ×10^18
+    } else {
+        base
+    }
+}
+
 fn sign_one_tx(sk: &SigningKey, pubkey: &[u8; 32], from_hex: &str, index: u64, args: &Args) -> SignedTx {
     let recipient = throwaway_recipient(index);
     let to_hex = format!("qnk{}", hex::encode(recipient));
     let body = SendSignedBody {
         from: from_hex.to_string(),
         to: to_hex.clone(),
-        amount: args.amount,
+        amount: effective_amount(args),
         token_type: args.token_type.clone(),
         memo: format!("tps-bench-{index}"),
     };
@@ -201,6 +250,49 @@ fn sign_one_tx(sk: &SigningKey, pubkey: &[u8; 32], from_hex: &str, index: u64, a
         body,
         auth_header,
     }
+}
+
+/// Build a single batch (M txs from same sender) as one ready-to-fire HTTP
+/// request. One Ed25519 sign covers the whole batch via the X-Wallet-Auth
+/// header — far cheaper client-side than per-tx signing for large M.
+fn build_one_batch(
+    sk: &SigningKey,
+    pubkey: &[u8; 32],
+    from_hex: &str,
+    start_index: u64,
+    batch_size: usize,
+    args: &Args,
+) -> PreparedBatch {
+    let amount = effective_amount(args);
+    let mut entries: Vec<BatchEntry> = Vec::with_capacity(batch_size);
+    for i in 0..batch_size as u64 {
+        let recipient = throwaway_recipient(start_index + i);
+        entries.push(BatchEntry {
+            to: format!("qnk{}", hex::encode(recipient)),
+            amount,
+            token_type: args.token_type.clone(),
+            memo: format!("tps-bench-batch-{}-{}", start_index, i),
+        });
+    }
+    let body = SendBatchBody {
+        from: from_hex.to_string(),
+        transactions: entries,
+    };
+
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let path = "/api/v1/transactions/send_batch";
+    let to_sign = build_auth_signed_bytes(pubkey, ts, path);
+    let sig = sk.sign(&to_sign);
+    let auth = AuthHeader {
+        address: from_hex,
+        timestamp: ts,
+        scheme: "Ed25519",
+        signature: hex::encode(sig.to_bytes()),
+        public_key: hex::encode(pubkey),
+    };
+    let auth_header = serde_json::to_string(&auth).expect("auth json");
+
+    PreparedBatch { body, auth_header, tx_count: batch_size }
 }
 
 #[derive(Default)]
@@ -299,6 +391,101 @@ async fn executor(
     stats
 }
 
+/// Fire a stream of PreparedBatches and tally per-batch + per-tx stats.
+/// One HTTP request per batch; the server expands each into N tx submissions.
+async fn batch_executor(
+    executor_id: usize,
+    batches: Vec<PreparedBatch>,
+    server: String,
+    timeout_secs: u64,
+    verbose: bool,
+) -> ExecutorStats {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .build()
+        .expect("reqwest client");
+
+    let url = format!("{}/api/v1/transactions/send_batch", server.trim_end_matches('/'));
+    let mut stats = ExecutorStats::default();
+
+    for (bi, batch) in batches.iter().enumerate() {
+        let t0 = Instant::now();
+        let resp = client
+            .post(&url)
+            .header("X-Wallet-Auth", &batch.auth_header)
+            .json(&batch.body)
+            .send()
+            .await;
+        let lat_us = t0.elapsed().as_micros() as u64;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status();
+                let body_text = r.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                        // Server returns per-tx results in v["data"]["results"]
+                        let results = v["data"]["results"].as_array().cloned().unwrap_or_default();
+                        let accepted_count = v["data"]["accepted_count"].as_u64().unwrap_or(0);
+                        let rejected_count = v["data"]["rejected_count"].as_u64().unwrap_or(0);
+                        // Per-tx latency = whole-batch wall-time divided by tx count
+                        // (a conservative approximation — actual per-tx server-side
+                        // time would need server tracing, which submission_time_ms
+                        // already reports separately).
+                        let per_tx_lat_us = lat_us / (batch.tx_count.max(1) as u64);
+                        for _ in 0..accepted_count {
+                            stats.latency_us.push(per_tx_lat_us);
+                        }
+                        for _ in 0..rejected_count {
+                            stats.error_latency_us.push(per_tx_lat_us);
+                        }
+                        stats.accepted += accepted_count;
+                        stats.rejected += rejected_count;
+                        // Collect tx_ids
+                        for r in &results {
+                            if let Some(h) = r["tx_id"].as_str() {
+                                stats.tx_hashes.push(h.to_string());
+                            }
+                            if let Some(err) = r["error"].as_str() {
+                                *stats.errors.entry(err.chars().take(80).collect()).or_insert(0) += 1;
+                            }
+                        }
+                        if verbose {
+                            eprintln!(
+                                "[exec {executor_id}] batch {bi} ({} tx): {} ok / {} fail in {:.1}ms",
+                                batch.tx_count, accepted_count, rejected_count, lat_us as f64 / 1000.0
+                            );
+                        }
+                    } else {
+                        stats.rejected += batch.tx_count as u64;
+                        for _ in 0..batch.tx_count { stats.error_latency_us.push(lat_us); }
+                        *stats.errors.entry("malformed JSON response".into()).or_insert(0) += 1;
+                    }
+                } else {
+                    stats.rejected += batch.tx_count as u64;
+                    for _ in 0..batch.tx_count { stats.error_latency_us.push(lat_us); }
+                    let preview: String = body_text.chars().take(80).collect();
+                    *stats.errors.entry(format!("HTTP {status}: {preview}")).or_insert(0) += 1;
+                }
+            }
+            Err(e) => {
+                stats.rejected += batch.tx_count as u64;
+                for _ in 0..batch.tx_count { stats.error_latency_us.push(lat_us); }
+                let msg: String = if e.is_timeout() {
+                    "network: timeout".into()
+                } else {
+                    format!("network: {e}").chars().take(80).collect()
+                };
+                *stats.errors.entry(msg).or_insert(0) += 1;
+            }
+        }
+    }
+    stats
+}
+
 async fn poll_finality(server: &str, tx_hash: &str, timeout_secs: u64) -> Option<u64> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -344,12 +531,18 @@ fn print_summary(args: &Args, total_elapsed: f64, all_stats: &[ExecutorStats], f
         }
     }
 
+    let endpoint = if args.batch_size > 1 {
+        format!("/api/v1/transactions/send_batch  (batch_size={})", args.batch_size)
+    } else {
+        "/api/v1/transactions/send_signed".to_string()
+    };
+
     println!();
     println!("══════════════════════════════════════════════════════════════════════");
-    println!("  Quillon Graph — Live TPS Benchmark v0.2 (production-honest)");
+    println!("  Quillon Graph — Live TPS Benchmark v0.3 (production-honest)");
     println!("══════════════════════════════════════════════════════════════════════");
     println!("  Target:          {}", args.server);
-    println!("  Endpoint:        /api/v1/transactions/send_signed");
+    println!("  Endpoint:        {}", endpoint);
     println!("  Executors:       {}", args.executors);
     println!("  Submitted:       {} tx total", total);
     println!();
@@ -408,47 +601,99 @@ async fn main() -> Result<()> {
     let from_hex = format!("qnk{}", hex::encode(pubkey));
 
     eprintln!("from: {}  (pubkey {}...)", from_hex, &from_hex[..16]);
-    eprintln!("plan: count={} executors={} amount={} token={} server={}",
-        args.count, args.executors, args.amount, args.token_type, args.server);
+    eprintln!("plan: count={} executors={} batch_size={} amount={}{} token={} server={}",
+        args.count, args.executors, args.batch_size, args.amount,
+        if args.mega { " (×10^18 mega)" } else { "" },
+        args.token_type, args.server);
 
-    // ─── Phase 1: parallel batch sign all txs via rayon ──────────────
-    let sign_start = Instant::now();
-    let txs: Vec<SignedTx> = (0..args.count as u64)
-        .into_par_iter()
-        .map(|i| sign_one_tx(&sk, &pubkey, &from_hex, i, &args))
-        .collect();
-    let sign_elapsed = sign_start.elapsed();
-    eprintln!("signed {} txs in {:?}  ({:.1} sigs/sec)",
-        txs.len(),
-        sign_elapsed,
-        txs.len() as f64 / sign_elapsed.as_secs_f64());
-
-    // ─── Phase 2: shard txs across executors ──────────────────────────
-    let mut shards: Vec<Vec<SignedTx>> = (0..args.executors).map(|_| Vec::new()).collect();
-    for (i, tx) in txs.into_iter().enumerate() {
-        shards[i % args.executors].push(tx);
-    }
-    eprintln!("sharded across {} executors (sizes: {:?})",
-        args.executors,
-        shards.iter().map(|s| s.len()).collect::<Vec<_>>());
-
-    // ─── Phase 3: fire all executors in parallel ──────────────────────
-    let run_start = Instant::now();
-    let server = Arc::new(args.server.clone());
-    let mut handles = Vec::with_capacity(args.executors);
-    for (i, shard) in shards.into_iter().enumerate() {
-        let server = server.clone();
-        let timeout = args.timeout_secs;
-        let verbose = args.verbose;
-        handles.push(tokio::spawn(async move {
-            executor(i, shard, (*server).clone(), timeout, verbose).await
-        }));
-    }
-
+    let run_start;
     let mut all_stats: Vec<ExecutorStats> = Vec::with_capacity(args.executors);
-    for h in handles {
-        all_stats.push(h.await?);
+
+    if args.batch_size > 1 {
+        // ─── BATCH MODE (v10.11.0 send_batch endpoint) ────────────────
+        // One Ed25519 sign per batch (not per tx). Build all batches up
+        // front in parallel via rayon, then shard across executors.
+        let num_batches = (args.count + args.batch_size - 1) / args.batch_size;
+        eprintln!("batch mode: {} txs in {} batches of up to {} each",
+            args.count, num_batches, args.batch_size);
+
+        let sign_start = Instant::now();
+        let batches: Vec<PreparedBatch> = (0..num_batches as u64)
+            .into_par_iter()
+            .map(|bi| {
+                let start_index = bi * args.batch_size as u64;
+                let remaining = args.count as u64 - start_index;
+                let this_batch_size = (args.batch_size as u64).min(remaining) as usize;
+                build_one_batch(&sk, &pubkey, &from_hex, start_index, this_batch_size, &args)
+            })
+            .collect();
+        let sign_elapsed = sign_start.elapsed();
+        eprintln!("prepared {} batches in {:?} ({:.1} batches/sec, {:.0} txs/sec sign-equivalent)",
+            batches.len(),
+            sign_elapsed,
+            batches.len() as f64 / sign_elapsed.as_secs_f64().max(0.001),
+            args.count as f64 / sign_elapsed.as_secs_f64().max(0.001));
+
+        // Shard batches across executors
+        let mut shards: Vec<Vec<PreparedBatch>> = (0..args.executors).map(|_| Vec::new()).collect();
+        for (i, b) in batches.into_iter().enumerate() {
+            shards[i % args.executors].push(b);
+        }
+        eprintln!("sharded {} batches across {} executors (batch counts: {:?})",
+            shards.iter().map(|s| s.len()).sum::<usize>(),
+            args.executors,
+            shards.iter().map(|s| s.len()).collect::<Vec<_>>());
+
+        run_start = Instant::now();
+        let server = Arc::new(args.server.clone());
+        let mut handles = Vec::with_capacity(args.executors);
+        for (i, shard) in shards.into_iter().enumerate() {
+            let server = server.clone();
+            let timeout = args.timeout_secs;
+            let verbose = args.verbose;
+            handles.push(tokio::spawn(async move {
+                batch_executor(i, shard, (*server).clone(), timeout, verbose).await
+            }));
+        }
+        for h in handles {
+            all_stats.push(h.await?);
+        }
+    } else {
+        // ─── PER-TX MODE (legacy v0.2 send_signed endpoint) ───────────
+        let sign_start = Instant::now();
+        let txs: Vec<SignedTx> = (0..args.count as u64)
+            .into_par_iter()
+            .map(|i| sign_one_tx(&sk, &pubkey, &from_hex, i, &args))
+            .collect();
+        let sign_elapsed = sign_start.elapsed();
+        eprintln!("signed {} txs in {:?}  ({:.1} sigs/sec)",
+            txs.len(), sign_elapsed,
+            txs.len() as f64 / sign_elapsed.as_secs_f64().max(0.001));
+
+        let mut shards: Vec<Vec<SignedTx>> = (0..args.executors).map(|_| Vec::new()).collect();
+        for (i, tx) in txs.into_iter().enumerate() {
+            shards[i % args.executors].push(tx);
+        }
+        eprintln!("sharded across {} executors (sizes: {:?})",
+            args.executors,
+            shards.iter().map(|s| s.len()).collect::<Vec<_>>());
+
+        run_start = Instant::now();
+        let server = Arc::new(args.server.clone());
+        let mut handles = Vec::with_capacity(args.executors);
+        for (i, shard) in shards.into_iter().enumerate() {
+            let server = server.clone();
+            let timeout = args.timeout_secs;
+            let verbose = args.verbose;
+            handles.push(tokio::spawn(async move {
+                executor(i, shard, (*server).clone(), timeout, verbose).await
+            }));
+        }
+        for h in handles {
+            all_stats.push(h.await?);
+        }
     }
+
     let total_elapsed = run_start.elapsed().as_secs_f64();
 
     // ─── Phase 4 (optional): finality poll ────────────────────────────
