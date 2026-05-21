@@ -15,6 +15,7 @@ import AgentTerminalModal from './AgentTerminalModal';
 import PapersLibraryModal from './PapersLibraryModal';
 import QFluxStatsPill from './QFluxStatsPill';
 import AgentDetailModal, { CLAUDE_OPUS_DIARY } from './AgentDetailModal';
+import MultiWalletDrawer from './MultiWalletDrawer';
 import { useMinerLink } from '../hooks/useMinerLink';
 import { sseManager } from '../services/sseManager';
 
@@ -357,6 +358,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [chainTvl, setChainTvl] = useState<number>(0);
   const [showAgentsModal, setShowAgentsModal] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number} | null>(null);
+  const [showMultiWallet, setShowMultiWallet] = useState(false);
 
   // Network Health Gauge — k-parameter from /api/v1/k-parameter
   const [kValue, setKValue] = useState<number>(0);
@@ -1638,6 +1640,20 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             {/* q-flux edge analytics — public pill, hover for full breakdown */}
             <QFluxStatsPill />
 
+            {/* Multi-wallet switcher — "+" button opens drawer with all wallets
+                and 5 templates (Savings / Trading / Mining / Agent / Faucet). */}
+            <motion.button
+              whileHover={{ scale: 1.06, rotate: 90 }}
+              whileTap={{ scale: 0.94 }}
+              onClick={() => setShowMultiWallet(true)}
+              title="Switch wallet or add a new one (5 account templates)"
+              className="flex items-center justify-center w-8 h-8 rounded-xl border transition-colors"
+              style={{ background: 'rgba(168,85,247,0.08)', borderColor: 'rgba(168,85,247,0.25)' }}
+            >
+              <ChevronDown className="w-3.5 h-3.5 text-violet-300 rotate-90" style={{ display: 'none' }} />
+              <span className="text-violet-300 text-base font-bold leading-none">+</span>
+            </motion.button>
+
             {/* Peers — clickable */}
             <motion.button
               onClick={() => setShowNetworkMap(true)}
@@ -2812,6 +2828,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       <PapersLibraryModal
         isOpen={showPapersLibrary}
         onClose={() => setShowPapersLibrary(false)}
+      />
+
+      {/* Multi-wallet drawer — opens from the "+" button next to QFluxStatsPill.
+          5 account templates + switch between existing wallets. */}
+      <MultiWalletDrawer
+        isOpen={showMultiWallet}
+        onClose={() => setShowMultiWallet(false)}
       />
 
       {/* Agent deep-dive modal — opens when user clicks an agent row in
