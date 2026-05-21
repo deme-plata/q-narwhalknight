@@ -1160,13 +1160,18 @@ const BOOTSTRAP_BLACKLIST_MULTIPLIER: u32 = 3;
 // at this height" and slows sync to ~13 b/s. Lifting the base capacity lets
 // even an unsynced node serve all 16 concurrent block-pack requests it could
 // previously only serve when fully synced.)
-pub const BLOCK_PACK_BASE_PERMITS: usize = 16;
+// v10.10.13: bumped 16 → 32 to push 48-core Epsilon harder. Worst-case
+// in-flight RAM at 32 × 200-block-cap × ~150 KB/block ≈ 960 MB, well under
+// the 50 GB cgroup high-water mark. Empirically the 16-permit cap became
+// the dominant ceiling on serving fresh-sync peers in parallel.
+pub const BLOCK_PACK_BASE_PERMITS: usize = 32;
 
 /// Adaptive block-pack semaphore — extra permits (only acquirable once fully synced).
 /// At tip, IO/memory pressure is low and we can comfortably serve more peers in parallel,
 /// speeding up bootstrap for fellow nodes still catching up.
-/// Total parallelism at tip = BASE + EXTRA = 16; during sync = BASE = 4.
-pub const BLOCK_PACK_EXTRA_PERMITS: usize = 12;
+/// v10.10.13: bumped 12 → 32. Total parallelism at tip = BASE + EXTRA = 64;
+/// during sync = BASE = 32.
+pub const BLOCK_PACK_EXTRA_PERMITS: usize = 32;
 
 /// v10.9.27: Client-side per-peer block-pack inflight cap.
 ///
@@ -1824,6 +1829,44 @@ impl UnifiedNetworkManager {
 
         // 🌐 v2.0.0: SwarmBuilder with full transport stack (libp2p 0.56)
         // 🔥 CRITICAL PATTERN: .with_websocket() is ASYNC (needs .await?), others are sync (just ?)
+        //
+        // 🧅 v10.10.12 PHASE C: when tor_policy.outbound_via_tor is enabled AND a
+        // QTorClient is initialised, register QTorTransport as an additional
+        // outbound transport. libp2p tries transports in registration order on
+        // dial; QTorTransport accepts /onion3/... natively (and clearnet too
+        // when fallback enabled), falling through MultiaddrNotSupported for
+        // anything else so the standard TCP transport handles it.
+        //
+        // The adapter at q-tor-client/src/qtor_transport.rs:144 delegates to
+        // QTorClient::connect_to_peer which uses the existing Arti circuit
+        // manager (no double-bootstrap). Output is a TcpStream that libp2p
+        // pipes Noise + Yamux over via standard upgrade machinery.
+        //
+        // 🛡️ FAIL-HONEST GATE (v10.10.12): if Q_TOR_REQUIRE_WIREGUARD=1 (default
+        // recommended posture, off until wg-bind-iface lands in task #39),
+        // refuse to enable Tor outbound when the WireGuard interface is NOT
+        // up. Reason: naked Tor traffic is MORE visible to the ISP than
+        // clearnet Quillon traffic — flagged, rate-limited, sometimes legally
+        // suspect. Under the ISP-stealth threat model, fail through to
+        // clearnet rather than expose Tor without the WireGuard wrapper.
+        // This protects the "ISP can't tell I'm using Tor" property by
+        // refusing to violate it silently.
+        let require_wireguard = std::env::var("Q_TOR_REQUIRE_WIREGUARD").ok().as_deref() == Some("1");
+        let wireguard_up = if require_wireguard {
+            // TODO(task #39): real check against bind-iface helper
+            // For now: only allow if Q_WIREGUARD_IFACE is set AND we can stat it
+            std::env::var("Q_WIREGUARD_IFACE").ok()
+                .map(|iface| std::path::Path::new(&format!("/sys/class/net/{}", iface)).exists())
+                .unwrap_or(false)
+        } else {
+            true // not requiring wg → don't gate
+        };
+        let outbound_via_tor = tor_policy.outbound_via_tor && tor_client.is_some() && wireguard_up;
+        if tor_policy.outbound_via_tor && tor_client.is_some() && require_wireguard && !wireguard_up {
+            warn!("🛡️ [FAIL-HONEST] Tor outbound requested but Q_TOR_REQUIRE_WIREGUARD=1 and WireGuard interface not up — falling through to clearnet. Set Q_TOR_REQUIRE_WIREGUARD=0 to override (NOT RECOMMENDED — exposes Tor to ISP).");
+        }
+        let qtor_for_transport = if outbound_via_tor { tor_client.clone() } else { None };
+        let qtor_clearnet_fallback = tor_policy.skip_sync_via_tor == false; // wrap clearnet too unless operator opts out
         let mut swarm = SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -1831,6 +1874,39 @@ impl UnifiedNetworkManager {
                 noise::Config::new,
                 yamux::Config::default,
             )?  // Sync
+            .with_other_transport(|keypair_for_qtor| -> Result<_, std::io::Error> {
+                use libp2p::core::transport::Transport;
+                if let Some(qtor) = qtor_for_transport.as_ref() {
+                    info!("🧅 [PHASE C] Wiring QTorTransport as outbound transport (clearnet_fallback={})", qtor_clearnet_fallback);
+                    let qtor_transport = q_tor_client::QTorTransport::new(qtor.clone())
+                        .with_clearnet_fallback(qtor_clearnet_fallback);
+                    // Upgrade with Noise + Yamux so libp2p treats it as a full transport.
+                    // The Noise config closure expects the keypair by reference at upgrade time.
+                    let noise_cfg = noise::Config::new(keypair_for_qtor)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("noise init: {e}")))?;
+                    let upgraded = qtor_transport
+                        .upgrade(libp2p::core::upgrade::Version::V1)
+                        .authenticate(noise_cfg)
+                        .multiplex(yamux::Config::default())
+                        .boxed();
+                    Ok(upgraded)
+                } else {
+                    // Tor disabled or no client — return an empty pluggable transport.
+                    // Use a MemoryTransport-shaped no-op: every dial errors with
+                    // MultiaddrNotSupported so libp2p falls through to the TCP
+                    // transport above.
+                    debug!("🧅 [PHASE C] Tor outbound disabled (tor_policy.outbound_via_tor=false or no tor_client)");
+                    let noop = libp2p::core::transport::dummy::DummyTransport::new();
+                    let noise_cfg = noise::Config::new(keypair_for_qtor)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("noise init: {e}")))?;
+                    let upgraded = noop
+                        .upgrade(libp2p::core::upgrade::Version::V1)
+                        .authenticate(noise_cfg)
+                        .multiplex(yamux::Config::default())
+                        .boxed();
+                    Ok(upgraded)
+                }
+            })?
             .with_quic()  // Sync
             .with_dns()?  // Sync
             .with_websocket(
@@ -6590,7 +6666,36 @@ impl UnifiedNetworkManager {
                                 };
 
                                 if has_address {
-                                    info!("🔗 [PEER CHECK] Peer {} not connected but has cached address, attempting dial", pid);
+                                    // v10.10.13 fix: prior code logged "attempting dial" but
+                                    // never actually called swarm.dial() — the libp2p
+                                    // request-response layer expects an established connection,
+                                    // it does NOT auto-dial cached addrs. The cached "Peer not
+                                    // connected but has cached address" loop in v10.10.11/.12
+                                    // caused 100% DialFailure on every block-pack request even
+                                    // with gossipsub mesh up (proven on q-test-v10.10.11-eps +
+                                    // q-test-v10.10.11-delta probes 2026-05-21). Now actually
+                                    // dial each cached address before returning the peer ID;
+                                    // dial completes async on the swarm event loop and is
+                                    // typically connected by the time the request-response
+                                    // handler fires.
+                                    let to_dial: Vec<libp2p::Multiaddr> = match self.peer_addresses.try_read() {
+                                        Ok(addrs) => addrs.get(&pid).cloned().unwrap_or_default(),
+                                        Err(_) => Vec::new(),
+                                    };
+                                    info!(
+                                        "🔗 [PEER CHECK] Peer {} not connected — dialing {} cached addr(s)",
+                                        pid,
+                                        to_dial.len()
+                                    );
+                                    for addr in to_dial {
+                                        match self.swarm.dial(addr.clone()) {
+                                            Ok(()) => debug!("[PEER CHECK] dial submitted: {} -> {}", pid, addr),
+                                            Err(e) => debug!(
+                                                "[PEER CHECK] dial {} -> {} skipped (likely in-progress): {:?}",
+                                                pid, addr, e
+                                            ),
+                                        }
+                                    }
                                     Some(pid)
                                 } else {
                                     // 🚨 v2.1.7: FAIL FAST - no point trying to dial without address

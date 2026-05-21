@@ -348,7 +348,7 @@ impl BalanceSmt {
         // BalanceSmt::open() refuses to load until rebuild is rerun.
         {
             let mut clear_batch = WriteBatch::default();
-            clear_batch.delete_range_cf(&cf, &[0x00u8], &[0xFFu8; 64]);
+            clear_batch.delete_range_cf(&cf, &[0x00u8][..], &[0xFFu8; 64][..]);
             clear_batch.put_cf(&cf, KEY_REBUILD_IN_PROGRESS, &[1u8]);
             self.db.write(clear_batch).context("truncating SMT CF before rebuild")?;
         }

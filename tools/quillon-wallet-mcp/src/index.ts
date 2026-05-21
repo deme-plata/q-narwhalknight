@@ -3026,6 +3026,192 @@ server.tool(
   }
 );
 
+// ────────────────────────────────────────────────────────────────────
+// v2.5.0: tx_watch + celebration framework
+// ────────────────────────────────────────────────────────────────────
+// Polls a tx hash until it confirms (or times out), then renders a
+// context-appropriate ASCII celebration banner. Other tools (dex_swap,
+// deploy_token, send_qug, send_token) can reuse the celebration helper
+// to bundle "tx submitted → wait → celebrate" in one shot.
+//
+// Five styles, auto-selected from `label` keywords if not specified:
+//   - fireworks (default): big-bang burst, 3-frame scroll effect
+//   - rocket: lift-off art, good for deploys + "launch"
+//   - gift: present + ribbon, used when label contains "gift|received|drop"
+//   - swap: yin-yang flow + arrows, used for dex_swap
+//   - minimal: tight 3-line block, for batch-script callers who don't want noise
+// ────────────────────────────────────────────────────────────────────
+
+type CelebrationStyle = 'fireworks' | 'rocket' | 'gift' | 'swap' | 'minimal';
+
+function autoStyle(label?: string): CelebrationStyle {
+  if (!label) return 'fireworks';
+  const l = label.toLowerCase();
+  if (/gift|received|drop|reward|airdrop/.test(l)) return 'gift';
+  if (/deploy|launch|mint|create/.test(l)) return 'rocket';
+  if (/swap|exchange|trade|dex/.test(l)) return 'swap';
+  return 'fireworks';
+}
+
+function renderCelebration(
+  style: CelebrationStyle,
+  label: string,
+  tx: {
+    hash: string;
+    block_height?: number | null;
+    confirmations?: number | null;
+    timestamp?: number | null;
+  },
+): string {
+  const shortHash = tx.hash.slice(0, 8) + '…' + tx.hash.slice(-6);
+  const block = tx.block_height != null ? `#${tx.block_height.toLocaleString()}` : '#pending';
+  const confs = tx.confirmations ?? 0;
+  const lab = label || 'transaction confirmed';
+
+  switch (style) {
+    case 'fireworks':
+      return [
+        '',
+        '              ·        ✨        ·   ✨    ·',
+        '          ✨       💥     ✨        💥      ✨',
+        '       💥     ✨     ╭─────────────────╮     ✨   💥',
+        '    ✨      💥       │   CONFIRMED ✓   │      💥      ✨',
+        '       💥     ✨     ╰─────────────────╯     ✨   💥',
+        '          ✨       💥     ✨        💥      ✨',
+        '              ·        ✨        ·   ✨    ·',
+        '',
+        `   ${lab}`,
+        `   tx  ${shortHash}`,
+        `   block ${block} · ${confs} confirmation${confs === 1 ? '' : 's'}`,
+        '',
+      ].join('\n');
+
+    case 'rocket':
+      return [
+        '',
+        '                       △',
+        '                      △△△',
+        '                     △ ★ △           CONFIRMED ✓',
+        '                     △ ★ △           ',
+        '                     △ ★ △           ' + lab,
+        '                     ▕═══▏',
+        '                      ║║║              tx  ' + shortHash,
+        '                     ▕▒▒▒▏             block ' + block,
+        '                    ▕▒▒▒▒▒▏            ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+        '                     ◢◢ ◣◣',
+        '                    ◢◢   ◣◣',
+        '                  · ◢ ▓▓▓ ◣ ·',
+        '              · ✨   ▓▓▓▓▓   ✨ ·',
+        '            ·       ▓▓▓▓▓▓▓       ·',
+        '          ·     ✨   ▓▓▓▓▓   ✨     ·',
+        '        ·             ✨ ✨             ·',
+        '',
+      ].join('\n');
+
+    case 'gift':
+      return [
+        '',
+        '                       .--.',
+        '                  __ /    .._',
+        '            .--. ╱  ◣◣◣◣ ╱  .--.',
+        '           ╱    │ ▓▓▓▓▓▓ │     ╲',
+        '        ╭──┤    │ ▓ ★★ ▓ │      ├──╮',
+        '        │  │    │ ▓▓▓▓▓▓ │      │  │       🎁  GIFT RECEIVED  🎁',
+        '        ╰──┤    │ ▓▓▓▓▓▓ │      ├──╯',
+        '           ╲    │  ╲╲╱╱  │     ╱            ' + lab,
+        '            ╲___╲══════╱___╱',
+        '                ▔▔▔▔▔▔▔                    tx  ' + shortHash,
+        '         ✨        ·        ✨              block ' + block,
+        '            ·  ✨     ✨  ·                 ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+        '         ✨        ·        ✨',
+        '',
+      ].join('\n');
+
+    case 'swap':
+      return [
+        '',
+        '          ◢◤    ╔═══════════╗    ◢◤',
+        '       ◢◤       ║   SWAP    ║       ◢◤',
+        '    ◢◤          ║ CONFIRMED ║          ◢◤',
+        '       ◥◣       ╚═══════════╝       ◥◣',
+        '          ◥◣        ⇆  ⇆        ◥◣',
+        '',
+        '   ' + lab,
+        '   tx  ' + shortHash,
+        '   block ' + block + '  ·  ' + confs + ' confirmation' + (confs === 1 ? '' : 's'),
+        '',
+      ].join('\n');
+
+    case 'minimal':
+      return `✓ ${lab}\n  tx  ${shortHash}  ·  block ${block}  ·  ${confs} conf`;
+  }
+}
+
+server.tool(
+  "tx_watch",
+  "Wait for a transaction hash to confirm on-chain, then return a context-appropriate celebration banner. Polls /api/v1/transactions/<hash> every 2 seconds until status flips from in_mempool→confirmed (or timeout). Bundles wait+verify+celebrate; use after any tx-producing tool (send_qug, send_token, dex_swap, deploy_token) when you want the user to feel the confirmation land. Auto-picks style from label keywords (gift/received/drop → gift, deploy/launch/mint → rocket, swap/trade → swap, else fireworks).",
+  {
+    tx_hash: z.string().describe("Transaction hash (with or without 0x prefix — auto-stripped)."),
+    label: z.string().optional().describe("Short human-readable description of what the tx did (e.g., 'Gift received from founder', '5 QUG → QUGUSD swap', 'DEFI5 mint'). Drives auto-style + appears in the banner."),
+    style: z.enum(['fireworks', 'rocket', 'gift', 'swap', 'minimal']).optional().describe("Override the auto-detected animation style."),
+    timeout_secs: z.number().int().min(2).max(120).optional().describe("Max seconds to wait (default 30). Falls through with a 'still pending' message if exceeded."),
+  },
+  async ({ tx_hash, label, style, timeout_secs }) => {
+    const cleanHash = tx_hash.trim().replace(/^0x/i, '');
+    const timeoutMs = (timeout_secs ?? 30) * 1000;
+    const chosenStyle: CelebrationStyle = style ?? autoStyle(label);
+    const start = Date.now();
+    let lastStatus = 'unknown';
+    let confirmedTx: any = null;
+
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const res = await api(`/transactions/${cleanHash}`, "GET") as any;
+        const data = res?.data ?? res;
+        if (data?.status === 'confirmed') {
+          confirmedTx = data;
+          break;
+        }
+        if (data?.status) lastStatus = data.status;
+      } catch (e) {
+        // tx may not have propagated yet — keep polling
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    if (!confirmedTx) {
+      const waited = Math.floor((Date.now() - start) / 1000);
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `⏳ tx ${cleanHash.slice(0, 8)}… still ${lastStatus} after ${waited}s.`,
+            ``,
+            `Quillon target cadence is ~1 block/sec but propagation + finality can lag`,
+            `2–10s during heavy load. Options:`,
+            `  • Re-run tx_watch tx_hash=${cleanHash} timeout_secs=60 — it's idempotent`,
+            `  • Hit the API directly: curl https://quillon.xyz/api/v1/transactions/${cleanHash}`,
+            `  • If still pending after 60s the tx was likely rejected during validation`,
+            `    (check journalctl on the receiving node for 'tx_validation_failed').`,
+          ].join("\n"),
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: renderCelebration(chosenStyle, label ?? 'transaction confirmed', {
+          hash: confirmedTx.hash ?? cleanHash,
+          block_height: confirmedTx.block_height,
+          confirmations: confirmedTx.confirmations,
+          timestamp: confirmedTx.timestamp,
+        }),
+      }],
+    };
+  }
+);
+
 // ============================================================
 // START SERVER
 // ============================================================

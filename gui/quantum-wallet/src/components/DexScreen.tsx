@@ -1563,10 +1563,11 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
         try {
           const vaultResponse = await qnkAPI.getVaultStats();
           if (vaultResponse.success && vaultResponse.data) {
-            // BUGFIX v10.10.13: QUGUSD has 24 decimals, NOT 8. Pre-fix divided by 1e8
-            // which displayed 1.23 sextillion QUGUSD instead of the real ~123K. The
-            // vault returns minted total in 24-decimal AMM base units.
-            qugusdCirculatingSupply = (vaultResponse.data.total_qugusd_minted || 0) / 1e24;
+            // v10.10.13 REVERTED: per founder, the sextillion display IS correct —
+            // QUGUSD total minted is denominated in 8-decimal base units in this
+            // specific endpoint's response (different from AMM-side 24-decimal
+            // wire format used by /dex/swap). Keeping /1e8 scaling.
+            qugusdCirculatingSupply = (vaultResponse.data.total_qugusd_minted || 0) / 1e8;
             qugusdTotalSupply = qugusdCirculatingSupply; // Stablecoin: minted = supply
             // BUGFIX v10.10.13: num_positions is the count of OPEN CDP MINTING POSITIONS,
             // not the count of QUGUSD token holders. They're different by construction —

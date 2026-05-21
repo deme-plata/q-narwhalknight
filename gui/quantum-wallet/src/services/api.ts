@@ -3503,6 +3503,143 @@ export async function claimQCreditYield(wallet: string, position_index: number, 
   return data.data;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// v10.10.13: Trustless tip-proof verification scaffolding
+//
+// Plan ref: /root/.claude/plans/robust-shimmying-hearth.md (Part 1).
+// Design philosophy: papers/five-mirrors-2026.pdf §6 (Wide-Body Jet) —
+// the verifier is the boring substrate the AI agent uses without
+// ceremony. Phase-honest: while wasm is a stub the `phase` field
+// reports "scaffold-v0" so callers can't accidentally treat the stub
+// as a real proof.
+//
+// Backend shape: handlers.rs:1527-1548
+// Backend producer: live, populated by block-producer task on each new tip
+// Wasm verifier: crates/q-ivc-verifier-wasm/src/lib.rs (Rust ready, no
+//                pkg/ yet — dynamic import falls through to stub when absent)
+// ─────────────────────────────────────────────────────────────────
+
+export interface TipProofBlockHeader {
+  height: number;
+  parent_hash: string;
+  tx_root: string;
+  state_root: string;
+  timestamp: number;
+  producer_id: string;
+}
+
+export interface TipProofVerifierAdvice {
+  scheme: string;
+  verify_target_ms: number;
+  anchor_height: number;
+  anchor_state_hex: string;
+  step_count: number;
+  note: string;
+}
+
+export interface TipProofResponse {
+  tip_height: number;
+  state_root: string;
+  block_header: TipProofBlockHeader;
+  proof_version: string; // "tip-blake3-fs-v1.1" | "latticeguard-rlwe-v1" | "placeholder-v0"
+  proof_size_bytes: number;
+  proof_b64: string;
+  verifier_advice: TipProofVerifierAdvice;
+}
+
+export type TipProofPhase = 'scaffold-v0' | 'wasm-v1' | 'wasm-v2';
+
+export interface TipProofVerifyResult {
+  ok: boolean;
+  verifier_version: string;
+  verify_ms: number;
+  phase: TipProofPhase;
+  tip_height: number;
+  notes: string[];
+}
+
+// Pulls the live tip proof. No auth — proof is public-input only.
+export async function getTipProof(baseUrl?: string): Promise<TipProofResponse> {
+  const url = baseUrl || getConnectionInfo().apiBaseUrl;
+  const resp = await fetch(`${url}/api/v1/proof/tip`);
+  const data = await resp.json();
+  if (!data.success) throw new Error(data.error || 'Failed to fetch tip proof');
+  return data.data;
+}
+
+// Verifies a tip proof. Dynamic-imports q-ivc-verifier-wasm if present;
+// falls through to a structural stub if pkg/ hasn't been built yet.
+// Phase field reports which path was taken so consumers can degrade UI.
+export async function verifyTipProof(proof: TipProofResponse): Promise<TipProofVerifyResult> {
+  const t0 = performance.now();
+
+  // Phase-1: try the real wasm verifier
+  try {
+    // @ts-expect-error — pkg/ may not exist yet; dynamic import handles absence
+    const wasm = await import('q-ivc-verifier-wasm').catch(() => null);
+    if (wasm && typeof wasm.verify_proof_bytes === 'function') {
+      const stateRootBytes = hexToBytes(proof.state_root.replace(/^0x/, ''));
+      const proofBytes = base64ToBytes(proof.proof_b64);
+      const ok = wasm.verify_proof_bytes(stateRootBytes, BigInt(proof.tip_height), proofBytes);
+      const verify_ms = performance.now() - t0;
+      return {
+        ok,
+        verifier_version: wasm.verifier_version?.() ?? proof.proof_version,
+        verify_ms,
+        phase: 'wasm-v1',
+        tip_height: proof.tip_height,
+        notes: ok ? [] : ['wasm verifier returned false — chain operator may be misreporting state'],
+      };
+    }
+  } catch (e) {
+    // Fall through to stub
+  }
+
+  // Phase-0: structural stub. Asserts the response shape and the
+  // proof_version is known; does NOT verify the cryptography.
+  // Returns ok=true with phase=scaffold-v0 so the UI works today; the
+  // pill renders the scaffold tag prominently so users see they aren't
+  // getting real verification yet.
+  const verify_ms = performance.now() - t0;
+  const knownVersion = /^(tip-blake3-fs-v|latticeguard-rlwe-v|latticefold-modulesis-v|placeholder-v)/.test(proof.proof_version);
+  const structurallyOk =
+    typeof proof.tip_height === 'number' &&
+    proof.tip_height > 0 &&
+    typeof proof.state_root === 'string' &&
+    proof.state_root.length >= 32 &&
+    typeof proof.proof_b64 === 'string' &&
+    proof.proof_b64.length > 0 &&
+    knownVersion;
+  return {
+    ok: structurallyOk,
+    verifier_version: proof.proof_version,
+    verify_ms,
+    phase: 'scaffold-v0',
+    tip_height: proof.tip_height,
+    notes: [
+      'scaffold verifier — only structural sanity checks performed',
+      'real cryptographic verification activates when q-ivc-verifier-wasm is built (wasm-pack build --target web)',
+      `proof_version reported by server: ${proof.proof_version}`,
+    ],
+  };
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < clean.length; i += 2) {
+    bytes[i / 2] = parseInt(clean.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 // Export singleton instance
 export const qnkAPI = new QNarwhalKnightAPI();
 

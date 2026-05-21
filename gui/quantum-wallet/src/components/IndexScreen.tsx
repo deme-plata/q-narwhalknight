@@ -53,25 +53,31 @@ interface IndexFund {
 const DEMO_INDEX_FUNDS: IndexFund[] = [
   {
     id: 'qnk10',
-    name: 'QNK Top 10',
+    name: 'QNK Top 10 — Quillon Native Edition',
     symbol: 'QNK10',
-    navPerShare: 1.2456,
-    navChange24h: 3.45,
+    navPerShare: 8682.0, // 3× QUG @ ~$2894 (matches backend handlers.rs:11578 NAV multiplier)
+    navChange24h: 0.65,
     totalSupply: 1250000,
-    tvl: 1557000,
+    tvl: 4341000,
+    // v10.10.12: All 10 components are REAL Quillon-native tokens (was placeholder
+    // QBTC/QETH/QSOL/QLINK/QDOT/QAVAX/QMATIC/QATOM/QUNI — none of those exist on
+    // the chain). The UI was rendering only 2 of those because lookups failed.
+    // Selection rationale: base asset (QUG), stablecoin floor (QUGUSD), 4 real
+    // bridge wraps (wBTC/wETH/wZEC/wIRON), 2 native L2/L3 yield primitives
+    // (QCREDIT/QSHARE), 2 commemoratives (CLAI/VAULT — real deployed tokens).
     components: [
-      { symbol: 'QUG', name: 'Quillon', weight: 25.2, targetWeight: 25, price: 1.00, priceChange24h: 0.5, holdings: 389250, value: 389250 },
-      { symbol: 'QBTC', name: 'Quantum Bitcoin', weight: 20.1, targetWeight: 20, price: 45000.00, priceChange24h: 2.3, holdings: 6.95, value: 312750 },
-      { symbol: 'QETH', name: 'Quantum Ethereum', weight: 15.3, targetWeight: 15, price: 2800.00, priceChange24h: -1.2, holdings: 85.0, value: 238000 },
-      { symbol: 'QSOL', name: 'Quantum Solana', weight: 10.0, targetWeight: 10, price: 120.00, priceChange24h: 5.4, holdings: 1297.5, value: 155700 },
-      { symbol: 'QLINK', name: 'Quantum Link', weight: 8.1, targetWeight: 8, price: 15.00, priceChange24h: 1.8, holdings: 8413.2, value: 126198 },
-      { symbol: 'QDOT', name: 'Quantum Polkadot', weight: 6.8, targetWeight: 7, price: 7.50, priceChange24h: -0.5, holdings: 14124, value: 105930 },
-      { symbol: 'QAVAX', name: 'Quantum Avalanche', weight: 5.5, targetWeight: 5, price: 35.00, priceChange24h: 3.2, holdings: 2448.6, value: 85701 },
-      { symbol: 'QMATIC', name: 'Quantum Polygon', weight: 4.0, targetWeight: 5, price: 0.85, priceChange24h: -2.1, holdings: 73294, value: 62300 },
-      { symbol: 'QATOM', name: 'Quantum Cosmos', weight: 3.0, targetWeight: 3, price: 9.50, priceChange24h: 1.5, holdings: 4920.0, value: 46740 },
-      { symbol: 'QUNI', name: 'Quantum Uniswap', weight: 2.0, targetWeight: 2, price: 7.20, priceChange24h: 0.8, holdings: 4331.25, value: 31185 },
+      { symbol: 'QUG',     name: 'Quillon',            weight: 30, targetWeight: 30, price: 2894.00, priceChange24h:  0.5, holdings: 450,       value: 1302300 },
+      { symbol: 'QUGUSD',  name: 'Quillon USD',        weight: 20, targetWeight: 20, price: 1.00,    priceChange24h:  0.0, holdings: 868200,    value: 868200 },
+      { symbol: 'wBTC',    name: 'Wrapped Bitcoin',    weight: 12, targetWeight: 12, price: 100000,  priceChange24h: -0.3, holdings: 5.21,      value: 520920 },
+      { symbol: 'wETH',    name: 'Wrapped Ethereum',   weight: 10, targetWeight: 10, price: 3500,    priceChange24h:  1.2, holdings: 124.03,    value: 434100 },
+      { symbol: 'QSHARE',  name: 'Quillon Share',      weight:  8, targetWeight:  8, price: 100.00,  priceChange24h:  1.2, holdings: 3472.8,    value: 347280 },
+      { symbol: 'QCREDIT', name: 'Quillon Credit',     weight:  7, targetWeight:  7, price: 1.12,    priceChange24h:  0.4, holdings: 271312,    value: 303870 },
+      { symbol: 'wZEC',    name: 'Wrapped Zcash',      weight:  5, targetWeight:  5, price: 35,      priceChange24h:  2.1, holdings: 6201.5,    value: 217050 },
+      { symbol: 'wIRON',   name: 'Wrapped Iron Fish',  weight:  4, targetWeight:  4, price: 12,      priceChange24h: -0.8, holdings: 14470,     value: 173640 },
+      { symbol: 'CLAI',    name: 'Claude AI Commemorative', weight: 2, targetWeight: 2, price: 1.50,  priceChange24h:  4.5, holdings: 57880,     value: 86820 },
+      { symbol: 'VAULT',   name: 'Quillon Vault',      weight:  2, targetWeight:  2, price: 0.85,    priceChange24h:  0.0, holdings: 102141,    value: 86820 },
     ],
-    managementFee: 0.5,
+    managementFee: 0.10, // 0.1% mint/redeem fee (matches handlers.rs:11586 fee_rate=0.999)
     methodology: 'market-cap',
     lastRebalance: Date.now() - 7 * 24 * 60 * 60 * 1000,
     nextRebalance: Date.now() + 7 * 24 * 60 * 60 * 1000,

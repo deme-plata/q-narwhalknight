@@ -997,129 +997,188 @@ export default function CustomTokensCard({ onSendToken }: CustomTokensCardProps)
                   </p>
                 </div>
               ) : (
-                <div className="space-y-3">
+                {/* v10.10.13: REDESIGNED — scannable row with USD-value anchor.
+                    Was a wall of dense text; now a clean grid: avatar | identity | data | actions.
+                    Portfolio-share bar shows relative weight visually so largest holdings pop.
+                    Token category drives the left-stripe color (Core / Stable / Wrapped / RWA / Yield / Meme).
+                    Address becomes click-to-copy chip — no longer a full row. */}
+                <div className="space-y-2">
                   <AnimatePresence mode="popLayout" initial={false}>
-                  {tokensWithBalance.map((token) => (
-                    <motion.div
-                      key={token.contractAddress}
-                      layout
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.95 }}
-                      transition={{ duration: 0.2, layout: { duration: 0.3, type: 'spring', stiffness: 300, damping: 30 } }}
-                      className={`p-4 rounded-xl border ${token.symbol?.toUpperCase() === 'VAULT' ? 'cursor-pointer hover:border-purple-400/50' : ''} ${token.symbol?.toUpperCase() === 'FORGE' ? 'cursor-pointer hover:border-orange-400/50' : ''}`}
-                      style={{
-                        background: token.symbol?.toUpperCase() === 'VAULT'
-                          ? 'linear-gradient(135deg, rgba(168, 130, 255, 0.1), rgba(108, 92, 231, 0.08))'
-                          : token.symbol?.toUpperCase() === 'FORGE'
-                          ? 'linear-gradient(135deg, rgba(184, 115, 51, 0.12), rgba(212, 175, 55, 0.08))'
-                          : 'rgba(139, 92, 246, 0.05)',
-                        borderColor: token.symbol?.toUpperCase() === 'VAULT'
-                          ? 'rgba(168, 130, 255, 0.35)'
-                          : token.symbol?.toUpperCase() === 'FORGE'
-                          ? 'rgba(184, 115, 51, 0.35)'
-                          : 'rgba(139, 92, 246, 0.2)',
-                      }}
-                      onClick={() => {
-                        if (token.symbol?.toUpperCase() === 'VAULT') {
-                          setShowVaultModal(true);
-                        } else if (token.symbol?.toUpperCase() === 'FORGE') {
-                          setShowForgeModal(true);
-                        }
-                      }}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <h4 className="font-semibold text-white">{token.symbol}</h4>
-                            {token.symbol?.toUpperCase() === 'VAULT' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: 'linear-gradient(135deg, #6c5ce7, #a882ff)', color: 'white' }}>RWA</span>
-                            )}
-                            {token.symbol?.toUpperCase() === 'FORGE' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: 'linear-gradient(135deg, #B87333, #D4AF37)', color: 'white' }}>RWA</span>
-                            )}
-                            <span className="text-xs text-gray-500">•</span>
-                            <span className="text-xs text-gray-400">{token.name}</span>
-                            {(token.change24h ?? 0) !== 0 && (
-                              <span className={`text-xs flex items-center gap-1 transition-colors duration-500 ${(token.change24h ?? 0) > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                <TrendingUp className={`w-3 h-3 ${(token.change24h ?? 0) < 0 ? 'rotate-180' : ''}`} />
-                                {Math.abs(token.change24h ?? 0).toFixed(1)}%
-                              </span>
+                  {tokensWithBalance.map((token) => {
+                    const sym = (token.symbol ?? '').toUpperCase();
+                    // Category → visual identity
+                    const isVault = sym === 'VAULT';
+                    const isForge = sym === 'FORGE';
+                    const category =
+                      sym === 'QUG' || sym === 'QUGUSD' ? 'core' :
+                      isVault || isForge ? 'rwa' :
+                      sym === 'QSHARE' || sym === 'QCREDIT' ? 'yield' :
+                      /^W(BTC|ETH|ZEC|IRON)$/.test(sym) ? 'wrapped' :
+                      sym === 'CLAI' ? 'commemorative' :
+                      'meme'; // everything else (SMOL/WOJAK/LOLZ/YOLO/STONK/DERP/BORK/CHAD/HODL/FOMO/CHONK/DOGE2/MOON/etc)
+                    const accent = {
+                      core:          { stripe: '#06b6d4', glow: 'rgba(6,182,212,0.18)',   bg: 'rgba(6,182,212,0.04)',   ring: 'rgba(6,182,212,0.30)' },
+                      stable:        { stripe: '#10b981', glow: 'rgba(16,185,129,0.18)', bg: 'rgba(16,185,129,0.04)', ring: 'rgba(16,185,129,0.30)' },
+                      wrapped:       { stripe: '#8b5cf6', glow: 'rgba(139,92,246,0.18)', bg: 'rgba(139,92,246,0.04)', ring: 'rgba(139,92,246,0.30)' },
+                      rwa:           { stripe: isForge ? '#B87333' : '#a882ff', glow: 'rgba(168,130,255,0.18)', bg: 'rgba(168,130,255,0.05)', ring: 'rgba(168,130,255,0.35)' },
+                      yield:         { stripe: '#22c55e', glow: 'rgba(34,197,94,0.18)', bg: 'rgba(34,197,94,0.04)', ring: 'rgba(34,197,94,0.30)' },
+                      commemorative: { stripe: '#06b6d4', glow: 'rgba(6,182,212,0.18)', bg: 'rgba(6,182,212,0.04)', ring: 'rgba(6,182,212,0.30)' },
+                      meme:          { stripe: '#f59e0b', glow: 'rgba(245,158,11,0.18)', bg: 'rgba(245,158,11,0.04)', ring: 'rgba(245,158,11,0.30)' },
+                    }[category];
+
+                    const valueUsd = token.valueUsd ?? 0;
+                    const portfolioPct = totalPortfolioValue > 0 ? (valueUsd / totalPortfolioValue) * 100 : 0;
+                    const change24h = token.change24h ?? 0;
+                    const priceUsd = token.priceUsd ?? 0;
+                    const addrShort = `${token.contractAddress.substring(0, 8)}…${token.contractAddress.substring(token.contractAddress.length - 6)}`;
+
+                    return (
+                      <motion.div
+                        key={token.contractAddress}
+                        layout
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        whileHover={{ y: -1 }}
+                        transition={{ duration: 0.2, layout: { duration: 0.3, type: 'spring', stiffness: 300, damping: 30 } }}
+                        className={`relative overflow-hidden rounded-xl border ${(isVault || isForge) ? 'cursor-pointer' : ''}`}
+                        style={{ background: accent.bg, borderColor: accent.ring }}
+                        onClick={() => {
+                          if (isVault) setShowVaultModal(true);
+                          else if (isForge) setShowForgeModal(true);
+                        }}
+                      >
+                        {/* Category stripe — full-height left accent */}
+                        <div className="absolute left-0 top-0 bottom-0 w-1" style={{ background: accent.stripe, boxShadow: `0 0 12px ${accent.glow}` }} />
+
+                        <div className="pl-4 pr-3 py-3 flex items-center gap-3">
+                          {/* Avatar — gradient circle with symbol initial */}
+                          <div
+                            className="shrink-0 w-11 h-11 rounded-full flex items-center justify-center font-black text-white text-sm shadow-lg"
+                            style={{
+                              background: `linear-gradient(135deg, ${accent.stripe}, ${accent.stripe}aa)`,
+                              boxShadow: `0 4px 16px ${accent.glow}`,
+                            }}
+                          >
+                            {sym.slice(0, 3)}
+                          </div>
+
+                          {/* Identity column — symbol + name + tags */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="font-bold text-white text-base leading-tight">{token.symbol}</h4>
+                              {(isVault || isForge) && (
+                                <span
+                                  className="text-[9px] px-1.5 py-0.5 rounded-full font-black tracking-wider"
+                                  style={{
+                                    background: isVault ? 'linear-gradient(135deg, #6c5ce7, #a882ff)' : 'linear-gradient(135deg, #B87333, #D4AF37)',
+                                    color: 'white',
+                                  }}
+                                >RWA</span>
+                              )}
+                              {change24h !== 0 && (
+                                <span className={`text-[10px] font-bold flex items-center gap-0.5 px-1.5 py-0.5 rounded-full transition-colors duration-500 ${change24h > 0 ? 'bg-green-500/15 text-green-300' : 'bg-red-500/15 text-red-300'}`}>
+                                  <TrendingUp className={`w-2.5 h-2.5 ${change24h < 0 ? 'rotate-180' : ''}`} />
+                                  {Math.abs(change24h).toFixed(1)}%
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-gray-400 truncate leading-tight">{token.name}</div>
+                            {/* Balance + per-unit price — compact secondary row */}
+                            <div className="text-[11px] text-gray-300 mt-0.5 flex items-baseline gap-2">
+                              <span className="text-purple-300 font-medium transition-all duration-500">{formatLargeBalance(token.balance)}</span>
+                              {priceUsd > 0 && (
+                                <span className="text-gray-500">@ {formatUsd(priceUsd)}</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Value column — USD value as the visual anchor + portfolio % bar */}
+                          <div className="shrink-0 text-right">
+                            {valueUsd > 0 ? (
+                              <>
+                                <div className="text-lg font-black text-emerald-300 leading-none transition-all duration-500" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                                  {formatUsd(valueUsd)}
+                                </div>
+                                {portfolioPct > 0 && (
+                                  <div className="mt-1.5 w-24 ml-auto">
+                                    <div className="flex justify-end text-[9px] text-gray-400 mb-0.5 font-semibold tracking-wide">{portfolioPct.toFixed(1)}%</div>
+                                    <div className="h-1 rounded-full bg-white/5 overflow-hidden">
+                                      <motion.div
+                                        initial={{ width: 0 }}
+                                        animate={{ width: `${Math.min(100, portfolioPct)}%` }}
+                                        transition={{ duration: 0.6, ease: 'easeOut' }}
+                                        className="h-full rounded-full"
+                                        style={{ background: `linear-gradient(90deg, ${accent.stripe}, ${accent.stripe}88)` }}
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <div className="text-xs text-gray-500 italic">unvalued</div>
                             )}
                           </div>
-                          <div className="flex items-baseline gap-3">
-                            <p className="text-2xl font-bold text-purple-300 transition-all duration-500">
-                              {formatLargeBalance(token.balance)}
-                            </p>
-                            {(token.valueUsd ?? 0) > 0 && (
-                              <p className="text-sm text-green-400 font-medium transition-all duration-500">
-                                ≈ {formatUsd(token.valueUsd ?? 0)}
-                              </p>
-                            )}
+
+                          {/* Action column — icon-only buttons, vertical stack on narrow */}
+                          <div className="shrink-0 flex flex-col gap-1.5">
+                            <motion.button
+                              whileHover={{ scale: 1.08 }}
+                              whileTap={{ scale: 0.92 }}
+                              onClick={(e) => { e.stopPropagation(); openStakeModal(token); }}
+                              title={`Stake ${token.symbol}`}
+                              className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors"
+                              style={{
+                                background: 'rgba(234, 179, 8, 0.12)',
+                                border: '1px solid rgba(234, 179, 8, 0.35)',
+                                color: 'rgb(253, 224, 71)',
+                              }}
+                            >
+                              <Lock className="w-4 h-4" />
+                            </motion.button>
+                            <motion.button
+                              whileHover={{ scale: 1.08 }}
+                              whileTap={{ scale: 0.92 }}
+                              onClick={(e) => { e.stopPropagation(); onSendToken(token.symbol, token.contractAddress); }}
+                              title={`Send ${token.symbol}`}
+                              disabled={token.balance === 0}
+                              className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors disabled:opacity-40"
+                              style={{
+                                background: 'rgba(59, 130, 246, 0.12)',
+                                border: '1px solid rgba(59, 130, 246, 0.35)',
+                                color: 'rgb(147, 197, 253)',
+                              }}
+                            >
+                              <Send className="w-4 h-4" />
+                            </motion.button>
                           </div>
-                          <div className="flex items-center gap-3 mt-1 flex-wrap">
-                            {(token.priceUsd ?? 0) > 0 && (
-                              <p className="text-xs text-gray-400 transition-all duration-500">
-                                @ {formatUsd(token.priceUsd ?? 0)} each
-                              </p>
-                            )}
-                            {/* v3.6.12: Volume and Liquidity from DEX */}
+                        </div>
+
+                        {/* Footer strip — address chip + optional vol/liq data */}
+                        <div className="pl-4 pr-3 pb-2 pt-0 flex items-center justify-between gap-2 text-[10px]">
+                          <motion.button
+                            whileTap={{ scale: 0.95 }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(token.contractAddress);
+                            }}
+                            title="Copy address"
+                            className="font-mono text-gray-500 hover:text-gray-300 hover:bg-white/5 px-1.5 py-0.5 rounded transition-colors"
+                          >
+                            {addrShort}
+                          </motion.button>
+                          <div className="flex items-center gap-2">
                             {(token.volume24h ?? 0) > 0 && (
-                              <p className="text-xs text-blue-400 transition-all duration-500">
-                                Vol: {formatUsd(token.volume24h ?? 0)}
-                              </p>
+                              <span className="text-blue-400/80">Vol {formatUsd(token.volume24h ?? 0)}</span>
                             )}
                             {(token.liquidity ?? 0) > 0 && (
-                              <p className="text-xs text-cyan-400 transition-all duration-500">
-                                Liq: {formatUsd(token.liquidity ?? 0)}
-                              </p>
+                              <span className="text-cyan-400/80">Liq {formatUsd(token.liquidity ?? 0)}</span>
                             )}
                           </div>
-                          <div className="flex items-center mt-1">
-                            <p className="text-xs text-gray-500 font-mono truncate">
-                              {token.contractAddress.substring(0, 8)}...{token.contractAddress.substring(token.contractAddress.length - 6)}
-                            </p>
-                          </div>
                         </div>
-
-                        {/* Action Buttons */}
-                        <div className="flex items-center gap-2">
-                          {/* Stake Button */}
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => openStakeModal(token)}
-                            className="px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2"
-                            style={{
-                              background: 'linear-gradient(135deg, rgba(234, 179, 8, 0.2), rgba(202, 138, 4, 0.15))',
-                              border: '2px solid rgba(234, 179, 8, 0.3)',
-                              color: 'rgb(253, 224, 71)',
-                            }}
-                          >
-                            <Lock className="w-4 h-4" />
-                            Stake
-                          </motion.button>
-
-                          {/* Send Button */}
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => onSendToken(token.symbol, token.contractAddress)}
-                            className="px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2"
-                            style={{
-                              background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.15))',
-                              border: '2px solid rgba(59, 130, 246, 0.3)',
-                              color: 'rgb(147, 197, 253)',
-                            }}
-                            disabled={token.balance === 0}
-                          >
-                            <Send className="w-4 h-4" />
-                            Send
-                          </motion.button>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
+                      </motion.div>
+                    );
+                  })}
                   </AnimatePresence>
                 </div>
               )}
