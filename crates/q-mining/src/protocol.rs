@@ -326,7 +326,15 @@ impl Default for NetworkCapabilities {
             pool_mining: true,
             stratum_support: true,
             dag_commitment: true,
-            max_block_size: 2_097_152, // 2MB
+            // v10.11.2 (2026-05-21): raised from 2 MiB → u32::MAX (~4 GiB).
+            // With send_batch + auth-trust skipping the inner sig check, a
+            // single HTTP can submit 100K+ txs; the 2 MiB cap (~14K
+            // txs/block at 150 B/tx) was the next bottleneck. u32::MAX is
+            // the format's true ceiling; the real limits become Epsilon
+            // RAM (64 GiB) and gossipsub bandwidth, neither anywhere near
+            // limiting at current hardware. If we hit them later we
+            // reintroduce a soft cap; until then, infinite-shaped.
+            max_block_size: u32::MAX,
         }
     }
 }
