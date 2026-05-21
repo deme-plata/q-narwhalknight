@@ -5593,9 +5593,13 @@ pub async fn send_transactions_batch(
     );
 
     // ─── 3. Pre-fetch sender balance ONCE ─────────────────────────────
+    // get_consensus_balance takes a hex string ("qnk"-less). It returns u128
+    // raw units (24-decimal). One read per batch — savings of N-1 RocksDB
+    // hits is the load-bearing win of this endpoint.
+    let from_hex = hex::encode(from_address);
     let starting_balance: u128 = state
         .storage_engine
-        .get_wallet_balance(&from_address)
+        .get_consensus_balance(&from_hex)
         .await
         .unwrap_or(0);
 
