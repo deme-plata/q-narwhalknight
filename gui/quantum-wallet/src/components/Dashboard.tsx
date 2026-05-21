@@ -838,12 +838,15 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNav
     accent: string; border: string; fullContent: string;
   }>(null);
 
-  // v10.3.0: Show mobile setup QR modal once (2s after load)
-  useEffect(() => {
-    if (localStorage.getItem(MOBILE_SETUP_STORAGE_KEY)) return;
-    const timer = setTimeout(() => setShowMobileSetup(true), 2000);
-    return () => clearTimeout(timer);
-  }, []);
+  // v10.10.12: Auto-open of the Mobile Setup modal disabled per user request —
+  // the component still mounts (line ~3109) so it can be re-triggered manually
+  // by calling `setShowMobileSetup(true)` from a future button/menu item.
+  // To re-enable the 2s auto-open, restore the timer below:
+  //   useEffect(() => {
+  //     if (localStorage.getItem(MOBILE_SETUP_STORAGE_KEY)) return;
+  //     const timer = setTimeout(() => setShowMobileSetup(true), 2000);
+  //     return () => clearTimeout(timer);
+  //   }, []);
 
   // v8.5.5: Fetch unread email count on mount + listen for events
   useEffect(() => {
