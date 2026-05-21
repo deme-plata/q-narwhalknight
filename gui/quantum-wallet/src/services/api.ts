@@ -1909,10 +1909,15 @@ class QNarwhalKnightAPI {
 
   // v3.4.2: Get transaction by hash - uses authenticated request to unlock ZK-STARK encrypted data
   // Only sender/receiver can see full transaction details (from, to, amount, fee)
+  // v10.10.13: ALSO strip "0x" prefix (Ethereum convention pasted into our search bar).
+  // The production API at /api/v1/transactions/<hash> returns "Invalid transaction hash
+  // format" when given a 0x-prefixed hash, so the explorer was misreporting valid
+  // tx hashes as "not found". Discovered 2026-05-21 via a real DEX swap that confirmed
+  // on-chain at block 18,179,260 but appeared missing in the search UI.
   async getTransactionByHash(txHash: string): Promise<ApiResponse<any>> {
     console.log('🔍 Looking up transaction by hash:', txHash);
-    // Remove any tx_ prefix if present
-    const cleanHash = txHash.replace(/^tx_/i, '');
+    // Strip both "tx_" (legacy display) and "0x" (Ethereum-style) prefixes.
+    const cleanHash = txHash.trim().replace(/^tx_/i, '').replace(/^0x/i, '');
     // v3.4.2: Use authenticatedRequest to include X-Wallet-Auth header for ZK privacy unlocking
     return this.authenticatedRequest<any>(`/v1/transactions/${cleanHash}`);
   }

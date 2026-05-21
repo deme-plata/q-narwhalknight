@@ -1477,7 +1477,12 @@ server.tool(
       // v2.1.1: server returns `transaction_id` per memory entry
       // first_agentic_loop_closed.md (the 2026-05-17 finding). Try that
       // first; older variants kept for compatibility.
-      const txHash = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+      // v2.4.1: strip "0x" prefix — the production API at /api/v1/transactions/<hash>
+      // rejects 0x-prefixed hashes with "Invalid transaction hash format". The
+      // explorer URL bar takes the bare hex too. Discovered 2026-05-21 when a
+      // 5 QUG → QUGUSD swap returned 0xd47b3… and "tx not found in explorer".
+      const rawTxId = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+      const txHash = typeof rawTxId === "string" && rawTxId.startsWith("0x") ? rawTxId.slice(2) : rawTxId;
       const filledOutBase = data.amount_out || q.amount_out;
       // v2.3.0: server returns amount_out in 24-decimal AMM base
       const filledOutDisplay = fromBaseUnits(String(filledOutBase), AMM_DECIMALS);

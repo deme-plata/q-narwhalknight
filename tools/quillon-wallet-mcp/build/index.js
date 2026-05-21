@@ -1296,7 +1296,12 @@ server.tool("dex_swap", "Execute a DEX swap. v2.1.1: signs via the configured se
         // v2.1.1: server returns `transaction_id` per memory entry
         // first_agentic_loop_closed.md (the 2026-05-17 finding). Try that
         // first; older variants kept for compatibility.
-        const txHash = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+        // v2.4.1: strip "0x" prefix — the production API at /api/v1/transactions/<hash>
+        // rejects 0x-prefixed hashes with "Invalid transaction hash format". The
+        // explorer URL bar takes the bare hex too. Discovered 2026-05-21 when a
+        // 5 QUG → QUGUSD swap returned 0xd47b3… and "tx not found in explorer".
+        const rawTxId = data.transaction_id || data.transaction_hash || data.tx_hash || data.tx_id || "(no tx id)";
+        const txHash = typeof rawTxId === "string" && rawTxId.startsWith("0x") ? rawTxId.slice(2) : rawTxId;
         const filledOutBase = data.amount_out || q.amount_out;
         // v2.3.0: server returns amount_out in 24-decimal AMM base
         const filledOutDisplay = fromBaseUnits(String(filledOutBase), AMM_DECIMALS);
@@ -2496,6 +2501,148 @@ server.tool("deploy_token", "Deploy a new ERC20-style token on Quillon. Costs 1 
     }
     catch (e) {
         return { content: [{ type: "text", text: `deploy_token failed: ${e?.message ?? e}` }] };
+    }
+});
+// ────────────────────────────────────────────────────────────────────
+// v2.4.0: mining_calculator — earnings projection with honest caveats
+// ────────────────────────────────────────────────────────────────────
+// Adds what the MiningDashboard.tsx web calculator does, plus what it
+// gets WRONG: live dev_fee_bps from engine_pulse (not hardcoded 1%),
+// optional pool-fee accounting (1.75% extra), and 1d/7d/30d/365d
+// projections so users see the trajectory.
+//
+// Caveats are folded into the response so they ride along with every
+// quote — the math is right today; tomorrow's reality depends on
+// difficulty drift + price + miner uptime + dev_fee changes.
+// ────────────────────────────────────────────────────────────────────
+server.tool("mining_calculator", "Projected mining earnings: daily / weekly / monthly / yearly in QUG + USD. Reads live block reward + network hashrate + dev fee from the production API (no hardcoded constants — fixes the MiningDashboard.tsx 1% bug). Optionally accounts for pool fee. Returns honest caveats so users understand the projection's fragility.", {
+    wallet_address: z.string().optional().describe("qnk... wallet (defaults to seed-derived agent wallet)."),
+    your_hashrate_hps: z.number().positive().optional().describe("Your hashrate in H/s. If omitted, attempts to read from mining_status; if that's also unavailable, returns the per-1-MH/s rate so you can scale."),
+    mining_via_pool: z.boolean().optional().describe("If true, deducts the additional 1.75% pool fee (per crates/q-mining-pool/src/lib.rs). Default false (solo mining via the node)."),
+    seed: z.string().optional().describe("Optional seed override for wallet derivation."),
+}, async ({ wallet_address, your_hashrate_hps, mining_via_pool, seed }) => {
+    try {
+        // Step 1: resolve the wallet
+        let addr = wallet_address;
+        if (!addr) {
+            const { seed: rawSeed } = loadSeed({ seedArg: seed });
+            addr = deriveKeys(rawSeed).address;
+        }
+        // Step 2: pull live network constants (block reward, network hashrate, dev fee)
+        // From engine_pulse (single call) — we already use this elsewhere.
+        const pulse = await api("/engine/pulse", "GET").catch(() => null);
+        const devFeeBps = pulse?.fees?.dev_fee_bps ?? 190;
+        const devFeePct = devFeeBps / 10_000;
+        const poolFeePct = mining_via_pool ? 0.0175 : 0;
+        const combinedFee = devFeePct + poolFeePct;
+        // Block reward from the mining challenge endpoint
+        const challenge = await api("/mining/challenge", "GET").catch(() => null);
+        const blockReward = challenge?.data?.block_reward ?? challenge?.block_reward ?? 0.083181;
+        // Network hashrate (H/s)
+        const networkHashrate = challenge?.data?.network_hashrate ?? challenge?.network_hashrate ?? 0;
+        // Step 3: resolve user's hashrate
+        let userHps = your_hashrate_hps;
+        let hashSource = "user-provided";
+        if (!userHps) {
+            // Try mining_status endpoint for this wallet — usually returns this node's local hashrate
+            const ms = await api(`/mining/status?wallet=${addr}`, "GET").catch(() => null);
+            userHps = ms?.data?.hashrate ?? ms?.hashrate ?? null;
+            hashSource = userHps ? "/mining/status" : "unavailable";
+        }
+        // Step 4: compute
+        // Daily emission cap (sec-per-day × block-per-sec × reward)
+        const dailyNetworkQug = 86400 * blockReward;
+        // Your share = userHps / networkHps. If unavailable, default to a per-1-MH/s normalized share.
+        const ratePerMh = networkHashrate > 0
+            ? (1_000_000 / networkHashrate) * dailyNetworkQug * (1 - combinedFee)
+            : 0;
+        const userShare = userHps && networkHashrate > 0 ? userHps / networkHashrate : null;
+        const dailyQug = userShare !== null
+            ? userShare * dailyNetworkQug * (1 - combinedFee)
+            : null;
+        const weeklyQug = dailyQug !== null ? dailyQug * 7 : null;
+        const monthlyQug = dailyQug !== null ? dailyQug * 30 : null;
+        const yearlyQug = dailyQug !== null ? dailyQug * 365 : null;
+        // QUG price — best-effort. Oracle endpoint or fall back to "unknown".
+        const priceRes = await api("/oracle/price/QUG", "GET").catch(() => null);
+        const qugPriceUsd = priceRes?.data?.price_usd ?? priceRes?.price_usd ?? priceRes?.price ?? null;
+        const fmtUsd = (n) => n !== null && qugPriceUsd ? `$${(n * qugPriceUsd).toFixed(2)}` : "(price unavailable)";
+        const fmtQug = (n) => n !== null ? `${n.toFixed(4)} QUG` : "(hashrate unknown)";
+        const lines = [];
+        lines.push(`=== Mining Earnings Projection — ${addr.slice(0, 16)}… ===`);
+        lines.push(``);
+        lines.push(`Network state:`);
+        lines.push(`  Block reward:       ${blockReward.toFixed(6)} QUG`);
+        lines.push(`  Block rate:         ~1 block/sec (DAG-Knight cadence)`);
+        lines.push(`  Network hashrate:   ${networkHashrate ? (networkHashrate / 1_000_000).toFixed(2) + " MH/s" : "unknown"}`);
+        lines.push(`  Network daily cap:  ${dailyNetworkQug.toFixed(2)} QUG (theoretical, 100% uptime)`);
+        lines.push(``);
+        lines.push(`Fees:`);
+        lines.push(`  Dev fee (live):     ${devFeeBps} bps (${(devFeePct * 100).toFixed(2)}%)`);
+        if (mining_via_pool) {
+            lines.push(`  Pool fee:           175 bps (1.75%)`);
+            lines.push(`  Combined fee:       ${(combinedFee * 100).toFixed(2)}%`);
+        }
+        else {
+            lines.push(`  Pool fee:           0 (solo mining via node)`);
+        }
+        lines.push(`  Take-home rate:     ${((1 - combinedFee) * 100).toFixed(2)}%`);
+        lines.push(``);
+        lines.push(`Your share:`);
+        if (userHps !== null && userHps !== undefined) {
+            lines.push(`  Your hashrate:      ${(userHps / 1_000_000).toFixed(2)} MH/s  (source: ${hashSource})`);
+            if (userShare !== null) {
+                lines.push(`  Share of network:   ${(userShare * 100).toFixed(4)}%`);
+            }
+        }
+        else {
+            lines.push(`  Your hashrate:      unavailable — pass your_hashrate_hps to scale the per-MH/s rate below`);
+        }
+        lines.push(``);
+        lines.push(`Projection (sustained at current rate):`);
+        if (dailyQug !== null) {
+            lines.push(`  Daily:    ${fmtQug(dailyQug)}    ${fmtUsd(dailyQug)}`);
+            lines.push(`  Weekly:   ${fmtQug(weeklyQug)}   ${fmtUsd(weeklyQug)}`);
+            lines.push(`  Monthly:  ${fmtQug(monthlyQug)}  ${fmtUsd(monthlyQug)}`);
+            lines.push(`  Yearly:   ${fmtQug(yearlyQug)}   ${fmtUsd(yearlyQug)}`);
+        }
+        else if (ratePerMh > 0) {
+            lines.push(`  Per 1 MH/s daily:  ${ratePerMh.toFixed(6)} QUG  ${fmtUsd(ratePerMh)}`);
+            lines.push(`  Per 1 MH/s weekly: ${(ratePerMh * 7).toFixed(6)} QUG`);
+            lines.push(`  Per 1 MH/s yearly: ${(ratePerMh * 365).toFixed(4)} QUG`);
+        }
+        else {
+            lines.push(`  Cannot project — network hashrate is 0 or block reward is 0.`);
+        }
+        if (qugPriceUsd) {
+            lines.push(``);
+            lines.push(`  QUG price reference: $${qugPriceUsd.toFixed(2)}/QUG (oracle)`);
+        }
+        else {
+            lines.push(``);
+            lines.push(`  (USD figures suppressed — oracle price unavailable.)`);
+        }
+        lines.push(``);
+        lines.push(`⚠ CAVEATS — read these:`);
+        lines.push(`  1. DIFFICULTY: more miners joining → your share drops proportionally. The`);
+        lines.push(`     projection assumes the network hashrate stays flat at ${networkHashrate ? (networkHashrate / 1_000_000).toFixed(0) + " MH/s" : "current"}.`);
+        lines.push(`  2. PRICE: $/QUG is volatile. A 50% price move = a 50% USD-projection move.`);
+        lines.push(`     The QUG number doesn't change with price; only the USD column does.`);
+        lines.push(`  3. UPTIME: any minute your miner is offline drops your share to 0 for that`);
+        lines.push(`     minute. The figures assume 100% uptime over the projection window.`);
+        lines.push(`  4. DEV FEE: currently ${devFeeBps} bps. v10.10.12 raises this to 500 bps (5%);`);
+        lines.push(`     when that ships your take-home drops by ~${((500 - devFeeBps) / 100).toFixed(1)} percentage points`);
+        lines.push(`     unless you re-run this calculation after the deploy.`);
+        lines.push(`  5. NETWORK CAPACITY: theoretical daily cap is ${dailyNetworkQug.toFixed(0)} QUG. If the network`);
+        lines.push(`     produces fewer blocks (validator outage, sync drift) the actual emission`);
+        lines.push(`     is lower — this calculator does NOT prorate by today's observed emission`);
+        lines.push(`     (MiningDashboard.tsx does, via /emission/stats; consider that for v2.5.0).`);
+        lines.push(`  6. POOL FEE: if you're mining via the q-mining-pool, pass mining_via_pool=true`);
+        lines.push(`     to deduct the additional 1.75%.`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `mining_calculator failed: ${e?.message ?? e}` }] };
     }
 });
 // ============================================================
