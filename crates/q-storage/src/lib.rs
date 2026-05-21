@@ -4573,6 +4573,28 @@ impl QStorage {
         Ok(())
     }
 
+    /// Authoritative balance write — bypasses the max-wins guard.
+    ///
+    /// Callers MUST be on the tx-consensus path (DEX swap settlement, finality engine,
+    /// signed-transfer applicator). Stale state-sync / gossip replay paths MUST keep
+    /// using `save_wallet_balance` so the max-wins guard protects against stale lower
+    /// values overwriting authoritative higher values.
+    ///
+    /// 2026-05-21 (v10.10.13.1): Added after `caller=ABSOLUTE_OVERWRITE SKIPPED` log
+    /// firehose revealed the DEX swap path was being silently refused — the swap's
+    /// QUG debit (new < old) hit the max-wins guard, the debit never landed, and
+    /// repeating the swap minted free QUGUSD on top of an undecreased QUG balance.
+    pub async fn save_wallet_balance_authoritative(
+        &self,
+        address: &[u8; 32],
+        amount: u128,
+    ) -> Result<()> {
+        let key = format!("wallet_balance_{}", hex::encode(address));
+        let value = amount.to_le_bytes();
+        self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
+        Ok(())
+    }
+
     /// Load wallet balance from persistent storage
     /// v2.5.0: Returns u128, with backward compatibility for legacy u64 (8-byte) storage
     pub async fn load_wallet_balance(&self, address: &[u8; 32]) -> Result<Option<u128>> {

@@ -1213,8 +1213,10 @@ pub async fn add_liquidity(
     }
 
     // v10.2.1: Persist native QUG balance deduction (fixes deductions lost on restart)
+    // v10.10.13.1: Use authoritative write — DEX is consensus, max-wins guard would
+    // silently drop the debit (see q-storage save_wallet_balance_authoritative docs).
     if let Some((addr, new_balance)) = native_qug_balance_change {
-        if let Err(e) = state.storage_engine.save_wallet_balance(&addr, new_balance).await {
+        if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&addr, new_balance).await {
             tracing::warn!("⚠️ Failed to persist QUG balance after liquidity add: {}", e);
         }
     }
@@ -1874,8 +1876,9 @@ pub async fn remove_liquidity(
     }
 
     // v10.2.1: Persist native QUG balance after liquidity removal
+    // v10.10.13.1: authoritative — see save_wallet_balance_authoritative docs.
     if let Some((addr, new_balance)) = native_qug_balance_change {
-        if let Err(e) = state.storage_engine.save_wallet_balance(&addr, new_balance).await {
+        if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&addr, new_balance).await {
             tracing::warn!("⚠️ Failed to persist QUG balance after liquidity removal: {}", e);
         }
     }

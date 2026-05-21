@@ -441,7 +441,9 @@ impl BalanceFinalityEngine {
             }
 
             // Update the wallet balance in DB.
-            if let Err(e) = self.storage.save_wallet_balance(&wallet_addr, update.new_balance).await {
+            // v10.10.13.1: authoritative — finality is by definition consensus,
+            // max-wins guard would silently drop legitimate debits (money-printer fix).
+            if let Err(e) = self.storage.save_wallet_balance_authoritative(&wallet_addr, update.new_balance).await {
                 error!("BalanceFinalityEngine: balance write failed: {e}");
             }
 
