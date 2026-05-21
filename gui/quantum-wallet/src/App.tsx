@@ -297,6 +297,16 @@ function App() {
     return () => window.removeEventListener('qnk-new-chat-message', handler);
   }, []);
 
+  // v10.10.12: Navigate to Email screen from elsewhere (BankScreen "Email the Bank"
+  // banner, future deep links, etc.). Prefill data is stashed in
+  // sessionStorage['pendingEmailCompose'] by the caller and picked up by
+  // EmailScreen on mount.
+  useEffect(() => {
+    const navHandler = () => setCurrentScreen('email');
+    window.addEventListener('qnk-navigate-to-email', navHandler);
+    return () => window.removeEventListener('qnk-navigate-to-email', navHandler);
+  }, []);
+
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
   // SSE balance updates from server can be stale and overwrite correct DEX swap balance
   const dexSwapInProgressRef = useRef(false);

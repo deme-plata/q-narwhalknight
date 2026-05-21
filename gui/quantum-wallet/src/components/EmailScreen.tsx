@@ -356,6 +356,25 @@ export default function EmailScreen() {
     }
   };
 
+  // v10.10.12: Honor pending compose prefill (set by BankScreen "Email the
+  // Bank" banner or future deep links). Runs once on mount — if
+  // sessionStorage carries a pending prefill, open the composer and fill
+  // To/Subject, then clear the storage so a reload doesn't re-trigger it.
+  useEffect(() => {
+    const raw = sessionStorage.getItem('pendingEmailCompose');
+    if (!raw) return;
+    sessionStorage.removeItem('pendingEmailCompose');
+    try {
+      const { to, subject, body } = JSON.parse(raw) as { to?: string; subject?: string; body?: string };
+      if (to) setComposeTo(to);
+      if (subject) setComposeSubject(subject);
+      if (body) setComposeBody(body);
+      setComposing(true);
+    } catch (e) {
+      console.warn('[EmailScreen] malformed pendingEmailCompose payload:', e);
+    }
+  }, []);
+
   // SSE listeners — invalidate cache so new emails appear immediately
   useEffect(() => {
     const handleEmailReceived = () => {
@@ -1507,6 +1526,41 @@ function ComposePanel({
         className="px-6 pt-5 pb-2 space-y-3"
         style={{ borderBottom: '1px solid rgba(34,211,238,0.07)' }}
       >
+        {/* v10.10.12: Pinned contacts row — Quillon Bank as a verified built-in
+            contact. Click fills the To field. Highlighted when already selected.
+            More pinned entities can be appended to this row later (e.g. Treasury,
+            Support) without restructuring. */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="text-xs w-16 font-semibold uppercase tracking-widest flex-shrink-0" style={{ color: 'rgba(0,229,255,0.5)' }}>
+            Pinned
+          </label>
+          {(() => {
+            const BANK_EMAIL = 'bank@quillon.xyz';
+            const selected = composeTo.trim().toLowerCase() === BANK_EMAIL;
+            return (
+              <motion.button
+                type="button"
+                onClick={() => setComposeTo(BANK_EMAIL)}
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full transition-all"
+                style={{
+                  background: selected
+                    ? 'linear-gradient(135deg, rgba(34,211,238,0.18) 0%, rgba(139,92,246,0.18) 100%)'
+                    : 'rgba(34,211,238,0.06)',
+                  border: selected
+                    ? '1px solid rgba(34,211,238,0.55)'
+                    : '1px solid rgba(34,211,238,0.2)',
+                }}
+                title="Quillon Bank — verified built-in contact"
+              >
+                <Shield className="w-3.5 h-3.5 text-cyan-300" />
+                <span className="text-sm font-semibold text-white">Quillon Bank</span>
+                <span className="text-[10px] text-cyan-300/70 font-mono">bank@quillon.xyz</span>
+              </motion.button>
+            );
+          })()}
+        </div>
         <div className="flex items-center gap-3">
           <label className="text-xs w-16 font-semibold uppercase tracking-widest flex-shrink-0" style={{ color: 'rgba(0,229,255,0.5)' }}>
             To

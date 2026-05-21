@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Landmark, Rocket, TrendingUp, CheckCircle, Loader, X, ChevronRight,
   DollarSign, Users, Globe, Shield, Zap, Clock, Star, BarChart3,
-  FileText, ArrowRight, Lightbulb, Target, Award,
+  FileText, ArrowRight, Lightbulb, Target, Award, Mail,
 } from 'lucide-react';
 
 type Mode = null | 'loan' | 'incubation';
@@ -249,6 +249,40 @@ export default function BankScreen() {
           </div>
         ))}
       </div>
+
+      {/* v10.10.12: Contact-the-Bank banner — opens email composer pre-filled
+          for bank@quillon.xyz. Sits between stats and hero cards so it's
+          discoverable without competing with the loan/incubation flows. */}
+      <motion.button
+        type="button"
+        whileHover={{ y: -1 }}
+        whileTap={{ scale: 0.99 }}
+        onClick={() => {
+          sessionStorage.setItem(
+            'pendingEmailCompose',
+            JSON.stringify({ to: 'bank@quillon.xyz', subject: 'Quillon Bank — Question' })
+          );
+          window.dispatchEvent(new CustomEvent('qnk-navigate-to-email'));
+        }}
+        className="w-full flex items-center gap-4 p-4 rounded-2xl text-left"
+        style={{
+          background: 'linear-gradient(135deg, rgba(34,211,238,0.06) 0%, rgba(139,92,246,0.06) 100%)',
+          border: '1px solid rgba(34,211,238,0.18)',
+        }}
+      >
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+          style={{ background: 'linear-gradient(135deg, #22D3EE, #8B5CF6)' }}>
+          <Mail className="w-5 h-5 text-white" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-bold text-white">Have a question? Email the Bank</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Opens a new P2P email to <span className="font-mono text-cyan-300">bank@quillon.xyz</span> —
+            replies land in your Quillon Bank folder.
+          </p>
+        </div>
+        <ArrowRight className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+      </motion.button>
 
       {/* Two hero cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
