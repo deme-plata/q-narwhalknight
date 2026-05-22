@@ -1774,16 +1774,21 @@ export default function DeployControlPanel() {
         try { const j = await metricsR.json(); setBankMetrics(j.data || j); } catch {}
       }
       if (loansR?.ok) {
-        try { const j = await loansR.json(); const d = j.data || j; setBankLoans(Array.isArray(d) ? d : []); } catch {}
+        // v10.11.16 admin-panel-zero fix: server returns
+        // { data: { applications: [...] } } — Array.isArray(j.data)
+        // was FALSE so the admin panel always showed 0 pending loans
+        // even when applications existed. Unwrap one level deeper.
+        try { const j = await loansR.json(); const d = j?.data?.applications ?? j?.applications ?? j?.data ?? j; setBankLoans(Array.isArray(d) ? d : []); } catch {}
       }
       if (riskR?.ok) {
-        try { const j = await riskR.json(); const d = j.data || j; setBankAtRisk(Array.isArray(d) ? d : []); } catch {}
+        try { const j = await riskR.json(); const d = j?.data?.at_risk ?? j?.data?.loans ?? j?.data ?? j; setBankAtRisk(Array.isArray(d) ? d : []); } catch {}
       }
       if (reservesR?.ok) {
         try { const j = await reservesR.json(); setBankReserves(j.data || j); } catch {}
       }
       if (msgsR?.ok) {
-        try { const j = await msgsR.json(); const d = j.data || j; setBankMessages(Array.isArray(d) ? d : []); } catch {}
+        // Same unwrap fix as loans (server response is { data: { messages: [...] } }).
+        try { const j = await msgsR.json(); const d = j?.data?.messages ?? j?.messages ?? j?.data ?? j; setBankMessages(Array.isArray(d) ? d : []); } catch {}
       }
     } catch {}
     setBankLoading(false);

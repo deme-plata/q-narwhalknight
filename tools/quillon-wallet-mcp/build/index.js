@@ -5449,31 +5449,78 @@ server.tool("bank_metrics", "Quillon Bank — public metrics + health. Reads /qu
         return { content: [{ type: "text", text: `bank_metrics failed: ${e?.message ?? e}` }] };
     }
 });
-server.tool("bank_apply_for_loan", "Quillon Bank — apply for a collateralized QNKUSD loan. You deposit QUG as collateral; the bank issues QNKUSD against it. Loan is over-collateralized (typical 150% — i.e., 1000 QUG locks 666 QNKUSD-equivalent). Loan must be approved by a bank admin before issuance. Use bank_loan_status to track.", {
+server.tool("bank_apply_for_loan", "Quillon Bank — apply for a collateralized QUGUSD loan. You deposit QUG as collateral; the bank issues QUGUSD (Quillon's $1-pegged stablecoin) against it. v2.9.7: auto-LTV — give us collateral_qug + optional ltv_percent (default 66%, max 75%) and we compute requested_qugusd at current QUG/QUGUSD pool-implied price. Refuses absurd ratios (<110% would liquidate immediately, >1000% wastes collateral). To override, pass requested_qugusd explicitly. Must be approved by a bank admin before issuance.", {
     collateral_qug: z.number().positive().describe("QUG to lock as collateral."),
-    requested_qnkusd: z.number().positive().describe("QNKUSD to borrow (typically <= 0.66 × collateral_qug at current peg)."),
+    ltv_percent: z.number().min(1).max(75).optional().describe("Loan-to-Value percentage (default 66; max 75). Ignored if requested_qugusd is provided."),
+    requested_qugusd: z.number().positive().optional().describe("Override: explicit QUGUSD amount. Skips auto-LTV calculation. Use when you have a target loan size in mind."),
     duration_days: z.number().int().min(1).max(365).optional().describe("Loan term in days (default 30, max 365)."),
     purpose: z.string().optional().describe("Free-text purpose. Stored on-chain. Helps admin review."),
     seed: z.string().optional(),
     endpoint: z.string().optional(),
     confirm: z.boolean().optional().describe("Set true to actually submit; otherwise dry-run."),
-}, async ({ collateral_qug, requested_qnkusd, duration_days, purpose, seed, endpoint, confirm }) => {
+}, async ({ collateral_qug, ltv_percent, requested_qugusd, duration_days, purpose, seed, endpoint, confirm }) => {
     const { seed: rawSeed } = loadSeed({ seedArg: seed });
     const signerAddress = deriveKeys(rawSeed).address;
+    // v2.9.7: auto-LTV — compute requested_qugusd if not provided.
+    // We need the current QUG/QUGUSD price from the DEX pool.
+    let computed_requested_qugusd = requested_qugusd;
+    let qug_price_used = null;
+    let ltv_used = null;
+    if (!computed_requested_qugusd) {
+        // Fetch pool to get implied QUG price
+        try {
+            const poolsRes = await api(`/dex/pools`, "GET", undefined, { endpoint });
+            const pools = poolsRes?.data?.pools ?? poolsRes?.pools ?? poolsRes?.data ?? [];
+            const qugQugusd = pools.find((p) => {
+                const t0 = String(p.token0 ?? "").toUpperCase();
+                const t1 = String(p.token1 ?? "").toUpperCase();
+                return (t0 === "QUG" && t1 === "QUGUSD") || (t0 === "QUGUSD" && t1 === "QUG");
+            });
+            if (qugQugusd) {
+                const r0 = Number(BigInt(qugQugusd.reserve0) / 10n ** 18n) / 1e6;
+                const r1 = Number(BigInt(qugQugusd.reserve1) / 10n ** 18n) / 1e6;
+                const qugIsT0 = String(qugQugusd.token0 ?? "").toUpperCase() === "QUG";
+                qug_price_used = qugIsT0 ? r1 / r0 : r0 / r1;
+            }
+        }
+        catch { /* pool fetch failed — fall back to manual entry */ }
+        if (!qug_price_used || qug_price_used <= 0) {
+            return { content: [{ type: "text", text: `bank_apply_for_loan: Could not auto-compute requested_qugusd — QUG/QUGUSD pool unreachable. Pass requested_qugusd explicitly.` }] };
+        }
+        ltv_used = ltv_percent ?? 66;
+        computed_requested_qugusd = collateral_qug * qug_price_used * (ltv_used / 100);
+    }
+    // Sanity check the resulting collateral_ratio. Reject silly numbers.
+    const implied_value_usd = qug_price_used ? collateral_qug * qug_price_used : null;
+    const collateral_ratio = (implied_value_usd && computed_requested_qugusd)
+        ? (implied_value_usd / computed_requested_qugusd) * 100
+        : null;
+    if (collateral_ratio !== null) {
+        if (collateral_ratio < 110) {
+            return { content: [{ type: "text", text: `bank_apply_for_loan: collateral_ratio ${collateral_ratio.toFixed(1)}% < 110%. Loan would liquidate immediately. Lower requested_qugusd or raise collateral_qug.` }] };
+        }
+        if (collateral_ratio > 1000 && !requested_qugusd /* allow manual override */) {
+            return { content: [{ type: "text", text: `bank_apply_for_loan: auto-LTV produced collateral_ratio ${collateral_ratio.toFixed(0)}% > 1000%. Likely a typo. Pass requested_qugusd explicitly to override.` }] };
+        }
+    }
     if (!confirm) {
         return { content: [{ type: "text", text: [
                         `⚠ LOAN DRY RUN — pass confirm=true to submit`,
                         ``,
                         `  Applicant:        ${signerAddress}`,
-                        `  Collateral:       ${collateral_qug} QUG (locked until loan resolves)`,
-                        `  Borrowing:        ${requested_qnkusd} QNKUSD`,
+                        `  Collateral:       ${collateral_qug} QUG`,
+                        qug_price_used ? `  Pool price:       ${qug_price_used.toFixed(2)} QUGUSD/QUG (live)` : ``,
+                        ltv_used ? `  LTV target:       ${ltv_used}%` : `  LTV:              (manual override)`,
+                        `  Borrowing:        ${computed_requested_qugusd?.toFixed(2)} QUGUSD`,
+                        collateral_ratio !== null ? `  Collateral ratio: ${collateral_ratio.toFixed(0)}% (must stay ≥150% to avoid liquidation)` : ``,
                         `  Term:             ${duration_days ?? 30} days`,
                         `  Purpose:          ${purpose ?? "(none)"}`,
                         ``,
-                        `On confirm: submits to /quillon-bank/lending/apply. Admin must approve`,
-                        `before QNKUSD is issued.`,
-                    ].join("\n") }] };
+                        `On confirm: submits to /quillon-bank/lending/apply. Admin must`,
+                        `approve before QUGUSD is issued.`,
+                    ].filter(Boolean).join("\n") }] };
     }
+    const requested_qnkusd = computed_requested_qugusd; // alias for the rest of the function
     try {
         // v2.9.6 — corrected payload schema. Server's ApplyLoanRequest at
         // quillon_bank_api.rs expects: wallet_address (not applicant_wallet),

@@ -340,6 +340,12 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
   // v7.3.0: Node admin check via API (--admin-wallet)
   const [isNodeAdmin, setIsNodeAdmin] = useState(false);
+  // v10.11.16: bank-activity notification counters — only fetched for the
+  // master wallet. Used to render the red dot on the admin shield icon
+  // when there are pending loans, unread admin messages, or at-risk loans.
+  const [bankPendingLoans, setBankPendingLoans] = useState(0);
+  const [bankUnreadMessages, setBankUnreadMessages] = useState(0);
+  const [bankAtRiskLoans, setBankAtRiskLoans] = useState(0);
 
   // v8.5.10: Bounty score from bounty API
   const [bountyScore, setBountyScore] = useState<number>(0);
@@ -885,6 +891,49 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
     fetchMinerLinkStatus();
     const interval = setInterval(fetchMinerLinkStatus, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // v10.11.16: bank-activity notification poller — only fires for the
+  // master wallet. Polls /quillon-bank/lending/applications + at-risk +
+  // messages every 30s. Counts pending applications, unread admin
+  // messages, and at-risk loans for the red-dot badge on the Shield icon.
+  useEffect(() => {
+    const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
+    const wa = (localStorage.getItem('walletAddress') || '').replace(/^qnk/, '').replace(/^qug/, '');
+    if (wa !== MASTER_WALLET) return; // non-admin wallets: zero counters, no fetch
+
+    const fetchBankPending = async () => {
+      try {
+        const [loansR, riskR, msgsR] = await Promise.all([
+          fetch('/api/v1/quillon-bank/lending/applications').catch(() => null),
+          fetch('/api/v1/quillon-bank/lending/at-risk').catch(() => null),
+          fetch('/api/v1/quillon-bank/messages/admin/list', { headers: { 'x-wallet-address': 'qnk' + MASTER_WALLET } }).catch(() => null),
+        ]);
+        if (loansR?.ok) {
+          const j = await loansR.json().catch(() => null);
+          const apps = j?.data?.applications ?? j?.applications ?? [];
+          if (Array.isArray(apps)) {
+            setBankPendingLoans(apps.filter((a: any) => a?.status === 'pending').length);
+          }
+        }
+        if (riskR?.ok) {
+          const j = await riskR.json().catch(() => null);
+          const at = j?.data?.at_risk ?? j?.data?.loans ?? j?.data ?? j?.at_risk ?? [];
+          if (Array.isArray(at)) setBankAtRiskLoans(at.length);
+        }
+        if (msgsR?.ok) {
+          const j = await msgsR.json().catch(() => null);
+          const m = j?.data?.messages ?? j?.messages ?? j?.data ?? [];
+          if (Array.isArray(m)) {
+            setBankUnreadMessages(m.filter((x: any) => x?.read === false || x?.unread === true).length);
+          }
+        }
+      } catch { /* silently ignore — admin dot just stays at last value */ }
+    };
+
+    fetchBankPending();
+    const interval = setInterval(fetchBankPending, 30000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1934,6 +1983,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
             const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
             const isMaster = walletAddr.replace('qnk', '').replace('qug', '') === MASTER_WALLET;
             if (!walletAddr) return null;
+            // Suppress unused-var lint while keeping the check explicit
+            void isMaster;
+            const totalBankPending = bankPendingLoans + bankUnreadMessages + bankAtRiskLoans;
             return (
               <>
                 <div className="w-px h-8 bg-amber-500/30 mx-2" />
@@ -1942,12 +1994,24 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                     const event = new CustomEvent('open-deploy-panel');
                     window.dispatchEvent(event);
                   }}
-                  className="p-2 rounded-lg bg-gradient-to-br from-emerald-500/20 to-green-500/20 border border-emerald-500/40 hover:border-emerald-400/60 transition-all"
+                  className="relative p-2 rounded-lg bg-gradient-to-br from-emerald-500/20 to-green-500/20 border border-emerald-500/40 hover:border-emerald-400/60 transition-all"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
-                  title="Node Deploy Panel"
+                  title={totalBankPending > 0
+                    ? `Node Deploy Panel — ${bankPendingLoans} pending loan${bankPendingLoans !== 1 ? 's' : ''}, ${bankUnreadMessages} unread message${bankUnreadMessages !== 1 ? 's' : ''}, ${bankAtRiskLoans} at-risk`
+                    : "Node Deploy Panel"}
                 >
                   <Shield className="w-5 h-5 text-emerald-400" />
+                  {/* v10.11.16: bank-activity notification dot — visible only
+                    * to the master wallet. Polls /quillon-bank/lending/
+                    * applications + messages every 30s. Glows red with count
+                    * when admin attention is needed. */}
+                  {totalBankPending > 0 && (
+                    <span className="absolute -top-1 -right-1 flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold border border-emerald-300 shadow-lg shadow-red-500/50">
+                      <span className="absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75 animate-ping"></span>
+                      <span className="relative">{totalBankPending}</span>
+                    </span>
+                  )}
                 </motion.button>
               </>
             );
