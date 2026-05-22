@@ -164,7 +164,7 @@ async function apiSigned(path, method = "GET", body, opts) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "2.7.3",
+    version: "2.7.4",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -2506,11 +2506,23 @@ server.tool("get_token_balance", "Get the balance of any token (not just QUG) fo
         const hasContractAddr = t.address && !["native", "stablecoin"].includes(tt);
         if (hasContractAddr) {
             // Custom or Wrapped token — contract-scoped balance endpoint.
+            //
+            // v2.7.4 BUG FIX: ALWAYS divide raw by 10^AMM_DECIMALS (24), NEVER by
+            // the token's native decimals. The /contracts/<addr>/balance endpoint
+            // returns the universal 24-decimal AMM-base value regardless of the
+            // token's metadata-reported decimals field. The token's native decimals
+            // (e.g. 8 for ASHEN, 8 for wBTC, 18 for wETH) is for DISPLAY HINTS
+            // (price quoting, market-cap formatting) — not for the storage→display
+            // divisor.
+            //
+            // Pre-v2.7.4 bug: used t.decimals (8 for ASHEN) → divisor 10^8 →
+            // ASHEN raw 5e23 displayed as 5e15 (5 quadrillion) instead of 50M.
+            // Symptom matched the frontend's $$10 Quadrillion ASHEN market-cap bug
+            // we diagnosed earlier; same dex_token_bugs family.
             const res = await api(`/contracts/${t.address}/balance/${target}`, "GET");
             const raw = res?.balance ?? res?.data?.balance ?? "0";
-            // Use the token's own decimals for display (AMM_DECIMALS may differ for some).
-            const display = fromBaseUnits(String(raw), t.decimals ?? AMM_DECIMALS);
-            return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${raw}, scale: ${t.decimals ?? AMM_DECIMALS} decimals)` }] };
+            const display = fromBaseUnits(String(raw), AMM_DECIMALS);
+            return { content: [{ type: "text", text: `${target}\n  ${symbol}: ${display}\n  (raw base: ${raw}, scale: 24 [AMM universal — token's native decimals=${t.decimals} is display hint only])` }] };
         }
         // Stablecoin / Native-non-QUG path — needs X-Wallet-Auth and only
         // returns balances for the signer. If `address` was passed explicitly
@@ -2556,46 +2568,86 @@ server.tool("get_token_balance", "Get the balance of any token (not just QUG) fo
         return { content: [{ type: "text", text: `get_token_balance failed: ${e?.message ?? e}` }] };
     }
 });
-server.tool("tx_status", "Confirm a transaction landed on-chain. v2.3.0: removes the May-21 ambiguity where a successful swap's hash returned but balance changes from mining masked whether the swap actually executed. Pass the tx hash from dex_swap / send_qug / send_token / agent_submit / deploy_token.", {
-    tx_hash: z.string().describe("Transaction hash (0x-prefixed hex). 64 hex chars after the 0x."),
+server.tool("tx_status", "Confirm a transaction landed on-chain. v2.7.4: strips any leading '0x' from the hash before calling the server route (handler uses hex::decode which rejects '0x' prefix). Also surfaces the ghost-confirmation pattern (status='dropped' + block_height=null + confirmations=0) explicitly so operators recognize the server-side regression. Pass the tx hash from dex_swap / send_qug / send_token / agent_submit / deploy_token.", {
+    tx_hash: z.string().describe("Transaction hash — 64 hex chars (no '0x' prefix required; if you include it we strip it)."),
 }, async ({ tx_hash }) => {
     try {
-        const h = tx_hash.trim();
-        const normalized = h.startsWith("0x") ? h : `0x${h}`;
-        // Try the canonical endpoint first; fall back to mempool/recent if the
-        // tx hasn't been mined yet.
-        const res = await api(`/transactions/${normalized}`, "GET");
-        const tx = res?.transaction ?? res?.data ?? res;
-        if (!tx || res?.success === false) {
-            // Not in confirmed history; probe mempool.
-            const mp = await api(`/mempool/${normalized}`, "GET").catch(() => null);
+        const h = tx_hash.trim().toLowerCase();
+        // v2.7.4 FIX: server route /api/v1/transactions/:hash uses hex::decode which
+        // rejects '0x' prefix with "Invalid transaction hash format". Strip if present.
+        const rawHex = h.startsWith("0x") ? h.slice(2) : h;
+        const displayHash = rawHex.slice(0, 18) + "…";
+        if (rawHex.length !== 64 || !/^[0-9a-f]{64}$/.test(rawHex)) {
+            return { content: [{ type: "text", text: `tx_status: invalid hash — expected 64 hex chars, got ${rawHex.length} ('${rawHex.slice(0, 20)}…')` }] };
+        }
+        // Server endpoint takes the raw hex (no prefix).
+        const res = await api(`/transactions/${rawHex}`, "GET");
+        // The server may return success: false (truly not found) OR success: true with
+        // ghost-confirmation shape (status='dropped' + block_height=null + confirmations=0
+        // for a tx that's actually mined — see ghost_confirmation_tx_status_bug memory).
+        if (res?.success === false) {
+            // Not found in the confirmed-tx index; probe mempool.
+            const mp = await api(`/mempool/${rawHex}`, "GET").catch(() => null);
             const inMempool = mp?.found === true || mp?.data?.found === true || mp?.transaction;
             if (inMempool) {
-                return { content: [{ type: "text", text: `tx ${normalized.slice(0, 20)}…\n  Status: ⏳ PENDING (in mempool, awaiting block inclusion)` }] };
+                return { content: [{ type: "text", text: `tx ${displayHash}\n  Status: ⏳ PENDING (in mempool, awaiting block inclusion)` }] };
             }
-            return { content: [{ type: "text", text: `tx ${normalized.slice(0, 20)}…\n  Status: ❓ NOT FOUND\n  Either the tx hasn't propagated yet, the hash is wrong, or it was rejected during validation. Try again in 2 seconds; if still NOT FOUND after ~10 s the tx never landed.` }] };
+            return { content: [{ type: "text", text: `tx ${displayHash}\n  Status: ❓ NOT FOUND\n  Server response: ${res?.error ?? "(no error message)"}\n  Either the tx hasn't propagated yet, the hash is wrong, or it was rejected during validation.` }] };
         }
-        const height = tx.block_height ?? tx.height ?? "?";
-        const status = tx.status ?? "confirmed";
+        const tx = res?.data ?? res?.transaction ?? res;
+        const height = tx.block_height ?? tx.height ?? null;
+        const status = (tx.status ?? "confirmed").toString();
+        const confirmations = tx.confirmations ?? null;
         const ts = tx.timestamp ?? "?";
         const fromAddr = tx.from ?? tx.sender ?? "?";
         const toAddr = tx.to ?? tx.recipient ?? "?";
         const amount = tx.amount ?? tx.value ?? "?";
         const fee = tx.fee ?? "?";
         const ttype = tx.tx_type ?? tx.transaction_type ?? "?";
+        // Ghost-confirmation detection (see ghost_confirmation_tx_status_bug memory).
+        // v10.11.3 fixed the original `confirmed + 18M-confirmations + block_height:null`
+        // shape, but v10.11.8 surfaces a related regression: `dropped + 0-confirmations +
+        // block_height:null` for txs that ARE in block storage. We surface this clearly
+        // so operators can act on it.
+        const isGhost = height === null &&
+            (status.toLowerCase() === "dropped" || confirmations === 0);
+        if (isGhost) {
+            return {
+                content: [{
+                        type: "text",
+                        text: [
+                            `tx ${displayHash}`,
+                            `  Status:        ⚠ GHOST-CONFIRMATION SUSPECTED`,
+                            `  Server says:   status='${status}', block_height=null, confirmations=${confirmations}`,
+                            `  Timestamp:     ${ts}`,
+                            ``,
+                            `This shape matches the ghost_confirmation_tx_status_bug pattern.`,
+                            `Server reports the tx as dropped/null even though it may be in a confirmed`,
+                            `block. Verify by:`,
+                            `  curl http://89.149.241.126:8080/api/v1/blocks/<height>  — look for this`,
+                            `  hash in the transactions list.`,
+                            ``,
+                            `If you find it in a block, the tx_status handler has regressed in`,
+                            `v10.11.8 (despite the v10.11.3 ghost-confirmation fix). File as a`,
+                            `server bug; the tx is on-chain.`,
+                        ].join("\n"),
+                    }],
+            };
+        }
         return {
             content: [{
                     type: "text",
                     text: [
-                        `tx ${normalized.slice(0, 20)}…`,
-                        `  Status:   ✅ ${status.toString().toUpperCase()}`,
-                        `  Block:    #${height}`,
-                        `  Type:     ${ttype}`,
-                        `  From:     ${String(fromAddr).slice(0, 20)}…`,
-                        `  To:       ${String(toAddr).slice(0, 20)}…`,
-                        `  Amount:   ${amount}`,
-                        `  Fee:      ${fee}`,
-                        `  Timestamp: ${ts}`,
+                        `tx ${displayHash}`,
+                        `  Status:        ✅ ${status.toUpperCase()}`,
+                        `  Block:         #${height ?? "?"}`,
+                        `  Confirmations: ${confirmations ?? "?"}`,
+                        `  Type:          ${ttype}`,
+                        `  From:          ${String(fromAddr).slice(0, 20)}…`,
+                        `  To:            ${String(toAddr).slice(0, 20)}…`,
+                        `  Amount:        ${amount}`,
+                        `  Fee:           ${fee}`,
+                        `  Timestamp:     ${ts}`,
                     ].join("\n"),
                 }],
         };

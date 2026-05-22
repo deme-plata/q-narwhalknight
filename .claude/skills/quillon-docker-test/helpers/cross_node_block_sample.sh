@@ -123,8 +123,16 @@ try:
   d = j.get('data', {})
   hdr = d.get('header', {})
   txs = d.get('transactions', [])
-  # tx_count + first/last tx_id (hash) + the byte arrays (as compact hex prefixes)
-  tx_ids = [t.get('transaction_id') or t.get('hash') or '?' for t in txs]
+  # v2 fix: on-chain tx-hash field is 'id' (32-byte array), NOT 'transaction_id'
+  # or 'hash'. Convert byte array to hex string for comparison. Pre-v2 this
+  # helper silently returned '?' for every tx and lucked out on aggregate
+  # verdicts because '?' == '?' across all nodes.
+  def tid_to_hex(t):
+    v = t.get('id')
+    if isinstance(v, list) and v and isinstance(v[0], int):
+      return ''.join(f'{b:02x}' for b in v)
+    return t.get('transaction_id') or t.get('hash') or t.get('tx_id') or '?'
+  tx_ids = [tid_to_hex(t) for t in txs]
   def b2h8(field):
     # byte array → first 8 hex chars OR string verbatim
     v = hdr.get(field)
