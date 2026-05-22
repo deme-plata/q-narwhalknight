@@ -164,7 +164,7 @@ async function apiSigned(path, method = "GET", body, opts) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "2.7.2",
+    version: "2.7.3",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -1712,6 +1712,86 @@ server.tool("verify_node_consistency", "Compare two Quillon nodes' balance state
     return { content: [{ type: "text", text: lines.join("\n") }] };
 });
 // ============================================================
+// v2.7.3: random_block_consistency_check — forensic counterpart to
+// verify_node_consistency. balance-root proves all nodes agree on
+// wallet STATE; this proves all nodes agree on block CONTENT at any
+// historical height. Picks N random heights and compares header
+// fields (prev_block_hash, tx_root, solutions_root) + tx_count +
+// first/last tx_id across all listed nodes.
+//
+// Built to verify the v10.11.9 apply-gate fix didn't break history
+// retrieval. Also catches the kind of divergence that the existing
+// balance-root check can miss — e.g. two nodes with the same balance
+// state but different historical block contents (fork-then-converge).
+// ============================================================
+server.tool("random_block_consistency_check", "Forensic cross-node block-data audit. Picks <samples> random block heights uniformly from the valid range across the given nodes, fetches each block's header (height, prev_block_hash, tx_root, solutions_root) + transaction list (count + first/last tx_id) from every node, and compares. Catches divergence balance-root can't see — fork-then-converge, history rewrites, post-checkpoint apply-gate stalls that leave stored blocks unwalked. Runs the .claude/skills/quillon-docker-test/helpers/cross_node_block_sample.sh helper.", {
+    samples: z.number().int().min(1).max(1000).optional().describe("Number of random heights to sample (default 20, max 1000)."),
+    nodes: z.array(z.string()).min(2).max(6).optional().describe("Node base URLs (default: Epsilon prod + Delta prod). Pass 2-6 URLs to compare."),
+}, async ({ samples, nodes }) => {
+    const n = samples ?? 20;
+    const nodeUrls = nodes && nodes.length >= 2 ? nodes : [
+        "http://89.149.241.126:8080", // Epsilon prod (canonical)
+        "http://5.79.79.158:8080", // Delta prod
+    ];
+    const helper = "/opt/orobit/shared/q-narwhalknight/.claude/skills/quillon-docker-test/helpers/cross_node_block_sample.sh";
+    try {
+        const { exec } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const execP = promisify(exec);
+        const cmd = `${helper} ${n} ${nodeUrls.map((u) => `'${u.replace(/'/g, "")}'`).join(" ")}`;
+        const { stdout, stderr } = await execP(cmd, { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+        const lines = stdout.split("\n").filter((l) => l.trim());
+        const summary = lines.find((l) => l.startsWith("SUMMARY ")) ?? "(no SUMMARY line)";
+        const diverged = lines.filter((l) => l.startsWith("DIVERGENCE "));
+        const verdict = summary.match(/verdict=(PASS|FAIL)/)?.[1] ?? "?";
+        const out = [
+            `=== Random Block Consistency Check ===`,
+            ``,
+            `Samples:  ${n}`,
+            `Nodes:    ${nodeUrls.join(" + ")}`,
+            ``,
+            summary,
+            ``,
+        ];
+        if (verdict === "PASS") {
+            out.push("✅ VERDICT: PASS — all responding nodes agree on block contents at every sampled height.");
+            out.push("");
+            out.push("Limitations: UNREACHABLE samples in the pre-14M range are normal sparse-chain pattern");
+            out.push("(per sparse_chain_awareness memory: ~3-50% present pre-15M, 93-96% post-15M).");
+            out.push("Increase samples to get more hits in the dense range.");
+        }
+        else if (verdict === "FAIL") {
+            out.push(`❌ VERDICT: FAIL — ${diverged.length} divergence event(s):`);
+            out.push("");
+            for (const line of diverged.slice(0, 20)) {
+                out.push(`  ${line}`);
+            }
+            if (diverged.length > 20) {
+                out.push(`  ... (${diverged.length - 20} more — see stdout)`);
+            }
+            out.push("");
+            out.push("This means at least one sampled height has DIFFERENT block contents across nodes.");
+            out.push("Either: (a) chain fork — investigate which node is canonical via height + balance-root;");
+            out.push("(b) history corruption on one node — re-sync from a known-good peer.");
+        }
+        else {
+            out.push(`⚠ VERDICT: ${verdict} (no summary parseable — see raw output)`);
+            out.push("");
+            out.push("Raw output:");
+            out.push(stdout.slice(0, 2000));
+        }
+        if (stderr) {
+            out.push("");
+            out.push("--- stderr ---");
+            out.push(stderr.slice(0, 1000));
+        }
+        return { content: [{ type: "text", text: out.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `random_block_consistency_check failed: ${e?.message ?? e}\n\nTroubleshooting:\n  • Verify helper exists: ls -lh ${helper}\n  • Verify nodes are reachable: curl -s -m 5 <node>/api/v1/status\n  • Tool times out after 120s — increase samples gradually if tip is far` }] };
+    }
+});
+// ============================================================
 // QSHARE-1 TOOLS — L3 autonomous treasury share
 // Per docs/standards/qshare-treasury-protocol-spec.md
 // Phase 2 scaffolding: tools work against the on-chain contract
@@ -1913,7 +1993,10 @@ server.tool("agent_submit", "Submit a single agent transaction (v10.10.7+ AFL-1,
     seed: z.string().optional().describe("Optional seed override"),
 }, async ({ intent, seed }) => {
     try {
-        const res = await apiSigned("/agent/submit", "POST", { intent }, { seed });
+        // v2.7.3 fix: server's submit_single handler is Json<AgentIntent>
+        // (agent_api.rs), NOT Json<{intent: AgentIntent}>. Pre-fix wrapping
+        // sent {"intent": {...}} which deserialized as missing field `to`.
+        const res = await apiSigned("/agent/submit", "POST", intent, { seed });
         return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
     }
     catch (e) {
