@@ -11,7 +11,7 @@ import MintQUGUSDModal from './MintQUGUSDModal';
 import SwapSuccessModal from './SwapSuccessModal';
 import MarketAnalyzerPanel from './MarketAnalyzerPanel';
 import XListCrowdfundModal from './XListCrowdfundModal';
-import { qnkAPI } from '../services/api';
+import { qnkAPI, SEND_AND_SWAP_DISABLED, SEND_AND_SWAP_DISABLED_MESSAGE } from '../services/api';
 
 // v3.1.1: Helper to safely parse u128 values that may come as strings from the API
 const parseU128 = (value: string | number | undefined): number => {
@@ -5933,14 +5933,18 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                     alert(`❌ Swap failed: ${error instanceof Error ? error.message : 'Please try again'}`);
                   }
                 }}
-                disabled={isSwapping}
+                disabled={SEND_AND_SWAP_DISABLED || isSwapping}
                 className={`w-full py-4 rounded-xl font-bold text-white transition-all ${
-                  isSwapping
+                  SEND_AND_SWAP_DISABLED
+                    ? 'bg-gray-700 cursor-not-allowed opacity-50'
+                    : isSwapping
                     ? 'bg-gray-700 cursor-not-allowed opacity-70'
                     : 'bg-gradient-to-r from-quantum-cyan to-quantum-purple hover:shadow-lg hover:shadow-quantum-cyan/50'
                 }`}
               >
-                {isSwapping ? (
+                {SEND_AND_SWAP_DISABLED ? (
+                  'Swap Disabled — Maintenance'
+                ) : isSwapping ? (
                   <span className="flex items-center justify-center gap-3">
                     <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
@@ -5950,6 +5954,16 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
                   </span>
                 ) : 'Swap Tokens'}
               </button>
+
+              {/* v10.11.13: maintenance banner */}
+              {SEND_AND_SWAP_DISABLED && (
+                <div
+                  className="w-full p-3 mt-3 rounded-xl border border-amber-500/50 bg-amber-500/10 text-sm text-amber-100"
+                >
+                  <div className="font-bold text-amber-300 mb-1">⚠ Swap temporarily disabled</div>
+                  <div className="opacity-90">{SEND_AND_SWAP_DISABLED_MESSAGE}</div>
+                </div>
+              )}
 
               {/* 💰 v2.4.8-beta: DCA Button */}
               <button

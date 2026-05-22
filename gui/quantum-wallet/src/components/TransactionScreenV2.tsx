@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown, Radio, Globe } from 'lucide-react';
-import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG } from '../services/api';
+import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG, SEND_AND_SWAP_DISABLED, SEND_AND_SWAP_DISABLED_MESSAGE } from '../services/api';
 import { signTransactionForP2P, verifyPasswordHash } from '../services/walletAuth';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
@@ -72,8 +72,19 @@ function isValidBalance(balance: number, symbol?: string): boolean {
 // Set to false to use HTTP API (server signs and broadcasts via P2P gossipsub)
 //
 // v3.5.14-beta: P2P submission enabled - transactions now properly added to production_mempool
+// v10.11.9 (2026-05-22): DISABLED. signTransactionForP2P (walletAuth.ts:1395) hashes the
+// amount as 9-decimal i64 ("Backend will scale up to 24 decimals after signature verification"
+// — incoherent, since changing the bytes changes the signature). The chain runs on 24
+// decimals; server's verification message bytes don't match the wallet's hashed bytes →
+// Ed25519 verification fails 100% of the time. Symptom in Epsilon journalctl:
+//   "[MEMPOOL] reject: signature invalid — Ed25519 signature verification failed:
+//    Verification equation was not satisfied"
+// HTTP fallback works correctly because the server signs from the BIP39 mnemonic with
+// the chain's actual 24-decimal encoding. Flip back to true only after the P2P signing
+// protocol is updated to use 16-byte LE u128 amounts and the server-side verification
+// is updated to expect them.
 // ============================================================================
-const ENABLE_P2P_TRANSACTION_SUBMISSION = true;
+const ENABLE_P2P_TRANSACTION_SUBMISSION = false;
 
 interface WalletBalance {
   symbol: string;
@@ -116,6 +127,14 @@ interface TransactionState {
     confidence: number;
     blockHeight?: number;
   };
+  /** Real on-chain status from /api/v1/transactions/<hash> polling.
+   *  'submitted' = just submitted, not yet seen by API
+   *  'in_mempool' = node has it but not mined
+   *  'confirmed' = block_height present
+   *  'dropped' = mempool evicted before mining
+   *  Replaces the pre-v10.11.9 fake-counter that lied by always saying "Confirmed". */
+  chainStatus?: 'submitted' | 'in_mempool' | 'confirmed' | 'dropped';
+  chainBlockHeight?: number | null;
 }
 
 interface TransactionScreenV2Props {
@@ -395,63 +414,57 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     }
   }, []);
 
-  // v1.4.4: Confirmation tracking - poll for confirmations and update in real-time
+  // v10.11.9: Real on-chain status polling. Replaces the pre-v10.11.9 fake
+  // setInterval that just incremented `confirmations.current` every 500ms
+  // regardless of chain state, leading to the UI showing "Confirmed" for
+  // mempool-dropped txs (see ghost-confirmation pattern).
   useEffect(() => {
-    if (!transaction.success || !transaction.confirmations || transaction.confirmations.isFinalized) {
-      return;
-    }
+    if (!transaction.success || !transaction.txHash) return;
+    if (transaction.chainStatus === 'confirmed' || transaction.chainStatus === 'dropped') return;
 
-    // For INSTANT tier, finalize immediately
-    if (transaction.confirmations.tier === 'INSTANT') {
-      setTransaction(prev => ({
-        ...prev,
-        confirmations: prev.confirmations ? {
-          ...prev.confirmations,
-          isFinalized: true,
-          current: 0
-        } : undefined
-      }));
-      return;
-    }
+    let cancelled = false;
+    let attempts = 0;
+    const maxAttempts = 90; // ~3 min at 2s interval — generous mining window
 
-    // Poll for confirmations every 500ms (DAG-Knight has fast finality)
-    const confirmationInterval = setInterval(() => {
-      setTransaction(prev => {
-        if (!prev.confirmations || prev.confirmations.isFinalized) {
-          clearInterval(confirmationInterval);
-          return prev;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const r = await qnkAPI.getTransactionByHash(transaction.txHash);
+        if (cancelled) return;
+        if (r.success && r.data) {
+          const s = (r.data.status as string) ?? 'submitted';
+          const bh = (r.data.block_height as number | null | undefined) ?? null;
+          const confCount = (r.data.confirmations as number | undefined) ?? 0;
+          const mapped: NonNullable<TransactionState['chainStatus']> =
+            s === 'confirmed' ? 'confirmed' :
+            s === 'dropped' ? 'dropped' :
+            s === 'in_mempool' ? 'in_mempool' : 'submitted';
+          setTransaction(prev => ({
+            ...prev,
+            chainStatus: mapped,
+            chainBlockHeight: bh,
+            confirmations: prev.confirmations && mapped === 'confirmed' ? {
+              ...prev.confirmations,
+              current: Math.max(prev.confirmations.current, confCount),
+              isFinalized: confCount >= prev.confirmations.required,
+              estimatedTimeRemaining: confCount >= prev.confirmations.required ? 'Finalized!' : prev.confirmations.estimatedTimeRemaining,
+            } : prev.confirmations,
+          }));
+          if (mapped === 'confirmed' || mapped === 'dropped') return; // terminal — stop polling
         }
+      } catch {
+        // network blip — keep polling
+      }
+      attempts++;
+      if (!cancelled && attempts < maxAttempts) {
+        setTimeout(poll, 2000);
+      }
+    };
 
-        const newCurrent = prev.confirmations.current + 1;
-        const isFinalized = newCurrent >= prev.confirmations.required;
-
-        if (isFinalized) {
-          clearInterval(confirmationInterval);
-        }
-
-        // Calculate remaining time
-        const remaining = prev.confirmations.required - newCurrent;
-        const remainingSeconds = remaining * 2; // 2 seconds per block
-        const estimatedTimeRemaining = remaining <= 0
-          ? 'Finalized!'
-          : remainingSeconds < 60
-            ? `~${remainingSeconds} seconds`
-            : `~${Math.ceil(remainingSeconds / 60)} minute(s)`;
-
-        return {
-          ...prev,
-          confirmations: {
-            ...prev.confirmations,
-            current: newCurrent,
-            isFinalized,
-            estimatedTimeRemaining
-          }
-        };
-      });
-    }, 500); // Fast polling for DAG-Knight
-
-    return () => clearInterval(confirmationInterval);
-  }, [transaction.success, transaction.txHash]);
+    // First poll 1s after submit (gives the API time to see the tx)
+    const handle = setTimeout(poll, 1000);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [transaction.success, transaction.txHash, transaction.chainStatus]);
 
   // Fetch wallet balances to display the selected coin's wallet card
   useEffect(() => {
@@ -1832,20 +1845,41 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         )}
       </AnimatePresence>
 
+      {/* v10.11.13: Maintenance banner when Send is disabled chain-wide */}
+      {selectedWallet && SEND_AND_SWAP_DISABLED && (
+        <div
+          className="w-full p-4 mb-3 rounded-xl border border-amber-500/50"
+          style={{
+            background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.15) 0%, rgba(220, 38, 38, 0.10) 100%)',
+            boxShadow: '0 0 20px rgba(245, 158, 11, 0.15)',
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 mt-0.5 text-amber-400 flex-shrink-0" />
+            <div className="text-sm text-amber-100">
+              <div className="font-bold text-amber-300 mb-1">Send temporarily disabled</div>
+              <div className="opacity-90">{SEND_AND_SWAP_DISABLED_MESSAGE}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Send Button */}
       {selectedWallet && (
         <motion.button
-          onClick={handleSendTransaction}
-          disabled={transaction.isProcessing || !validateTransaction().valid}
+          onClick={SEND_AND_SWAP_DISABLED ? undefined : handleSendTransaction}
+          disabled={SEND_AND_SWAP_DISABLED || transaction.isProcessing || !validateTransaction().valid}
           className="w-full py-6 px-8 rounded-xl text-white font-bold text-xl flex items-center justify-center gap-4 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
           style={{
-            background: transaction.isProcessing || !validateTransaction().valid
-              ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.5) 0%, rgba(139, 92, 246, 0.5) 100%)'
-              : 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #FFA500 100%)',
-            boxShadow: '0 0 30px rgba(212, 175, 55, 0.3)'
+            background: SEND_AND_SWAP_DISABLED
+              ? 'linear-gradient(135deg, rgba(120, 120, 120, 0.5) 0%, rgba(80, 80, 80, 0.5) 100%)'
+              : (transaction.isProcessing || !validateTransaction().valid
+                ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.5) 0%, rgba(139, 92, 246, 0.5) 100%)'
+                : 'linear-gradient(135deg, #D4AF37 0%, #FFD700 50%, #FFA500 100%)'),
+            boxShadow: SEND_AND_SWAP_DISABLED ? 'none' : '0 0 30px rgba(212, 175, 55, 0.3)'
           }}
-          whileHover={{ scale: 1.02 }}
-          whileTap={{ scale: 0.98 }}
+          whileHover={SEND_AND_SWAP_DISABLED ? undefined : { scale: 1.02 }}
+          whileTap={SEND_AND_SWAP_DISABLED ? undefined : { scale: 0.98 }}
         >
           {transaction.isProcessing ? (
             <>
@@ -1882,17 +1916,50 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
           >
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-quantum-green/20">
-                  <Check className="w-6 h-6 text-quantum-green" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-quantum-green">Transaction Confirmed</h3>
-                  <p className="text-sm text-gray-400">
-                    {transaction.validatorCount
-                      ? `Verified by ${transaction.validatorCount} validator nodes (2f+1 consensus)`
-                      : 'Your quantum-secured transaction has been submitted'}
-                  </p>
-                </div>
+                {/* v10.11.9: Status icon + header reflect the real on-chain state. */}
+                {transaction.chainStatus === 'confirmed' ? (
+                  <>
+                    <div className="p-2 rounded-lg bg-quantum-green/20">
+                      <Check className="w-6 h-6 text-quantum-green" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-quantum-green">Transaction Confirmed</h3>
+                      <p className="text-sm text-gray-400">
+                        {transaction.chainBlockHeight
+                          ? `Mined in block #${transaction.chainBlockHeight.toLocaleString()}`
+                          : transaction.validatorCount
+                            ? `Verified by ${transaction.validatorCount} validator nodes (2f+1 consensus)`
+                            : 'On chain'}
+                      </p>
+                    </div>
+                  </>
+                ) : transaction.chainStatus === 'dropped' ? (
+                  <>
+                    <div className="p-2 rounded-lg bg-red-500/20">
+                      <X className="w-6 h-6 text-red-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-red-400">Transaction Dropped</h3>
+                      <p className="text-sm text-gray-400">
+                        The network evicted this transaction before mining. Try a higher fee or verify sender balance / nonce.
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="p-2 rounded-lg bg-quantum-cyan/20">
+                      <Radio className="w-6 h-6 text-quantum-cyan animate-pulse" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-quantum-cyan">Transaction Submitted</h3>
+                      <p className="text-sm text-gray-400">
+                        {transaction.chainStatus === 'in_mempool'
+                          ? 'In mempool — waiting for inclusion in a block…'
+                          : 'Broadcasting to network — awaiting confirmation…'}
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
               <button
                 onClick={resetTransaction}

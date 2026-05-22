@@ -365,6 +365,24 @@ export const FEE_REDUCTION_ACTIVATION_HEIGHT = 350000;
 export const CURRENT_MIN_FEE_QUG = 0.00021;  // Legacy fee before activation
 export const NEW_MIN_FEE_QUG = 0.000021;     // Reduced fee after activation (10x cheaper)
 
+// v10.11.13: emergency disable for Send + Swap while the
+// "tx_status=confirmed but block contains no transfers" bug is being
+// instrumented and patched. Symptom: send_signed + dex/swap return
+// success + tx_id, tx_status reports "confirmed at block N", but
+// /api/v1/blocks/N has 0 non-coinbase txs and balances never move on
+// the canonical apply path. Observed phantom-mint of 96M QUGUSD on
+// at least one wallet during the buggy window. Setting this true
+// hides the Send/Swap submit buttons and shows a maintenance banner
+// pointing to the open issue. Set false ONLY after v10.11.13's
+// instrumentation pinpoints the bug and v10.11.14 ships a verified
+// fix.
+export const SEND_AND_SWAP_DISABLED = true;
+export const SEND_AND_SWAP_DISABLED_MESSAGE =
+  'Send & Swap temporarily disabled: an apply-pipeline bug ' +
+  'in v10.11.x can silently mint outputs without debiting inputs. ' +
+  'Patch (v10.11.13 instrumentation, v10.11.14 fix) inbound. ' +
+  'Receives and balance queries continue to work normally.';
+
 export interface NodeStatus {
   node_id: string;
   current_round: number;
@@ -3575,7 +3593,7 @@ export async function verifyTipProof(proof: TipProofResponse): Promise<TipProofV
 
   // Phase-1: try the real wasm verifier
   try {
-    // @ts-expect-error — pkg/ may not exist yet; dynamic import handles absence
+    // pkg/ may not exist yet; dynamic import handles absence at runtime.
     // Construct the specifier at runtime so Rollup's static analysis doesn't
     // try to resolve it at build time. The .catch handles the actual
     // absence at runtime. Once `wasm-pack build` ships pkg/ into
