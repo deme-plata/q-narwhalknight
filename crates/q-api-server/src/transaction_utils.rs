@@ -90,17 +90,20 @@ impl NonceTracker {
     fn persist(&self, wallet: &Address, nonce: u64) {
         let Some(db) = self.db_clone() else { return };
         let key = Self::nonce_key(wallet);
-        if let Some(cf) = db.cf_handle("manifest") {
-            // put (default sync setting via WriteOptions); called once per
-            // send so cost is fine.
-            if let Err(e) = db.put_cf(&cf, &key, nonce.to_le_bytes()) {
-                tracing::warn!(
-                    "🔢 [NONCE] persist failed for wallet={} nonce={}: {}",
-                    hex::encode(&wallet[..8]),
-                    nonce,
-                    e
-                );
-            }
+        // Use `match` instead of `if let` so the cf binding lives in the
+        // same scope as `db` (the if-let temporary scope was too tight for
+        // rocksdb's BoundColumnFamily<'db> lifetime).
+        let cf = match db.cf_handle("manifest") {
+            Some(cf) => cf,
+            None => return,
+        };
+        if let Err(e) = db.put_cf(&cf, &key, nonce.to_le_bytes()) {
+            tracing::warn!(
+                "🔢 [NONCE] persist failed for wallet={} nonce={}: {}",
+                hex::encode(&wallet[..8]),
+                nonce,
+                e
+            );
         }
     }
 
