@@ -64,11 +64,16 @@ impl NonceTracker {
         k
     }
 
+    /// Clone the storage Arc out of the mutex so callers can use it without
+    /// holding the guard. Returns None if storage isn't set.
+    fn db_clone(&self) -> Option<Arc<rocksdb::DB>> {
+        self.storage.lock().as_ref().cloned()
+    }
+
     /// Lazy load: if wallet not in the in-memory DashMap, try to read from
     /// RocksDB. Returns the persisted value (or 0 if no persisted entry).
     fn load_persisted(&self, wallet: &Address) -> u64 {
-        let guard = self.storage.lock();
-        let Some(db) = guard.as_ref() else { return 0 };
+        let Some(db) = self.db_clone() else { return 0 };
         let key = Self::nonce_key(wallet);
         let cf = match db.cf_handle("manifest") {
             Some(cf) => cf,
@@ -83,11 +88,11 @@ impl NonceTracker {
     }
 
     fn persist(&self, wallet: &Address, nonce: u64) {
-        let guard = self.storage.lock();
-        let Some(db) = guard.as_ref() else { return };
+        let Some(db) = self.db_clone() else { return };
         let key = Self::nonce_key(wallet);
         if let Some(cf) = db.cf_handle("manifest") {
-            // put_sync to survive crash; called once per send so cost is fine.
+            // put (default sync setting via WriteOptions); called once per
+            // send so cost is fine.
             if let Err(e) = db.put_cf(&cf, &key, nonce.to_le_bytes()) {
                 tracing::warn!(
                     "🔢 [NONCE] persist failed for wallet={} nonce={}: {}",
