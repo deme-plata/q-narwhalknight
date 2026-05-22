@@ -1385,8 +1385,19 @@ pub struct UnifiedNetworkManager {
     /// v1.2.7-beta: Channel for async block pack responses (non-blocking handler)
     /// The handler spawns a task for slow DB operations, which sends the response through this channel.
     /// The main event loop polls this and calls send_response. Prevents ResponseOmission timeouts.
-    block_pack_response_tx: mpsc::UnboundedSender<(u64, q_types::BlockPackResponse)>,
-    block_pack_response_rx: mpsc::UnboundedReceiver<(u64, q_types::BlockPackResponse)>,
+    // v10.11.20 MEM-LEAK FIX (2026-05-22): bounded channel + try_send pattern.
+    // Pre-fix: unbounded_channel + .send() let responses queue without limit.
+    // Each BlockPackResponse contains Vec<QBlock> (50-150MB each). With
+    // 100-300 queued responses, the channel alone held 5-16GB heap. The
+    // existing semaphore (block_pack_semaphore = 4-16) limited concurrent
+    // PRODUCERS, but not the CHANNEL buffer downstream. If the consumer
+    // (block_pack_response_rx.recv() at line ~3700) stalls or routing
+    // doesn't find a matching waiter, responses pile up in the channel.
+    // 64-deep bounded channel + try_send: on full, peer retries on next
+    // gossipsub round. Worst case: ~10GB buffered (still bad but no longer
+    // pure heap-firehose).
+    block_pack_response_tx: mpsc::Sender<(u64, q_types::BlockPackResponse)>,
+    block_pack_response_rx: mpsc::Receiver<(u64, q_types::BlockPackResponse)>,
     /// v1.2.7-beta: Pending response channels indexed by request ID for async responses
     pending_response_channels: Arc<std::sync::Mutex<HashMap<u64, libp2p::request_response::ResponseChannel<q_types::BlockPackResponse>>>>,
     /// v10.9.41: Permanent-gap declarations tally. Key = (gap_start, gap_end), value =
@@ -2629,7 +2640,8 @@ impl UnifiedNetworkManager {
               peer_compat.is_bootstrap.len());
 
         // v1.2.7-beta: Create channel for async block pack responses (prevents ResponseOmission)
-        let (block_pack_response_tx, block_pack_response_rx) = mpsc::unbounded_channel();
+        // v10.11.20: BOUNDED at 64 (was unbounded). See struct-field comment.
+        let (block_pack_response_tx, block_pack_response_rx) = mpsc::channel(64);
 
         // v1.3.3-beta: Improved Tor detection for adaptive timeouts and batch sizes
         // Detect Tor from multiple sources:
@@ -4282,7 +4294,7 @@ impl UnifiedNetworkManager {
                                                   start_height, end_height, peer_clone);
                                             // Send empty response so peer retries later
                                             let empty = q_types::BlockPackResponse::from_blocks(vec![], end_height, 0);
-                                            let _ = response_tx.send((async_req_id, empty));
+                                            let _ = response_tx.send((async_req_id, empty)).await;
                                             return;
                                         }
                                     };
@@ -4360,7 +4372,7 @@ impl UnifiedNetworkManager {
                                                                 start_height,
                                                                 first_h.saturating_sub(1),
                                                             );
-                                                            if let Err(e) = response_tx.send((async_req_id, response)) {
+                                                            if let Err(e) = response_tx.send((async_req_id, response)).await {
                                                                 error!("❌ [BLOCK-PACK] Failed to send gap-declaration response: {}", e);
                                                             }
                                                             return;
@@ -4389,7 +4401,7 @@ impl UnifiedNetworkManager {
                                                                 start_height,
                                                                 gap_end,
                                                             );
-                                                            if let Err(e) = response_tx.send((async_req_id, response)) {
+                                                            if let Err(e) = response_tx.send((async_req_id, response)).await {
                                                                 error!("❌ [BLOCK-PACK] Failed to send gap-declaration response: {}", e);
                                                             }
                                                             return;
@@ -4439,7 +4451,7 @@ impl UnifiedNetworkManager {
                                     };
 
                                     // Send response back to main event loop for actual sending
-                                    if let Err(e) = response_tx.send((async_req_id, response)) {
+                                    if let Err(e) = response_tx.send((async_req_id, response)).await {
                                         error!("❌ [BLOCK-PACK] Failed to send async response to channel: {}", e);
                                     }
                                 });
