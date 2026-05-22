@@ -15,6 +15,26 @@ echo "  Quillon Graph — AI Wallet & Mining Setup"
 echo "  ========================================="
 echo ""
 
+# v2.9.0: detect Windows-via-Git-Bash / MSYS / Cygwin and redirect to the
+# PowerShell version. The bash path below assumes apt-get or brew is
+# available, which neither is on Windows. Adrian (Cursor on Windows) hit
+# this on 2026-05-22 — script gave up with "Please install Node.js first:
+# https://nodejs.org" instead of pointing to the PowerShell installer.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "  ⚠ Detected Git Bash / MSYS on Windows."
+    echo "  This bash script can't install Node.js on Windows."
+    echo "  Please run the PowerShell version instead:"
+    echo ""
+    echo "    irm https://quillon.xyz/setup-ai.ps1 | iex"
+    echo ""
+    echo "  Or download manually:"
+    echo "    curl -fsSL https://quillon.xyz/setup-ai.ps1 -o setup-ai.ps1"
+    echo "    powershell -ExecutionPolicy Bypass -File setup-ai.ps1"
+    exit 1
+    ;;
+esac
+
 # 1. Check Node.js
 if ! command -v node &>/dev/null; then
   echo "  Node.js not found. Installing..."

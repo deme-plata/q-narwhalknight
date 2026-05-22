@@ -1029,9 +1029,26 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   // skin, and the first skin in the system is the author's own. PvL comes
   // from chain data; full dynamic list waits for v10.11.1's /agents/connected
   // endpoint which adds registration + signed claims.
+  //
+  // v2.9.0 (2026-05-22): hardcoded fallback expanded from 1 → N entries so
+  // multiple AI agents that have onboarded via setup-ai.sh are listed even
+  // before /agents/connected ships server-side. Adrian (Cursor / Erid) was
+  // the first sibling-agent to appear on Quillon Graph; the UI was showing
+  // only the Claude Code session, hiding him.
   useEffect(() => {
-    const FIRST_AGENT_ADDRESS =
-      'qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb';
+    const KNOWN_AGENTS = [
+      {
+        address: 'qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb',
+        alias: 'Claude Opus 4.7 (Claude Code)',
+      },
+      {
+        // Adrian — Cursor agent on Erid persona, joined 2026-05-22.
+        // Settlement wallet (server-managed). Recorded in CLAUDE.md
+        // inter-agent collaboration section.
+        address: 'qnk1f97ff0b330c7790e8c82a57579052851d2c15239c78b6124fee6a74e4026d67',
+        alias: 'Adrian (Cursor / Erid)',
+      },
+    ];
 
     const fetchAgents = async () => {
       try {
@@ -1048,20 +1065,26 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         }
       } catch {/* endpoint not deployed yet — fall through to hardcoded */}
 
-      // Fallback: hardcoded first agent + chain-derived PvL/TVL.
-      // The wallet balance endpoint is public for the agent's own address
-      // because the agent has opted-in to publishing it.
+      // Fallback: KNOWN_AGENTS list + per-agent PvL (best-effort, opt-in only).
       try {
-        const balResp = await fetch(`/api/v1/wallets/${FIRST_AGENT_ADDRESS}/balance`);
-        let pvl = 0;
-        if (balResp.ok) {
-          const balJson = await balResp.json();
-          pvl = balJson?.data?.balance_qnk ?? 0;
-        }
-        // Chain TVL — sum of all native QUG balances. For now we use a
-        // conservative public proxy: the explorer's announced supply minted.
-        // If that endpoint also returns nothing, leave chainTvl=0 and the
-        // panel renders "—".
+        const enrichedAgents = await Promise.all(KNOWN_AGENTS.map(async (a) => {
+          let pvl = 0;
+          try {
+            const balResp = await fetch(`/api/v1/wallets/${a.address}/balance`);
+            if (balResp.ok) {
+              const balJson = await balResp.json();
+              pvl = balJson?.data?.balance_qnk ?? 0;
+            }
+          } catch {/* per-agent balance fetch is best-effort; private wallets stay at 0 */}
+          return {
+            address: a.address,
+            alias: a.alias,
+            pvl,
+            tx_count_24h: 0, // populated when v10.11.1 ships tx-count aggregation
+            win_rate: undefined,
+          };
+        }));
+
         let chainTvlValue = 0;
         try {
           const supResp = await fetch('/api/v1/explorer/supply');
@@ -1071,14 +1094,8 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           }
         } catch {/* ignore */}
 
-        setConnectedAgentsList([{
-          address: FIRST_AGENT_ADDRESS,
-          alias: 'Claude Opus 4.7',
-          pvl,
-          tx_count_24h: 0, // populated when v10.11.1 ships tx-count aggregation
-          win_rate: undefined,
-        }]);
-        setConnectedAgents(1);
+        setConnectedAgentsList(enrichedAgents);
+        setConnectedAgents(enrichedAgents.length);
         if (chainTvlValue > 0) setChainTvl(chainTvlValue);
       } catch {/* hardcoded fallback gracefully degrades to the original 0 state */}
     };
