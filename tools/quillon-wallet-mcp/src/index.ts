@@ -2147,7 +2147,10 @@ server.tool(
   },
   async ({ intent, seed }) => {
     try {
-      const res = await apiSigned("/agent/submit", "POST", { intent }, { seed }) as any;
+      // v2.7.3 fix: server's submit_single handler is Json<AgentIntent>
+      // (agent_api.rs), NOT Json<{intent: AgentIntent}>. Pre-fix wrapping
+      // sent {"intent": {...}} which deserialized as missing field `to`.
+      const res = await apiSigned("/agent/submit", "POST", intent, { seed }) as any;
       return { content: [{ type: "text", text: JSON.stringify(res?.data ?? res, null, 2) }] };
     } catch (e: any) {
       if (e instanceof SeedNotFoundError) return { content: [{ type: "text", text: `🔑 ${e.message}` }] };
