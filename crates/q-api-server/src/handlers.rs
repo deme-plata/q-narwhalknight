@@ -5610,7 +5610,14 @@ pub async fn send_transaction_signed(
     // default; X-Wallet-Auth doesn't double as tx authorization); fixing that
     // requires either client-pre-signing or a server-side trust flag and is
     // tracked separately.
-    tx.fee = q_types::MIN_TRANSACTION_FEE_V1;
+    // v10.11.11: was MIN_TRANSACTION_FEE_V1 (2100). validate_fee()'s zero-arg
+    // path uses validate_fee_at_height(0) i.e. LEGACY mode where
+    // min_required_fee = BASE_GAS * MIN_FEE_PER_GAS = 21_000. V1 (2_100) is
+    // 10x below the threshold → tx stored Invalid → never selected for a
+    // block → ghost ("/transactions/<hash>" reports confirmed but the tx is
+    // not in any block and balance never moves). MIN_TRANSACTION_FEE (21_000)
+    // always passes both legacy + reduced-fee modes.
+    tx.fee = q_types::MIN_TRANSACTION_FEE;
 
     // 7. Memo support (preserves the field used by inbox messages)
     if let Some(memo) = request.memo {
@@ -5900,7 +5907,14 @@ pub async fn send_transactions_batch(
             .tx_type(tx_type)
             .data(tx_data)
             .build_with_nonce(nonce, now);
-        tx.fee = q_types::MIN_TRANSACTION_FEE_V1;
+        // v10.11.11: was MIN_TRANSACTION_FEE_V1 (2100). validate_fee()'s zero-arg
+    // path uses validate_fee_at_height(0) i.e. LEGACY mode where
+    // min_required_fee = BASE_GAS * MIN_FEE_PER_GAS = 21_000. V1 (2_100) is
+    // 10x below the threshold → tx stored Invalid → never selected for a
+    // block → ghost ("/transactions/<hash>" reports confirmed but the tx is
+    // not in any block and balance never moves). MIN_TRANSACTION_FEE (21_000)
+    // always passes both legacy + reduced-fee modes.
+    tx.fee = q_types::MIN_TRANSACTION_FEE;
         if let Some(memo) = entry.memo {
             tx.memo = Some(memo);
             tx.id = transaction_utils::compute_transaction_id(&tx);
