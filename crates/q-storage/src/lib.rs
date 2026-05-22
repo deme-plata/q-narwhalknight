@@ -874,6 +874,34 @@ impl QStorage {
         storage.height_cache.update(initial_height).await;
         info!("✅ Height cache initialized with height {} (one-time DB scan)", initial_height);
 
+        // v10.11.x APPLY-GATE BOOT EXTENSION:
+        // scan_highest_contiguous_block_internal uses the v7.3.10 fast-recovery
+        // 100-block heuristic which can UNDER-ESTIMATE the true contiguous tip
+        // when checkpoint snapshots + turbo sync have left blocks above
+        // qblock:latest. Walk forward from `initial_height` using the new
+        // derived query — this catches the case where:
+        //   - qblock:latest = 18,098,949 (post-heal)
+        //   - qblock:tip_height = 18,114,949 (stored from prior sync session)
+        //   - All blocks in (18,098,949..=18,114,949] are present in DB
+        // Without this, the apply gate would park at 18,098,949 and require
+        // the 5s background tick to catch up after boot. With this, the cache
+        // is correct from the first /api/v1/status call onward.
+        match storage.advance_contiguous_tip(initial_height).await {
+            Ok(extended) if extended > initial_height => {
+                storage.height_cache.update(extended).await;
+                info!(
+                    "🔗 [APPLY-GATE BOOT] Extended contiguous tip {} → {} (+{} blocks via derived-query walk)",
+                    initial_height, extended, extended - initial_height
+                );
+            }
+            Ok(_) => {
+                debug!("🔗 [APPLY-GATE BOOT] No extension past scan_highest_contiguous result {}", initial_height);
+            }
+            Err(e) => {
+                warn!("🔗 [APPLY-GATE BOOT] advance_contiguous_tip failed at boot: {} (continuing — background tick will retry)", e);
+            }
+        }
+
         // v10.9.55 Task 4: load synced_through_atomic from disk, defaulting to the
         // contiguous height. Existing nodes upgrading to v10.9.55 don't have the
         // qblock:synced_through key persisted yet — initialize to contiguous so the
