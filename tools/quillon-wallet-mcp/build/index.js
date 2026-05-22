@@ -135,7 +135,13 @@ async function apiSigned(path, method = "GET", body, opts) {
             },
             redirect: "error",
         };
-        if (body)
+        // v2.8.3: rawBody bypasses JSON.stringify so callers can hand-build
+        // bodies containing u128 values as raw JSON integer literals (avoids
+        // serde u128 rejecting scientific-notation strings — see memory
+        // u128_in_json_gotcha.md).
+        if (opts?.rawBody !== undefined)
+            init.body = opts.rawBody;
+        else if (body)
             init.body = JSON.stringify(body);
         const res = await fetch(url, init);
         // Stash the derived address + source so the error path can report them.
@@ -164,7 +170,7 @@ async function apiSigned(path, method = "GET", body, opts) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "2.8.1",
+    version: "2.8.3",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -604,18 +610,17 @@ server.tool("send_qug", "Send QUG to another address. v2.7.1: migrated off the b
                 }],
         };
     }
-    // Build the signed body — u128 amount as JSON STRING to avoid the
-    // deserialize_u128 f64-precision-loss warning the server emits otherwise.
-    const bodyObj = {
-        from: signerAddress,
-        to: to_address,
-        amount: amtBase,
-        token_type: "QUG",
-    };
+    // v2.8.3: hand-build the body so amtBase lands as a raw JSON integer
+    // literal — JSON.stringify would either reject bigint or coerce a string
+    // to a quoted "5e+23" form, both of which the server's serde u128 rejects.
+    // See memory u128_in_json_gotcha.md.
+    const esc = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    let rawBody = `{"from":"${signerAddress}","to":"${to_address}","amount":${amtBase},"token_type":"QUG"`;
     if (memo)
-        bodyObj.memo = memo;
+        rawBody += `,"memo":"${esc(memo)}"`;
+    rawBody += `}`;
     try {
-        const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint });
+        const res = await apiSigned("/transactions/send_signed", "POST", undefined, { seed, endpoint, rawBody });
         if (res?.success === false) {
             return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient QUG balance (run get_balance)\n  • Bad signature — re-check seed file matches the wallet you intend\n  • Recipient address invalid` }] };
         }
@@ -1593,16 +1598,17 @@ server.tool("send_token", "Send a non-QUG token to another address. v2.7.1: migr
                 }],
         };
     }
-    const bodyObj = {
-        from: signerAddress,
-        to: to_address,
-        amount: amtBase,
-        token_type: tokenTypeWire,
-    };
+    // v2.8.3: hand-build body so u128 amount lands as raw integer literal.
+    // For Custom/Wrapped tokens token_type is an object; we still JSON-stringify
+    // that fragment but inject the raw amount.
+    const escT = (s) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    const tokenTypeFrag = typeof tokenTypeWire === "string" ? `"${escT(tokenTypeWire)}"` : JSON.stringify(tokenTypeWire);
+    let rawBodyT = `{"from":"${signerAddress}","to":"${to_address}","amount":${amtBase},"token_type":${tokenTypeFrag}`;
     if (memo)
-        bodyObj.memo = memo;
+        rawBodyT += `,"memo":"${escT(memo)}"`;
+    rawBodyT += `}`;
     try {
-        const res = await apiSigned("/transactions/send_signed", "POST", bodyObj, { seed, endpoint });
+        const res = await apiSigned("/transactions/send_signed", "POST", undefined, { seed, endpoint, rawBody: rawBodyT });
         if (res?.success === false) {
             return { content: [{ type: "text", text: `Send failed: ${res.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient ${tokenLabel} balance (run get_token_balance symbol=${tokenLabel})\n  • Custom token expects contract address as token_type — we used "${tokenTypeWire}"\n  • Recipient address invalid` }] };
         }
@@ -2134,7 +2140,8 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
             // Strategy: search pools where this token (by address or symbol) is one side.
             // Prefer pair against QUGUSD (direct USD); fallback to QUG-pair × QUG price.
             let best = {
-                price: null, src: "(no pool)", depth: "no-pool", isUsdSide: false
+                price: null, src: "(no pool)", depth: "no-pool", isUsdSide: false,
+                tokenSideReserve: 0, otherSideReserve: 0,
             };
             for (const p of pools) {
                 const t0 = String(p.token0 || "");
@@ -2180,10 +2187,46 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
                     depth = "very-thin";
                 // Prefer USD-pair over QUG-pair, and deeper pool over shallower
                 if (best.price === null || (usdSide && !best.isUsdSide) || (usdSide === best.isUsdSide && depth === "deep")) {
-                    best = { price: candidatePrice, src: `${p.pool_id} (${otherSide}-pair)`, depth, isUsdSide: usdSide };
+                    best = {
+                        price: candidatePrice,
+                        src: `${p.pool_id} (${otherSide}-pair)`,
+                        depth,
+                        isUsdSide: usdSide,
+                        tokenSideReserve,
+                        otherSideReserve,
+                    };
                 }
             }
-            return best;
+            return {
+                price: best.price,
+                src: best.src,
+                depth: best.depth,
+                tokenSideReserve: best.tokenSideReserve,
+                otherSideReserve: best.otherSideReserve,
+                otherSideIsUsd: best.isUsdSide,
+            };
+        };
+        // v2.8.2: Constant-product full-stack exit. Walks the AMM curve for
+        // selling `balance` of the token through the pricing pool (0.3% fee).
+        // Returns USD proceeds — the cash you'd ACTUALLY get out, not the
+        // price × balance wallpaper. For thin pools this can be 100×+ smaller
+        // than value_usd. Spits null if no pool / pool empty / OTHER side
+        // unpriced.
+        const computeExitRealizable = (balance, tokenSideReserve, otherSideReserve, otherSideIsUsd) => {
+            if (tokenSideReserve <= 0 || otherSideReserve <= 0 || balance <= 0)
+                return null;
+            const FEE_MUL = 0.997; // 0.3% AMM fee
+            const inputAfterFee = balance * FEE_MUL;
+            // Constant product k = rt * ro preserved after swap
+            const newRt = tokenSideReserve + inputAfterFee;
+            const newRo = (tokenSideReserve * otherSideReserve) / newRt;
+            const outOther = otherSideReserve - newRo;
+            if (outOther <= 0)
+                return null;
+            if (otherSideIsUsd)
+                return outOther; // QUGUSD ≈ $1
+            // OTHER is QUG → multiply by spot QUG price
+            return qugUsdPrice ? outOther * qugUsdPrice : null;
         };
         for (const [sym, info] of Object.entries(tokensField)) {
             const bal = Number(info.balance ?? 0);
@@ -2192,17 +2235,33 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
             const isLp = sym.toUpperCase().startsWith("LP-");
             let priceUsd = null;
             let valueUsd = null;
+            let exitRealizableUsd = null;
             let source = "";
             let depth = "n/a";
             if (sym.toUpperCase() === "QUGUSD") {
                 priceUsd = 1;
                 valueUsd = bal;
+                exitRealizableUsd = bal; // QUGUSD ≈ cash already
                 source = "stablecoin";
                 depth = "deep";
             }
             else if (sym.toUpperCase() === "QUG") {
                 priceUsd = qugUsdPrice;
                 valueUsd = qugUsdPrice ? bal * qugUsdPrice : null;
+                // Exit through QUG/QUGUSD pool
+                const qugPool = pools.find((p) => {
+                    const t0 = String(p.token0 || "").toUpperCase();
+                    const t1 = String(p.token1 || "").toUpperCase();
+                    return (t0 === "QUG" && t1 === "QUGUSD") || (t0 === "QUGUSD" && t1 === "QUG");
+                });
+                if (qugPool) {
+                    const t0 = String(qugPool.token0 || "").toUpperCase();
+                    const r0 = Number(BigInt(qugPool.reserve0) / 10n ** 18n) / 1e6;
+                    const r1 = Number(BigInt(qugPool.reserve1) / 10n ** 18n) / 1e6;
+                    const qugReserve = t0 === "QUG" ? r0 : r1;
+                    const usdReserve = t0 === "QUG" ? r1 : r0;
+                    exitRealizableUsd = computeExitRealizable(bal, qugReserve, usdReserve, true);
+                }
                 source = qugUsdPrice ? `QUG/QUGUSD ${qugUsdSource}` : "(no QUG/QUGUSD pool)";
                 depth = "deep";
             }
@@ -2214,6 +2273,7 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
                 const r = findPriceForCustom(sym, info.contract_address ?? null);
                 priceUsd = r.price;
                 valueUsd = priceUsd !== null ? bal * priceUsd : null;
+                exitRealizableUsd = computeExitRealizable(bal, r.tokenSideReserve, r.otherSideReserve, r.otherSideIsUsd);
                 source = r.src;
                 depth = r.depth;
             }
@@ -2225,6 +2285,7 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
                 contract_address: info.contract_address ?? null,
                 price_usd: priceUsd,
                 value_usd: valueUsd,
+                exit_realizable_usd: exitRealizableUsd,
                 source,
                 depth_tag: depth,
                 is_lp: isLp,
@@ -2244,13 +2305,22 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
         });
         // 6. Totals
         const totalUsd = rows.reduce((s, r) => s + (r.value_usd ?? 0), 0);
-        const realizableUsd = rows
-            .filter((r) => r.depth_tag === "deep" || r.depth_tag === "medium" || r.symbol.toUpperCase() === "QUGUSD" || r.symbol.toUpperCase() === "QUG")
-            .reduce((s, r) => s + (r.value_usd ?? 0), 0);
-        const paperOnlyUsd = totalUsd - realizableUsd;
+        const totalExitRealizable = rows.reduce((s, r) => s + (r.exit_realizable_usd ?? 0), 0);
+        const paperOnlyUsd = totalUsd - totalExitRealizable;
         const noPriceCount = rows.filter((r) => r.value_usd === null && !r.is_lp).length;
         // 7. Render
         const fmt = (n, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+        const compactUsd = (n) => {
+            if (n === null)
+                return "—";
+            if (n >= 1e9)
+                return "$" + fmt(n / 1e9, 2) + "B";
+            if (n >= 1e6)
+                return "$" + fmt(n / 1e6, 2) + "M";
+            if (n >= 1e3)
+                return "$" + fmt(n / 1e3, 2) + "K";
+            return "$" + fmt(n, 2);
+        };
         const out = [
             `=== Portfolio Overview ===`,
             ``,
@@ -2258,38 +2328,48 @@ server.tool("portfolio_overview", "Birdview of the agent wallet's holdings + poo
             `  QUG spot: ${qugUsdPrice ? "$" + fmt(qugUsdPrice) + " (via " + qugUsdSource + ")" : "(no QUG/QUGUSD pool found)"}`,
             `  Pools loaded: ${pools.length}`,
             ``,
-            `  ┌─${"─".repeat(11)}─┬─${"─".repeat(20)}─┬─${"─".repeat(14)}─┬─${"─".repeat(18)}─┬─${"─".repeat(11)}─┐`,
-            `  │ ${"Token".padEnd(11)} │ ${"Balance".padStart(20)} │ ${"Price ($)".padStart(14)} │ ${"Value ($)".padStart(18)} │ ${"Depth".padEnd(11)} │`,
-            `  ├─${"─".repeat(11)}─┼─${"─".repeat(20)}─┼─${"─".repeat(14)}─┼─${"─".repeat(18)}─┼─${"─".repeat(11)}─┤`,
+            `  ┌─${"─".repeat(11)}─┬─${"─".repeat(18)}─┬─${"─".repeat(14)}─┬─${"─".repeat(14)}─┬─${"─".repeat(14)}─┬─${"─".repeat(11)}─┐`,
+            `  │ ${"Token".padEnd(11)} │ ${"Balance".padStart(18)} │ ${"Price ($)".padStart(14)} │ ${"Mark $".padStart(14)} │ ${"Exit $".padStart(14)} │ ${"Depth".padEnd(11)} │`,
+            `  ├─${"─".repeat(11)}─┼─${"─".repeat(18)}─┼─${"─".repeat(14)}─┼─${"─".repeat(14)}─┼─${"─".repeat(14)}─┼─${"─".repeat(11)}─┤`,
         ];
         for (const r of rows) {
             const pStr = r.price_usd !== null ? fmt(r.price_usd, 6) : "—";
-            const vStr = r.value_usd !== null ? fmt(r.value_usd, 2) : "(no market)";
+            const vStr = r.value_usd !== null ? compactUsd(r.value_usd) : "(no market)";
+            const eStr = r.exit_realizable_usd !== null ? compactUsd(r.exit_realizable_usd) : "—";
             const dTag = r.is_lp ? "LP" : r.depth_tag;
-            out.push(`  │ ${r.symbol.padEnd(11)} │ ${fmt(r.balance, 4).padStart(20)} │ ${pStr.padStart(14)} │ ${vStr.padStart(18)} │ ${dTag.padEnd(11)} │`);
+            out.push(`  │ ${r.symbol.padEnd(11)} │ ${fmt(r.balance, 4).padStart(18)} │ ${pStr.padStart(14)} │ ${vStr.padStart(14)} │ ${eStr.padStart(14)} │ ${dTag.padEnd(11)} │`);
         }
-        out.push(`  └─${"─".repeat(11)}─┴─${"─".repeat(20)}─┴─${"─".repeat(14)}─┴─${"─".repeat(18)}─┴─${"─".repeat(11)}─┘`);
+        out.push(`  └─${"─".repeat(11)}─┴─${"─".repeat(18)}─┴─${"─".repeat(14)}─┴─${"─".repeat(14)}─┴─${"─".repeat(14)}─┴─${"─".repeat(11)}─┘`);
         out.push(``);
-        out.push(`  ═══ TOTALS ═══`);
-        out.push(`    Mark-to-market: $${fmt(totalUsd)}`);
-        out.push(`    Realizable (deep+medium pools only): $${fmt(realizableUsd)}`);
-        if (paperOnlyUsd > 0) {
-            out.push(`    Paper-only (thin-pool — can't realize at quoted price): $${fmt(paperOnlyUsd)}`);
+        out.push(`  ═══ THE TWO NUMBERS THAT MATTER ═══`);
+        out.push(`    Mark-to-market (wallpaper):     ${compactUsd(totalUsd)}`);
+        out.push(`    Exit-realizable (CASH if I sold everything now via current pools):  ${compactUsd(totalExitRealizable)}`);
+        const collapseRatio = totalUsd > 0 ? (1 - totalExitRealizable / totalUsd) * 100 : 0;
+        if (collapseRatio > 5) {
+            out.push(`    Wallpaper collapse:             ${fmt(collapseRatio, 1)}%  (paper > cash by this much — thin-pool effect)`);
         }
         if (noPriceCount > 0) {
-            out.push(`    Tokens with no market: ${noPriceCount} (held but no pool to price against)`);
+            out.push(`    Tokens with no market:          ${noPriceCount}  (held but no pool to price against)`);
         }
+        out.push(``);
+        out.push(`  ═══ HOW EXIT-REALIZABLE IS COMPUTED ═══`);
+        out.push(`    For each token, walks the pricing pool's constant-product curve as`);
+        out.push(`    if selling your FULL balance in one shot (0.3% fee, no slippage`);
+        out.push(`    protection). Output is the USD-equivalent proceeds — the cash you`);
+        out.push(`    would actually get out, not balance × spot-price. On thin pools the`);
+        out.push(`    two numbers diverge by 10–1000×.`);
+        out.push(``);
+        out.push(`    Real exits over time would do BETTER than this (TWAP into the pool,`);
+        out.push(`    wait for other LPs / external buyers, route across multiple pools)`);
+        out.push(`    and WORSE if competing sellers front-run you. This is a one-shot`);
+        out.push(`    worst-case-immediate-exit bound. Use it as your floor.`);
         out.push(``);
         out.push(`  ═══ DEPTH LEGEND ═══`);
         out.push(`    deep        > 10,000 QUG-equiv depth in pricing pool (~$22M+)`);
         out.push(`    medium      1,000 – 10,000 QUG-equiv depth`);
-        out.push(`    thin        50 – 1,000 QUG-equiv (selling full stack tanks price)`);
+        out.push(`    thin        50 – 1,000 QUG-equiv (full-stack exit tanks price)`);
         out.push(`    very-thin   < 50 QUG-equiv (essentially you-vs-yourself)`);
         out.push(`    no-pool     no liquidity pool exists for this token`);
-        out.push(``);
-        out.push(`  Note: thin-pool values are MARK-TO-MARKET, not realizable. The displayed`);
-        out.push(`  price is what the next 1-unit swap would fill at; selling your full`);
-        out.push(`  inventory would crash the pool. Treat realizable line as cash equivalent.`);
         return { content: [{ type: "text", text: out.join("\n") }] };
     }
     catch (e) {

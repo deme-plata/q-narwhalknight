@@ -21,24 +21,106 @@ use dashmap::DashMap;
 
 /// Nonce tracker for replay attack prevention
 /// Each wallet has a monotonically increasing nonce
+///
+/// v10.11.12: persistence added. Pre-v10.11.12 this was purely in-memory;
+/// every q-api-server restart wiped per-wallet nonces back to 0 while the
+/// chain remembered higher values from previous sends. First post-restart
+/// send_signed call per wallet got nonce=0 → stale (already used by a
+/// previous lifetime's tx) → silently dropped between mempool admit and
+/// block-pack selection. Reported as "send 100 still 2652" by the user
+/// 2026-05-22 after the v10.11.11 restart. Fix: lazy-load on first access,
+/// write-through on each increment. RocksDB CF "manifest" key
+/// "nonce_<32-byte-address-raw>" -> u64 LE.
 #[derive(Debug, Default)]
 pub struct NonceTracker {
     /// wallet_address -> next_expected_nonce
     nonces: DashMap<Address, u64>,
+    /// Persistence handle (set via `set_storage` after construction).
+    /// When None, NonceTracker behaves as the pre-v10.11.12 in-memory-only
+    /// version (still useful for tests / non-RocksDB callers).
+    storage: parking_lot::Mutex<Option<Arc<rocksdb::DB>>>,
 }
+
+const NONCE_KEY_PREFIX: &[u8] = b"nonce_";
 
 impl NonceTracker {
     pub fn new() -> Self {
         Self {
             nonces: DashMap::new(),
+            storage: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// v10.11.12: attach a RocksDB handle so nonce updates survive restart.
+    /// Must be called once during boot, before any get_and_increment hits.
+    pub fn set_storage(&self, db: Arc<rocksdb::DB>) {
+        *self.storage.lock() = Some(db);
+    }
+
+    fn nonce_key(wallet: &Address) -> Vec<u8> {
+        let mut k = Vec::with_capacity(NONCE_KEY_PREFIX.len() + 32);
+        k.extend_from_slice(NONCE_KEY_PREFIX);
+        k.extend_from_slice(wallet);
+        k
+    }
+
+    /// Lazy load: if wallet not in the in-memory DashMap, try to read from
+    /// RocksDB. Returns the persisted value (or 0 if no persisted entry).
+    fn load_persisted(&self, wallet: &Address) -> u64 {
+        let guard = self.storage.lock();
+        let Some(db) = guard.as_ref() else { return 0 };
+        let key = Self::nonce_key(wallet);
+        let cf = match db.cf_handle("manifest") {
+            Some(cf) => cf,
+            None => return 0,
+        };
+        match db.get_cf(&cf, &key) {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0u8; 8]))
+            }
+            _ => 0,
+        }
+    }
+
+    fn persist(&self, wallet: &Address, nonce: u64) {
+        let guard = self.storage.lock();
+        let Some(db) = guard.as_ref() else { return };
+        let key = Self::nonce_key(wallet);
+        if let Some(cf) = db.cf_handle("manifest") {
+            // put_sync to survive crash; called once per send so cost is fine.
+            if let Err(e) = db.put_cf(&cf, &key, nonce.to_le_bytes()) {
+                tracing::warn!(
+                    "🔢 [NONCE] persist failed for wallet={} nonce={}: {}",
+                    hex::encode(&wallet[..8]),
+                    nonce,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Ensure the in-memory entry reflects max(in-memory, persisted).
+    /// Called by every accessor before reading so we don't hand out stale
+    /// nonces post-restart.
+    fn refresh_from_storage(&self, wallet: &Address) {
+        if self.nonces.contains_key(wallet) {
+            return;
+        }
+        let persisted = self.load_persisted(wallet);
+        if persisted > 0 {
+            self.nonces.insert(*wallet, persisted);
         }
     }
 
     /// Get the next nonce for a wallet (and increment it)
     pub fn get_and_increment(&self, wallet: &Address) -> u64 {
+        self.refresh_from_storage(wallet);
         let mut entry = self.nonces.entry(*wallet).or_insert(0);
         let nonce = *entry;
         *entry += 1;
+        let next = *entry;
+        drop(entry);
+        self.persist(wallet, next);
         nonce
     }
 
@@ -50,14 +132,19 @@ impl NonceTracker {
     /// the whole range up front lets all batch items be built + submitted in parallel
     /// without contending on `get_and_increment`. Replaces N atomic ops with 1.
     pub fn allocate_range(&self, wallet: &Address, count: u64) -> u64 {
+        self.refresh_from_storage(wallet);
         let mut entry = self.nonces.entry(*wallet).or_insert(0);
         let first = *entry;
         *entry += count;
+        let next = *entry;
+        drop(entry);
+        self.persist(wallet, next);
         first
     }
 
     /// Get the current nonce for a wallet without incrementing
     pub fn get_current(&self, wallet: &Address) -> u64 {
+        self.refresh_from_storage(wallet);
         self.nonces.get(wallet).map(|v| *v).unwrap_or(0)
     }
 
@@ -72,9 +159,11 @@ impl NonceTracker {
         }
     }
 
-    /// Set nonce for a wallet (used for loading from persistent storage)
+    /// Set nonce for a wallet (used for loading from persistent storage).
+    /// v10.11.12: also persists immediately.
     pub fn set_nonce(&self, wallet: &Address, nonce: u64) {
         self.nonces.insert(*wallet, nonce);
+        self.persist(wallet, nonce);
     }
 }
 

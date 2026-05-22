@@ -3,7 +3,7 @@
 # Run: curl -fsSL https://quillon.xyz/setup-ai.sh | bash
 #
 # This script sets up AI-powered wallet and mining management.
-# Currently supports Claude Code. More AI assistants coming soon.
+# Currently supports Claude Code and Cursor. Auto-detects what you have.
 # After setup, just say:
 #   "Create a wallet"
 #   "Start mining"
@@ -30,16 +30,32 @@ if ! command -v node &>/dev/null; then
 fi
 echo "  ✓ Node.js $(node --version)"
 
-# 2. Check Claude Code
-if ! command -v claude &>/dev/null; then
+# 2. Detect AI clients (Claude Code, Cursor, or both)
+HAS_CLAUDE=0
+HAS_CURSOR=0
+
+if command -v claude &>/dev/null; then
+  HAS_CLAUDE=1
+  echo "  ✓ Claude Code found"
+fi
+
+# Cursor detection: look for the config dir (works on Linux/macOS/Git-Bash on Windows)
+if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
+  HAS_CURSOR=1
+  echo "  ✓ Cursor found"
+fi
+
+if [ "$HAS_CLAUDE" = "0" ] && [ "$HAS_CURSOR" = "0" ]; then
   echo ""
-  echo "  Claude Code not found. Install it:"
-  echo "    npm install -g @anthropic-ai/claude-code"
+  echo "  No supported AI client found."
+  echo ""
+  echo "  Install ONE of:"
+  echo "    Claude Code:  npm install -g @anthropic-ai/claude-code"
+  echo "    Cursor:       https://cursor.sh"
   echo ""
   echo "  Then re-run: curl -fsSL https://quillon.xyz/setup-ai.sh | bash"
   exit 1
 fi
-echo "  ✓ Claude Code found"
 
 # 3. Install Quillon MCP server
 INSTALL_DIR="$HOME/.quillon/mcp"
@@ -47,7 +63,7 @@ mkdir -p "$INSTALL_DIR"
 
 echo "  Downloading Quillon AI tools..."
 
-# Download the MCP server files
+# Download the MCP server tarball
 curl -fsSL "https://quillon.xyz/downloads/quillon-wallet-mcp.tar.gz" -o "/tmp/quillon-mcp.tar.gz" 2>/dev/null || {
   # Fallback: create minimal MCP server inline
   mkdir -p "$INSTALL_DIR/build" "$INSTALL_DIR/src"
@@ -70,14 +86,16 @@ if [ -f "/tmp/quillon-mcp.tar.gz" ]; then
   rm -f /tmp/quillon-mcp.tar.gz
 fi
 
-echo "  ✓ Quillon AI tools installed"
+echo "  ✓ Quillon AI tools installed at $INSTALL_DIR"
 
-# 4. Configure Claude Code settings
-SETTINGS_DIR="$HOME/.claude"
-mkdir -p "$SETTINGS_DIR"
-SETTINGS_FILE="$SETTINGS_DIR/settings.json"
+# 4. Configure each detected client
+MCP_INDEX="$INSTALL_DIR/build/index.js"
 
-if command -v node &>/dev/null; then
+# 4a. Claude Code → $HOME/.claude/settings.json (mcpServers key)
+if [ "$HAS_CLAUDE" = "1" ]; then
+  SETTINGS_DIR="$HOME/.claude"
+  mkdir -p "$SETTINGS_DIR"
+  SETTINGS_FILE="$SETTINGS_DIR/settings.json"
   node -e "
     const fs = require('fs');
     const path = '$SETTINGS_FILE';
@@ -86,20 +104,42 @@ if command -v node &>/dev/null; then
     if (!settings.mcpServers) settings.mcpServers = {};
     settings.mcpServers['quillon-wallet'] = {
       command: 'node',
-      args: ['$INSTALL_DIR/build/index.js'],
+      args: ['$MCP_INDEX'],
       env: { QUILLON_API_URL: 'https://quillon.xyz/api/v1' }
     };
     fs.writeFileSync(path, JSON.stringify(settings, null, 2));
   " 2>/dev/null
+  echo "  ✓ Claude Code configured at $SETTINGS_FILE"
 fi
 
-echo "  ✓ Claude Code configured"
+# 4b. Cursor → $HOME/.cursor/mcp.json (standalone file, mcpServers key)
+if [ "$HAS_CURSOR" = "1" ]; then
+  CURSOR_DIR="$HOME/.cursor"
+  mkdir -p "$CURSOR_DIR"
+  CURSOR_FILE="$CURSOR_DIR/mcp.json"
+  node -e "
+    const fs = require('fs');
+    const path = '$CURSOR_FILE';
+    let cfg = {};
+    try { cfg = JSON.parse(fs.readFileSync(path, 'utf8')); } catch(e) {}
+    if (!cfg.mcpServers) cfg.mcpServers = {};
+    cfg.mcpServers['quillon-wallet'] = {
+      command: 'node',
+      args: ['$MCP_INDEX'],
+      env: { QUILLON_API_URL: 'https://quillon.xyz/api/v1' }
+    };
+    fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
+  " 2>/dev/null
+  echo "  ✓ Cursor configured at $CURSOR_FILE"
+  echo "    → Restart Cursor or reload window for MCP to load"
+fi
 
 echo ""
 echo "  ╔═══════════════════════════════════════════════╗"
 echo "  ║        Setup Complete!                        ║"
 echo "  ╠═══════════════════════════════════════════════╣"
 echo "  ║                                               ║"
+if [ "$HAS_CLAUDE" = "1" ]; then
 echo "  ║  Open Claude Code and say:                    ║"
 echo "  ║                                               ║"
 echo "  ║    \"Create a wallet\"                          ║"
@@ -107,6 +147,15 @@ echo "  ║    \"Start mining on this machine\"             ║"
 echo "  ║    \"Set up a node on this server\"             ║"
 echo "  ║    \"What's the network status?\"               ║"
 echo "  ║                                               ║"
+fi
+if [ "$HAS_CURSOR" = "1" ]; then
+echo "  ║  In Cursor (Agent mode, after reload):        ║"
+echo "  ║                                               ║"
+echo "  ║    \"What Quillon tools are available?\"        ║"
+echo "  ║    \"Show my QUG balance\"                      ║"
+echo "  ║    \"Check node sync status\"                   ║"
+echo "  ║                                               ║"
+fi
 echo "  ║  No GPG. No air-gapping. Just works.          ║"
 echo "  ║                                               ║"
 echo "  ║  quillon.xyz | Post-Quantum Electronic Cash   ║"

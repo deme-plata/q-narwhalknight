@@ -2770,7 +2770,15 @@ impl AppState {
             storage_engine: storage_engine.clone(),
 
             // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
-            nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+            // v10.11.12: wire RocksDB so the tracker survives restarts — pre-fix
+            // every restart wiped per-wallet nonces back to 0 while the chain
+            // remembered higher values, so first post-restart send_signed per
+            // wallet got nonce=0 (already used) and was silently dropped.
+            nonce_tracker: {
+                let nt = transaction_utils::NonceTracker::new();
+                nt.set_storage(storage_engine.get_hot_db().db());
+                Arc::new(nt)
+            },
             // ✅ v9.7.0: Cross-block tx dedup cache
             applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
 
@@ -4207,7 +4215,15 @@ impl AppState {
             storage_engine: storage_engine.clone(),
 
             // ✅ v1.0.91-beta: Initialize nonce tracker for replay attack prevention
-            nonce_tracker: Arc::new(transaction_utils::NonceTracker::new()),
+            // v10.11.12: wire RocksDB so the tracker survives restarts — pre-fix
+            // every restart wiped per-wallet nonces back to 0 while the chain
+            // remembered higher values, so first post-restart send_signed per
+            // wallet got nonce=0 (already used) and was silently dropped.
+            nonce_tracker: {
+                let nt = transaction_utils::NonceTracker::new();
+                nt.set_storage(storage_engine.get_hot_db().db());
+                Arc::new(nt)
+            },
             // ✅ v9.7.0: Cross-block tx dedup cache
             applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
 
