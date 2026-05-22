@@ -5699,8 +5699,24 @@ pub async fn send_transaction_signed(
     // perform_validation skips the inner-signature check (which would
     // otherwise reject because we leave tx.signature empty — the
     // X-Wallet-Auth header IS the proof of authorization here).
+    //
+    // v10.11.16: mark via BOTH tx.id (SHA3-256 of core fields) AND tx.hash()
+    // (postcard-based). The mempool's TxValidator looks up trusted_via_auth
+    // via transaction.hash() at production_mempool.rs:873, but pre-v10.11.16
+    // we only called mark_auth_trusted(tx.id, …) — those hashes differ
+    // (documented at block_producer.rs:966-970). The lookup missed → tx
+    // rejected by mempool with "signature invalid" because tx.signature
+    // is empty by design → tx never enters production_mempool with Valid
+    // status → block_producer never packs it → tx ghost-confirmed via
+    // the dag_knight cert callback path but never landed in any block
+    // → v10.11.15 persist call DID move money, but block-recovery on
+    // restart re-derived from chain (which had no record) and reverted.
+    //
+    // Marking BOTH ensures the auth-trusted bypass fires regardless of
+    // which hash variant the lookup uses.
     if let Some(mp) = state.production_mempool.as_ref() {
         mp.mark_auth_trusted(tx.id, from_address);
+        mp.mark_auth_trusted(tx.hash(), from_address);
     }
 
     // 8. Submit unsigned tx to mempool (same path /dex/swap uses)
@@ -5980,7 +5996,10 @@ pub async fn send_transactions_batch(
         }
 
         if let Some(mp) = state.production_mempool.as_ref() {
+            // v10.11.16: mark via BOTH tx.id (SHA3) and tx.hash() (postcard)
+            // — see send_transaction_signed's identical fix for rationale.
             mp.mark_auth_trusted(tx.id, from_address);
+            mp.mark_auth_trusted(tx.hash(), from_address);
         }
 
         prepared.push(PreparedTx { index: i, tx });
