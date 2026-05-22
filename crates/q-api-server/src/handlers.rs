@@ -4017,21 +4017,21 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             let new_recipient_balance = old_recipient_balance + tx.amount;
                             balances.insert(tx.to, new_recipient_balance);
 
-                            // v10.11.15: PERSIST to RocksDB. The authoritative variant
-                            // bypasses the max-wins guard — debits are expected to LOWER
-                            // the value, so the standard save_wallet_balance would refuse
-                            // them and we'd be back to the money-printer pattern.
-                            // Use the SHA3-256 hex address as the storage key.
+                            // v10.11.17 ROOT-CAUSE FIX: Do NOT persist to RocksDB here.
+                            // v10.11.15 added save_wallet_balance_authoritative writes for
+                            // both sender and recipient, but that path runs IN ADDITION TO
+                            // balance_consensus.process_block, which credits/debits the same
+                            // tx when the block lands. Two appliers → double-credit on
+                            // recipient (e.g. send 4 QUG, receiver sees +8). v10.11.16's
+                            // mark_auth_trusted dual-hash fix means the tx now reaches
+                            // block_producer and balance_consensus runs cleanly at block-
+                            // apply time, so this branch only needs to update the in-memory
+                            // wallet_balances HashMap for fast UX visibility — the
+                            // canonical RocksDB write happens in balance_consensus.
                             let from_hex = hex::encode(&tx.from);
                             let to_hex = hex::encode(&tx.to);
-                            if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&tx.from, new_sender_balance).await {
-                                warn!("v10.11.15: Failed to persist sender QUG balance ({}): {}", &from_hex[..16], e);
-                            }
-                            if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&tx.to, new_recipient_balance).await {
-                                warn!("v10.11.15: Failed to persist recipient QUG balance ({}): {}", &to_hex[..16], e);
-                            }
                             tracing::warn!(
-                                "💸 [v10.11.15 NATIVE-QUG APPLY] {} → {} amount={} fee={} | sender {} → {} | recipient {} → {}",
+                                "💸 [v10.11.17 NATIVE-QUG MEM-ONLY] {} → {} amount={} fee={} | sender {} → {} | recipient {} → {} (RocksDB write deferred to balance_consensus.process_block)",
                                 &from_hex[..16], &to_hex[..16], tx.amount, tx.fee,
                                 old_sender_balance, new_sender_balance,
                                 old_recipient_balance, new_recipient_balance,
