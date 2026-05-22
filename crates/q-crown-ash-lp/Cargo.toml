@@ -1,0 +1,21 @@
+[package]
+name = "q-crown-ash-lp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Crown & Ash LP primitives — the bridge between in-game faction activity
+# and on-chain QUG/LP value.
+#
+# **Status: STUB CRATE.** Path A (action-tax → existing DEX pool) ships
+# the working subset via a handler change in q-api-server. Path B (this
+# crate) holds the future-state designs as stubs so they're discoverable
+# but not yet active. Activate after Path A validation per
+# docs/crown-ash-lp-path-a-plan.md.
+
+[dependencies]
+q-types = { path = "../q-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
