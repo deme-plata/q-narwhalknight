@@ -887,34 +887,52 @@ async fn merge_p2p_response(
 
                 let mut imported = 0u64;
                 let mut updated = 0u64;
+                // v10.11.19 MEM-LEAK FIX (2026-05-22): the previous implementation
+                // held `wallet_balances.write()` across N synchronous fsyncs
+                // (one per wallet, ~10ms each × 6373 wallets = 60+ seconds with
+                // the writer lock held). During that hold, every other coroutine
+                // (gossip handlers, P2P receivers, balance readers) blocks; the
+                // unbounded mpsc channels upstream of those consumers back up,
+                // bloating heap by tens of GB. v8.9.4 fixed the same anti-pattern
+                // in main.rs (see "v8.9.4 CRITICAL FIX: Do NOT hold wallet_
+                // balances.write() across .await") but state_sync_api was never
+                // updated. Confirmed: q-api-server grew 64MB → 38GB in 5 min,
+                // pure anon heap (38GB), zero log firehose (rules out log
+                // buffer hypothesis).
+                //
+                // Pattern: read-only snapshot pass → persist with NO state lock
+                // held → brief write-lock to merge final values into the map.
+                let updates: Vec<([u8; 32], u128, u128)> = {
+                    let balances = app_state.wallet_balances.read().await;
+                    response.wallet_balances.iter().filter_map(|(addr_hex, amount_str)| {
+                        let addr_bytes = hex_to_32bytes(addr_hex)?;
+                        let amount: u128 = amount_str.parse().ok().filter(|a: &u128| *a > 0)?;
+                        let current = balances.get(&addr_bytes).copied().unwrap_or(0);
+                        if amount > current { Some((addr_bytes, current, amount)) } else { None }
+                    }).collect()
+                }; // READ lock released BEFORE the fsync loop
+
+                for (addr_bytes, current, amount) in &updates {
+                    let addr_hex_dbg = hex::encode(addr_bytes);
+                    warn!(
+                        "🔴 [BALANCE WRITE] bootstrap_sync(): wallet={} old={} new={} delta=+{} caller=BOOTSTRAP_P2P_SYNC height={}",
+                        &addr_hex_dbg[..16], current, amount, amount - current, response.block_height
+                    );
+                    if let Err(e) = app_state.storage_engine
+                        .save_wallet_balance(addr_bytes, *amount).await
+                    {
+                        warn!("⚠️ [BOOTSTRAP SYNC] Failed to persist: {}", e);
+                        continue;
+                    }
+                    if *current == 0 { imported += 1; } else { updated += 1; }
+                }
+
+                // Now briefly take write lock to merge accepted values into the
+                // in-memory map. No await between insert calls.
                 {
                     let mut balances = app_state.wallet_balances.write().await;
-                    for (addr_hex, amount_str) in &response.wallet_balances {
-                        let addr_bytes = match hex_to_32bytes(addr_hex) {
-                            Some(b) => b,
-                            None => continue,
-                        };
-                        let amount: u128 = match amount_str.parse() {
-                            Ok(a) if a > 0 => a,
-                            _ => continue,
-                        };
-                        let current = balances.get(&addr_bytes).copied().unwrap_or(0);
-                        if amount > current {
-                            // 🔴 [BALANCE WRITE DEBUG] Bootstrap sync overwrite
-                            let addr_hex_dbg = hex::encode(&addr_bytes);
-                            warn!(
-                                "🔴 [BALANCE WRITE] bootstrap_sync(): wallet={} old={} new={} delta=+{} caller=BOOTSTRAP_P2P_SYNC height={}",
-                                &addr_hex_dbg[..16], current, amount, amount - current, response.block_height
-                            );
-                            if let Err(e) = app_state.storage_engine
-                                .save_wallet_balance(&addr_bytes, amount).await
-                            {
-                                warn!("⚠️ [BOOTSTRAP SYNC] Failed to persist: {}", e);
-                                continue;
-                            }
-                            if current == 0 { imported += 1; } else { updated += 1; }
-                            balances.insert(addr_bytes, amount);
-                        }
+                    for (addr_bytes, _current, amount) in &updates {
+                        balances.insert(*addr_bytes, *amount);
                     }
                 }
                 // Recalculate total supply
