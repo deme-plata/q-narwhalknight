@@ -1364,7 +1364,9 @@ pub struct UnifiedNetworkManager {
     /// v0.9.7-beta: Extended to track block height ranges for sync progress visibility
     gossipsub_stats: Arc<RwLock<HashMap<String, (usize, usize, std::time::Instant, Option<u64>, Option<u64>)>>>, // (count, total_bytes, last_log_time, min_height, max_height)
     /// Channel to forward synced blocks for consensus validation (Phase 3b)
-    block_sync_tx: Option<mpsc::UnboundedSender<Vec<q_types::block::QBlock>>>,
+    /// v10.11.21: bounded channel (4 batches in flight) — backpressure to turbo_sync
+    /// when applier is CPU-bound on Ed25519 batch-verify + RocksDB apply.
+    block_sync_tx: Option<mpsc::Sender<Vec<q_types::block::QBlock>>>,
     /// 🚀 v1.7.0-LAMINAR: Lock-free peer compatibility tracking (VORTEX ELIMINATION)
     /// Uses DashMap for concurrent access without lock contention
     peer_compat: Arc<PeerCompatibilityV2>,
@@ -3038,9 +3040,10 @@ impl UnifiedNetworkManager {
     }
 
     /// Set channel for forwarding synced blocks to consensus (Phase 3b)
-    pub fn set_block_sync_channel(&mut self, tx: mpsc::UnboundedSender<Vec<q_types::block::QBlock>>) {
+    /// v10.11.21: bounded sender for backpressure (was UnboundedSender).
+    pub fn set_block_sync_channel(&mut self, tx: mpsc::Sender<Vec<q_types::block::QBlock>>) {
         self.block_sync_tx = Some(tx);
-        info!("🔗 Block sync forwarding channel established for consensus validation");
+        info!("🔗 Block sync forwarding channel established for consensus validation (bounded)");
     }
 
     /// Get a cloned command sender for API operations
@@ -4607,12 +4610,17 @@ impl UnifiedNetworkManager {
                                 }
 
                                 // Forward blocks to consensus for validation
+                                // v10.11.21: bounded channel (4 batches). .send().await applies backpressure
+                                // to the swarm event loop when the applier is CPU-bound (Ed25519 batch-verify
+                                // + RocksDB apply taking seconds per batch). Without this, Vec<QBlock> entries
+                                // (50-500MB each) piled up unbounded → 3.5GB+ anon mapping per pmap on v10.11.20.
                                 if !response.blocks.is_empty() {
                                     if let Some(ref tx) = self.block_sync_tx {
-                                        if let Err(e) = tx.send(response.blocks.clone()) {
+                                        let n_blocks = response.blocks.len();
+                                        if let Err(e) = tx.send(response.blocks.clone()).await {
                                             error!("❌ [BLOCK-PACK] Failed to forward blocks to consensus: {}", e);
                                         } else {
-                                            info!("✅ [BLOCK-PACK] Forwarded {} blocks to consensus for validation", response.blocks.len());
+                                            info!("✅ [BLOCK-PACK] Forwarded {} blocks to consensus for validation", n_blocks);
                                         }
                                     } else {
                                         warn!("⚠️ [BLOCK-PACK] Block sync channel not configured, blocks not forwarded");

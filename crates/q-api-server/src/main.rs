@@ -6192,7 +6192,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         info!("🔄 Setting up Phase 3 libp2p block synchronization...");
 
         // Create block sync channel before locking
-        let (block_sync_tx, mut block_sync_rx) = tokio::sync::mpsc::unbounded_channel();
+        // v10.11.21: bounded(4). Producer = swarm event loop forwarding peer-delivered
+        // Vec<QBlock>; consumer = block-applier doing Ed25519 batch-verify + RocksDB apply
+        // (seconds per batch). Unbounded version filled with 4-7 batches × 500MB-1GB during
+        // turbo_sync surge → 3.5GB+ single anon mapping in pmap. Bounded buffers max 4
+        // batches in flight (~3GB ceiling) and backpressures producer naturally via
+        // .send().await at unified_network_manager.rs:4612.
+        let (block_sync_tx, mut block_sync_rx) = tokio::sync::mpsc::channel(4);
 
         // Phase 3a & 3b: Lock manager briefly to set storage and channel
         {
