@@ -1,9 +1,50 @@
 # Epsilon Node Operator Handoff — for Codex / GPT-5.5
 
-**Written:** 2026-05-22 ~08:30 UTC by Claude Code (Opus 4.7) just before the
-operator's Claude Code subscription rolls over. Hand the wheel to Codex.
-This document is the minimum you need to keep Epsilon running and to
-finish the v10.11.14 deploy that was in flight when the session ended.
+**Written:** 2026-05-22 ~08:30 UTC, updated 09:45 UTC. By Claude Code
+(Opus 4.7) just before the operator's Claude Code subscription rolls over.
+Hand the wheel to Codex. This document is the minimum you need to keep
+Epsilon running and to finish the v10.11.15 deploy.
+
+## 🎯 ROOT CAUSE FOUND (09:45 UTC) — v10.11.15 fixes it
+
+The 14-hour bug is in `crates/q-api-server/src/handlers.rs` around
+line 3982 — the dag_knight cert callback's **native-QUG else branch**
+updated `state.wallet_balances` in-memory HashMap but **never called
+`save_wallet_balance_authoritative` to persist to RocksDB**.
+
+Effect:
+- After restart: balance changes vanish; revert to pre-tx
+- Without restart: signed `/api/v1/wallets/<addr>/balance` reads from
+  RocksDB (where the HashMap update was never written), so observers
+  see "tx confirmed but balance unchanged" — the exact pattern Viktor
+  reported all day
+- `tx_status` shows `block_height: <current_round>` (just the chain tip
+  number at SEND-SIGNED time) and climbing confirmations because the
+  surrounding `TxStatus::Confirmed` mark uses `current_round` not a
+  real block-inclusion height
+- Blocks 18,257,696, 18,257,945, 18,258,533 (every block in the bug
+  window) contain 0 non-coinbase txs — the tx never landed in any
+  block because dag_knight consumes it from the pool BEFORE
+  block_producer can pack it
+- v10.11.13/.14 instrumentation showed mempool/producer/save were
+  NEVER REACHED for these txs — proving the tx took a different path
+  (dag_knight) and got dropped after in-memory apply
+
+**The fix (commit `0b9813e1d`)** is 3 lines: add two
+`save_wallet_balance_authoritative` calls (authoritative variant
+bypasses the max-wins guard so debits aren't refused for being lower
+than the on-disk value), plus a warn-level apply log so future
+regressions surface.
+
+**Block inclusion is a SEPARATE issue**, not addressed in v10.11.15.
+After this fix money will move correctly (sender debits, recipient
+credits, persists across restart). The reported `block_height` will
+still be `current_round` not a real block — fixing that requires
+either:
+  - Route send_signed via mempool → block_producer (the path
+    v10.11.13 instrumentation was designed to surface)
+  - Or have dag_knight emit a synthetic block per batch
+Track as v10.11.16+ work. Monetary integrity is v10.11.15's job.
 
 ---
 
