@@ -407,15 +407,21 @@ impl ProductionMempool {
 
             // Check capacity
             if pending.len() >= self.config.max_transactions {
-                // Try to evict lowest fee transaction
+                // v10.11.11: First-in-fee-bucket fairness. Among txs tied at the
+                // lowest fee, evict the NEWEST one (highest received_at) so
+                // earlier-arriving MIN-fee txs are protected from being
+                // perpetually displaced by later MIN-fee arrivals. The previous
+                // .min_by_key(|tx| tx.fee) was non-deterministic among ties
+                // (HashMap iteration order), making an old MIN-fee tx as likely
+                // to be evicted as a fresh one — starving the first-in.
                 if let Some((lowest_hash, lowest_tx)) = pending
                     .iter()
-                    .min_by_key(|(_, tx)| tx.fee)
+                    .min_by_key(|(_, tx)| (tx.fee, std::cmp::Reverse(tx.received_at)))
                     .map(|(h, tx)| (*h, tx.clone()))
                 {
                     if mempool_tx.fee > lowest_tx.fee {
                         pending.remove(&lowest_hash);
-                        info!("🗑️  Evicted low-fee transaction for higher fee");
+                        info!("🗑️  Evicted low-fee transaction for higher fee (newest in lowest-fee bucket)");
                     } else {
                         warn!("💸 Transaction fee too low for mempool inclusion");
                         return Ok(false);
