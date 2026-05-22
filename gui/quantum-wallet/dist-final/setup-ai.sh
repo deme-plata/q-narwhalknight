@@ -50,9 +50,10 @@ if ! command -v node &>/dev/null; then
 fi
 echo "  ✓ Node.js $(node --version)"
 
-# 2. Detect AI clients (Claude Code, Cursor, or both)
+# 2. Detect AI clients (Claude Code, Cursor, Codex, or any combination)
 HAS_CLAUDE=0
 HAS_CURSOR=0
+HAS_CODEX=0
 
 if command -v claude &>/dev/null; then
   HAS_CLAUDE=1
@@ -65,13 +66,20 @@ if [ -d "$HOME/.cursor" ] || command -v cursor &>/dev/null; then
   echo "  ✓ Cursor found"
 fi
 
-if [ "$HAS_CLAUDE" = "0" ] && [ "$HAS_CURSOR" = "0" ]; then
+# Codex (OpenAI / ChatGPT 5.5) detection
+if command -v codex &>/dev/null || [ -d "$HOME/.codex" ]; then
+  HAS_CODEX=1
+  echo "  ✓ Codex (ChatGPT 5.5) found"
+fi
+
+if [ "$HAS_CLAUDE" = "0" ] && [ "$HAS_CURSOR" = "0" ] && [ "$HAS_CODEX" = "0" ]; then
   echo ""
   echo "  No supported AI client found."
   echo ""
   echo "  Install ONE of:"
   echo "    Claude Code:  npm install -g @anthropic-ai/claude-code"
   echo "    Cursor:       https://cursor.sh"
+  echo "    Codex:        npm install -g @openai/codex"
   echo ""
   echo "  Then re-run: curl -fsSL https://quillon.xyz/setup-ai.sh | bash"
   exit 1
@@ -152,6 +160,31 @@ if [ "$HAS_CURSOR" = "1" ]; then
   " 2>/dev/null
   echo "  ✓ Cursor configured at $CURSOR_FILE"
   echo "    → Restart Cursor or reload window for MCP to load"
+fi
+
+# 4c. Codex (ChatGPT 5.5) → $HOME/.codex/config.toml (TOML format)
+if [ "$HAS_CODEX" = "1" ]; then
+  CODEX_DIR="$HOME/.codex"
+  mkdir -p "$CODEX_DIR"
+  CODEX_FILE="$CODEX_DIR/config.toml"
+  # Codex CLI uses TOML; mcp_servers section is keyed by server name.
+  # If config.toml exists, append or replace the quillon-wallet block;
+  # else create from scratch.
+  if [ -f "$CODEX_FILE" ] && grep -q "\[mcp_servers.quillon-wallet\]" "$CODEX_FILE"; then
+    echo "  ✓ Codex config already has quillon-wallet entry at $CODEX_FILE"
+  else
+    cat >> "$CODEX_FILE" << CODEXEOF
+
+[mcp_servers.quillon-wallet]
+command = "node"
+args = ["$MCP_INDEX"]
+
+[mcp_servers.quillon-wallet.env]
+QUILLON_API_URL = "https://quillon.xyz/api/v1"
+CODEXEOF
+    echo "  ✓ Codex configured at $CODEX_FILE"
+    echo "    → Restart Codex (codex --reload) for MCP to load"
+  fi
 fi
 
 echo ""

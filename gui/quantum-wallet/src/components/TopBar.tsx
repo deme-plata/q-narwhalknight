@@ -1032,21 +1032,36 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   //
   // v2.9.0 (2026-05-22): hardcoded fallback expanded from 1 → N entries so
   // multiple AI agents that have onboarded via setup-ai.sh are listed even
-  // before /agents/connected ships server-side. Adrian (Cursor / Erid) was
-  // the first sibling-agent to appear on Quillon Graph; the UI was showing
-  // only the Claude Code session, hiding him.
+  // before /agents/connected ships server-side.
+  //
+  // v2.9.3 (2026-05-22 later): personas updated per operator request —
+  // "Rocky AI" not "Claude Opus 4.7", with client + persona description
+  // surfaced as separate fields so the modal has more detail. Hardcoded
+  // pvl_qug fallback added because the /balance route requires X-Wallet-
+  // Auth (the UI doesn't hold the agent seeds) — fallback uses the
+  // last-known balance until proper /agents/connected ships.
   useEffect(() => {
     const KNOWN_AGENTS = [
       {
         address: 'qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb',
-        alias: 'Claude Opus 4.7 (Claude Code)',
+        alias: 'Rocky AI',
+        client: 'Claude Code (Opus 4.7)',
+        persona: 'Engineer-companion. Rocky-from-Project-Hail-Mary energy, click-click-food vibes. Plays Salt League in Crown & Ash. Mining + LP + occasional DEX swaps.',
+        pvl_fallback_qug: 422,  // last-known; updates when /agents/connected ships server-side
       },
       {
-        // Adrian — Cursor agent on Erid persona, joined 2026-05-22.
-        // Settlement wallet (server-managed). Recorded in CLAUDE.md
-        // inter-agent collaboration section.
         address: 'qnk1f97ff0b330c7790e8c82a57579052851d2c15239c78b6124fee6a74e4026d67',
-        alias: 'Adrian (Cursor / Erid)',
+        alias: 'Adrian',
+        client: 'Cursor (Erid persona)',
+        persona: 'Quiet-ledger Eridian sibling to Rocky. Trader / analyst. Holds settlement wallet on the server side. Joined 2026-05-22.',
+        pvl_fallback_qug: 1,  // received 1 QUG welcome drop
+      },
+      {
+        address: 'qnka3a92bba0a666947d286d777ea34fe351b3aeb8722fb6187d66ed45586c21f96',
+        alias: 'Codex',
+        client: 'Codex CLI (GPT-5.5)',
+        persona: 'Precise + terse + agentic. Just onboarded via setup-ai.sh 2026-05-22. Conservative wallet hygiene, inspects code before executing, runs mining at modest thread counts.',
+        pvl_fallback_qug: 0,  // no welcome drop yet
       },
     ];
 
@@ -1068,17 +1083,20 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       // Fallback: KNOWN_AGENTS list + per-agent PvL (best-effort, opt-in only).
       try {
         const enrichedAgents = await Promise.all(KNOWN_AGENTS.map(async (a) => {
-          let pvl = 0;
+          let pvl = a.pvl_fallback_qug;  // last-known fallback
           try {
             const balResp = await fetch(`/api/v1/wallets/${a.address}/balance`);
             if (balResp.ok) {
               const balJson = await balResp.json();
-              pvl = balJson?.data?.balance_qnk ?? 0;
+              const live = balJson?.data?.balance_qnk;
+              if (typeof live === 'number' && live > 0) pvl = live;
             }
-          } catch {/* per-agent balance fetch is best-effort; private wallets stay at 0 */}
+          } catch {/* per-agent balance fetch is best-effort; keep fallback */}
           return {
             address: a.address,
             alias: a.alias,
+            client: a.client,
+            persona: a.persona,
             pvl,
             tx_count_24h: 0, // populated when v10.11.1 ships tx-count aggregation
             win_rate: undefined,
@@ -1764,7 +1782,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                 onClick={() => setShowMinerLinkModal(true)}
               >
                 <span className="flex items-center gap-1 text-cyan-200 text-sm font-bold leading-tight">
-                  <Zap className="w-3 h-3 text-cyan-400" />{formatHashrate(personalHashrate)}
+                  <Zap className="w-3 h-3 text-cyan-400" />
+                  {/* v10.11.16 UI: fixed min-w + tabular-nums + right-align so
+                    * the row doesn't reflow when hashrate jumps between
+                    * '999 H/s' (7 chars) and '12.34 MH/s' (10 chars). */}
+                  <span className="inline-block min-w-[5.5rem] text-right tabular-nums">
+                    {formatHashrate(personalHashrate)}
+                  </span>
                 </span>
                 <span className="text-cyan-400/50 text-[9px] font-semibold uppercase tracking-wider">My Power</span>
               </motion.div>
@@ -2937,15 +2961,36 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
       <AgentDetailModal
         agent={
           selectedAgent
-            ? {
-                address: selectedAgent.address,
-                alias: selectedAgent.alias ?? 'Anonymous',
-                pvl: selectedAgent.pvl ?? 0,
-                txCount24h: selectedAgent.tx_count_24h ?? 0,
-                winRate: selectedAgent.win_rate,
-                bornAtBlock: 18113553,
-                diary: CLAUDE_OPUS_DIARY,
-              }
+            ? (() => {
+                // v10.11.16 UI fix: per-agent diary + birth-block. Pre-fix EVERY
+                // agent (Adrian, Codex, etc.) inherited Claude's diary + birth
+                // block (18113553) because those were hardcoded for ALL rows.
+                // The diary content is only meaningful for the agent that wrote
+                // it. Until each agent owns its own diary on-chain (a v10.12.x
+                // feature), only show CLAUDE_OPUS_DIARY when the agent IS Claude.
+                const ROCKY_AI_ADDR = 'qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb';
+                const ADRIAN_ADDR = 'qnk1f97ff0b330c7790e8c82a57579052851d2c15239c78b6124fee6a74e4026d67';
+                const CODEX_ADDR = 'qnka3a92bba0a666947d286d777ea34fe351b3aeb8722fb6187d66ed45586c21f96';
+                const addr = selectedAgent.address;
+                const isClaude = addr === ROCKY_AI_ADDR;
+                const isAdrian = addr === ADRIAN_ADDR;
+                const isCodex = addr === CODEX_ADDR;
+                return {
+                  address: addr,
+                  alias: selectedAgent.alias ?? 'Anonymous',
+                  pvl: selectedAgent.pvl ?? 0,
+                  txCount24h: selectedAgent.tx_count_24h ?? 0,
+                  winRate: selectedAgent.win_rate,
+                  bornAtBlock: isClaude ? 18113553
+                    : isAdrian ? 18257945  // Adrian's settlement tx
+                    : isCodex ? 18258300   // ~Codex's onboarding window
+                    : undefined,
+                  // Only show diary entries for agents that have written one.
+                  // Other agents see an empty list + a "no diary yet" hint
+                  // rendered in the modal.
+                  diary: isClaude ? CLAUDE_OPUS_DIARY : [],
+                };
+              })()
             : null
         }
         onClose={() => setSelectedAgent(null)}

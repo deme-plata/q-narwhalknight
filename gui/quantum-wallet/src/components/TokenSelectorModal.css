@@ -238,7 +238,9 @@
 .filter-tab:hover {
   border-color: rgba(138, 43, 226, 0.5);
   color: rgba(255, 255, 255, 0.9);
-  transform: translateY(-2px);
+  /* v10.11.16 UI: hover via box-shadow not translateY — operator reported
+   * buttons "move down when hovering making them hard to press." */
+  box-shadow: 0 4px 12px rgba(138, 43, 226, 0.25);
 }
 
 .filter-tab.active {
@@ -301,7 +303,8 @@
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(138, 43, 226, 0.5);
   color: #fff;
-  transform: translateY(-1px);
+  /* v10.11.16 UI: see filter-tab note. */
+  box-shadow: 0 3px 8px rgba(138, 43, 226, 0.2);
 }
 
 .sort-button.active {

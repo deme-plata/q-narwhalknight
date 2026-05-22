@@ -6040,6 +6040,210 @@ server.tool(
 );
 
 // ============================================================
+// QUILLON BANK — agentic-money clients can become bank clients
+// ============================================================
+//
+// v2.9.5: Quillon Bank tools so AI agents can act as bank clients.
+// Bank exposes: collateralized loans (QUG → QNKUSD), reserve readouts,
+// admin messaging, profit transparency. AI agents with mining-derived
+// QUG can collateralize for QNKUSD loans, pay back, message the bank
+// admins, all signed via X-Wallet-Auth.
+//
+// All tools wrap public routes from quillon_bank_api.rs. Founder-only
+// admin endpoints (approve_loan, distribute_profits, etc.) are NOT
+// exposed via MCP — they require AEGIS-QL operator auth.
+
+server.tool(
+  "bank_metrics",
+  "Quillon Bank — public metrics + health. Reads /banking/metrics + /stablecoin/status + /treasury/reserves. Shows total clients, reserve coverage, QNKUSD circulating, recent loan volume. Use to check the bank is healthy before applying for a loan or messaging admin.",
+  {
+    endpoint: z.string().optional().describe("Optional backend override."),
+  },
+  async ({ endpoint }) => {
+    try {
+      const [metrics, stablecoin, reserves] = await Promise.all([
+        api(`/banking/metrics`, "GET", undefined, { endpoint }).catch(() => null),
+        api(`/banking/stablecoin/status`, "GET", undefined, { endpoint }).catch(() => null),
+        api(`/banking/treasury/reserves`, "GET", undefined, { endpoint }).catch(() => null),
+      ]) as any[];
+      const m = (metrics as any)?.data ?? metrics ?? {};
+      const s = (stablecoin as any)?.data ?? stablecoin ?? {};
+      const r = (reserves as any)?.data ?? reserves ?? {};
+      return { content: [{ type: "text", text: [
+        `=== Quillon Bank — Public Metrics ===`,
+        ``,
+        `  Clients (total):       ${m.total_accounts ?? m.active_accounts ?? "(unknown)"}`,
+        `  AI-agent clients:      ${m.ai_agent_accounts ?? "(field not yet exposed)"}`,
+        `  QNKUSD circulating:    ${s.total_supply ?? s.circulating_supply ?? "(unknown)"}`,
+        `  Collateral ratio:      ${s.collateral_ratio ?? "(unknown)"}`,
+        `  Peg (QNKUSD / USD):    ${s.peg_value ?? "1.00 (default)"}`,
+        `  Treasury reserves:     ${r.total_reserves_qug ?? "(unknown)"} QUG`,
+        `  Reserve coverage:      ${r.coverage_ratio ?? "(unknown)"}`,
+        ``,
+        `(Founder-only ops like mint/burn/approve_loan are not exposed via MCP.`,
+        `Use bank_apply_for_loan / bank_payback_loan / bank_message_admin for`,
+        `client-side actions.)`,
+      ].join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `bank_metrics failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "bank_apply_for_loan",
+  "Quillon Bank — apply for a collateralized QNKUSD loan. You deposit QUG as collateral; the bank issues QNKUSD against it. Loan is over-collateralized (typical 150% — i.e., 1000 QUG locks 666 QNKUSD-equivalent). Loan must be approved by a bank admin before issuance. Use bank_loan_status to track.",
+  {
+    collateral_qug: z.number().positive().describe("QUG to lock as collateral."),
+    requested_qnkusd: z.number().positive().describe("QNKUSD to borrow (typically <= 0.66 × collateral_qug at current peg)."),
+    duration_days: z.number().int().min(1).max(365).optional().describe("Loan term in days (default 30, max 365)."),
+    purpose: z.string().optional().describe("Free-text purpose. Stored on-chain. Helps admin review."),
+    seed: z.string().optional(),
+    endpoint: z.string().optional(),
+    confirm: z.boolean().optional().describe("Set true to actually submit; otherwise dry-run."),
+  },
+  async ({ collateral_qug, requested_qnkusd, duration_days, purpose, seed, endpoint, confirm }) => {
+    const { seed: rawSeed } = loadSeed({ seedArg: seed });
+    const signerAddress = deriveKeys(rawSeed).address;
+    if (!confirm) {
+      return { content: [{ type: "text", text: [
+        `⚠ LOAN DRY RUN — pass confirm=true to submit`,
+        ``,
+        `  Applicant:        ${signerAddress}`,
+        `  Collateral:       ${collateral_qug} QUG (locked until loan resolves)`,
+        `  Borrowing:        ${requested_qnkusd} QNKUSD`,
+        `  Term:             ${duration_days ?? 30} days`,
+        `  Purpose:          ${purpose ?? "(none)"}`,
+        ``,
+        `On confirm: submits to /banking/lending/apply. Admin must approve`,
+        `before QNKUSD is issued.`,
+      ].join("\n") }] };
+    }
+    try {
+      const body = {
+        applicant_wallet: signerAddress,
+        collateral_qug,
+        requested_qnkusd,
+        duration_days: duration_days ?? 30,
+        purpose: purpose ?? "",
+      };
+      const res = await apiSigned(`/banking/lending/apply`, "POST", body, { seed, endpoint }) as any;
+      const d = res?.data ?? res;
+      return { content: [{ type: "text", text: [
+        `✅ Loan application submitted`,
+        ``,
+        `  Application ID:   ${d.application_id ?? d.loan_id ?? "(no id)"}`,
+        `  Status:           ${d.status ?? "pending_review"}`,
+        `  Submitted at:     ${new Date().toISOString()}`,
+        ``,
+        `  Next steps:`,
+        `    1. Bank admin reviews (typically 24-48h)`,
+        `    2. If approved → ${requested_qnkusd} QNKUSD credited to your wallet`,
+        `    3. Pay back via bank_payback_loan before the term ends`,
+        `    4. Track status via bank_loan_status`,
+      ].join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `bank_apply_for_loan failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "bank_loan_status",
+  "Quillon Bank — list your loan applications + current statuses. Reads /banking/lending/applications and filters to your wallet (X-Wallet-Auth-derived). Status values: pending_review, approved, active, paid_back, defaulted, liquidated.",
+  {
+    seed: z.string().optional(),
+    endpoint: z.string().optional(),
+  },
+  async ({ seed, endpoint }) => {
+    try {
+      const { seed: rawSeed } = loadSeed({ seedArg: seed });
+      const signerAddress = deriveKeys(rawSeed).address;
+      const res = await api(`/banking/lending/applications`, "GET", undefined, { endpoint }) as any;
+      const all = res?.data?.applications ?? res?.applications ?? res?.data ?? [];
+      if (!Array.isArray(all)) {
+        return { content: [{ type: "text", text: `bank_loan_status: unexpected response shape` }] };
+      }
+      const mine = all.filter((a: any) => (a.applicant_wallet ?? a.borrower ?? "").toLowerCase() === signerAddress.toLowerCase());
+      if (mine.length === 0) {
+        return { content: [{ type: "text", text: `No loan applications found for ${signerAddress}.\n\nUse bank_apply_for_loan to submit one.` }] };
+      }
+      const lines: string[] = [`=== Your loans (${mine.length}) ===`, ``];
+      for (const a of mine) {
+        lines.push(`  ID:           ${a.application_id ?? a.loan_id ?? "?"}`);
+        lines.push(`  Status:       ${a.status ?? "?"}`);
+        lines.push(`  Collateral:   ${a.collateral_qug ?? "?"} QUG`);
+        lines.push(`  Borrowed:     ${a.requested_qnkusd ?? a.amount_qnkusd ?? "?"} QNKUSD`);
+        lines.push(`  Term:         ${a.duration_days ?? "?"} days`);
+        lines.push(`  Applied:      ${a.applied_at ?? a.created_at ?? "?"}`);
+        lines.push(``);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `bank_loan_status failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "bank_payback_loan",
+  "Quillon Bank — pay back an active loan in QNKUSD. The bank releases your collateral QUG back to your wallet. Partial payback is allowed; full payback closes the loan.",
+  {
+    loan_id: z.string().describe("Loan / application ID from bank_loan_status."),
+    amount_qnkusd: z.number().positive().describe("QNKUSD to pay back."),
+    seed: z.string().optional(),
+    endpoint: z.string().optional(),
+    confirm: z.boolean().optional(),
+  },
+  async ({ loan_id, amount_qnkusd, seed, endpoint, confirm }) => {
+    if (!confirm) {
+      return { content: [{ type: "text", text: `⚠ PAYBACK DRY RUN — loan=${loan_id} amount=${amount_qnkusd} QNKUSD. Set confirm=true to execute.` }] };
+    }
+    try {
+      const res = await apiSigned(`/banking/lending/payback`, "POST", { loan_id, amount_qnkusd }, { seed, endpoint }) as any;
+      const d = res?.data ?? res;
+      return { content: [{ type: "text", text: [
+        `✅ Loan payback submitted`,
+        ``,
+        `  Loan ID:          ${loan_id}`,
+        `  Paid:             ${amount_qnkusd} QNKUSD`,
+        `  Remaining debt:   ${d.remaining_qnkusd ?? "(check bank_loan_status)"}`,
+        `  Collateral freed: ${d.collateral_freed_qug ?? "(check bank_loan_status)"}`,
+      ].join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `bank_payback_loan failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+server.tool(
+  "bank_message_admin",
+  "Quillon Bank — send a message to the bank admin. Use for: questions about loan terms, dispute resolution, KYC clarifications, requesting features. Replies appear in bank_my_messages.",
+  {
+    subject: z.string().max(120).describe("Short subject line."),
+    body: z.string().max(2000).describe("Message body."),
+    seed: z.string().optional(),
+    endpoint: z.string().optional(),
+  },
+  async ({ subject, body, seed, endpoint }) => {
+    try {
+      const res = await apiSigned(`/banking/messages/send`, "POST", { subject, body }, { seed, endpoint }) as any;
+      const d = res?.data ?? res;
+      return { content: [{ type: "text", text: [
+        `✅ Message sent to bank admin`,
+        ``,
+        `  Subject: ${subject}`,
+        `  Message ID: ${d.message_id ?? "?"}`,
+        ``,
+        `Check bank_my_messages for replies.`,
+      ].join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `bank_message_admin failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ============================================================
 // START SERVER
 // ============================================================
 

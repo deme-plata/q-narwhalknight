@@ -190,6 +190,27 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
   const onSwitch = (addr: string) => {
     if (addr === activeAddress) return;
     try {
+      // v10.11.16 UI fix: BEFORE switching, snapshot the CURRENT wallet's
+      // seed to its per-address slot if missing. The "new wallets show
+      // original data" bug: legacy original wallet had `walletSeed`
+      // (un-suffixed key) but NO `quillon:seed:<originalAddr>`. When the
+      // user created wallet B then switched back to A, the lookup of
+      // `quillon:seed:<A>` returned null; the canonical `walletSeed`
+      // stayed as B's seed; all subsequent X-Wallet-Auth signing for "A"
+      // signed with B's key → server-visible operations all went to B
+      // → operator saw their original wallet's data on the new wallet
+      // (and vice-versa, depending on direction). This migration creates
+      // the missing per-address entry on every switch so future lookups
+      // never miss again.
+      const currentAddr = activeAddress || localStorage.getItem('walletAddress') || '';
+      const currentSeed = localStorage.getItem('walletSeed');
+      if (currentAddr && currentSeed) {
+        const existingPerAddr = localStorage.getItem(`quillon:seed:${currentAddr}`);
+        if (!existingPerAddr) {
+          localStorage.setItem(`quillon:seed:${currentAddr}`, currentSeed);
+        }
+      }
+
       localStorage.setItem('walletAddress', addr);
       // CRITICAL: copy the per-wallet seed (quillon:seed:<addr>) to the
       // canonical `walletSeed` key the single-wallet auth flow reads.
@@ -200,6 +221,15 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
       const newSeed = localStorage.getItem(`quillon:seed:${addr}`);
       if (newSeed) {
         localStorage.setItem('walletSeed', newSeed);
+      } else {
+        // v10.11.16 UI fix: refuse to switch when we don't hold the
+        // destination wallet's seed. Pre-fix, walletSeed silently stayed
+        // as the previous wallet's seed → operator sees inherited data
+        // for the "switched-to" wallet. Better to refuse + tell the
+        // operator they need to import.
+        console.error(`[MultiWalletDrawer] No seed found for ${addr.slice(0,16)}... Cannot switch safely.`);
+        alert(`Cannot switch to wallet ${addr.slice(0, 12)}…\nNo seed stored for this address.\nIf this is a recovered wallet, import it first.`);
+        return; // abort — don't reload to a half-broken state
       }
     } catch {}
     // Hard reload so all components re-read the new wallet from localStorage.

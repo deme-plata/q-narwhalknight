@@ -62,18 +62,21 @@ Write-Host "  [+] Node.js $nodeVersion"
 # ---------------------------------------------------------------------------
 $hasCursor = (Test-Path "$env:USERPROFILE\.cursor") -or (Get-Command cursor -ErrorAction SilentlyContinue)
 $hasClaude = (Get-Command claude -ErrorAction SilentlyContinue) -ne $null
+$hasCodex  = (Test-Path "$env:USERPROFILE\.codex") -or (Get-Command codex -ErrorAction SilentlyContinue)
 
-if (-not $hasCursor -and -not $hasClaude) {
+if (-not $hasCursor -and -not $hasClaude -and -not $hasCodex) {
     Write-Host ""
     Write-Host "  No supported AI client found."
     Write-Host "  Install ONE of:"
     Write-Host "    Cursor:       https://cursor.sh"
     Write-Host "    Claude Code:  npm install -g @anthropic-ai/claude-code"
+    Write-Host "    Codex:        npm install -g @openai/codex"
     Write-Host "  Then re-run this script."
     exit 1
 }
 if ($hasCursor) { Write-Host "  [+] Cursor found" }
 if ($hasClaude) { Write-Host "  [+] Claude Code found" }
+if ($hasCodex)  { Write-Host "  [+] Codex (ChatGPT 5.5) found" }
 
 # ---------------------------------------------------------------------------
 # 3. Install Quillon MCP server
@@ -140,6 +143,30 @@ if ($hasCursor) {
     Update-McpConfig $cursorMcp
     Write-Host "  [+] Cursor configured at $cursorMcp"
     Write-Host "      -> Reload the Cursor window (Ctrl+Shift+P -> Reload Window)"
+}
+if ($hasCodex) {
+    # Codex CLI config is TOML at %USERPROFILE%\.codex\config.toml.
+    # Append the quillon-wallet section if not already present.
+    $codexDir  = "$env:USERPROFILE\.codex"
+    $codexFile = "$codexDir\config.toml"
+    New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+    $existing = if (Test-Path $codexFile) { Get-Content $codexFile -Raw } else { "" }
+    if ($existing -notmatch '\[mcp_servers\.quillon-wallet\]') {
+        $tomlBlock = @"
+
+[mcp_servers.quillon-wallet]
+command = "node"
+args = ["$($mcpIndexFwd)"]
+
+[mcp_servers.quillon-wallet.env]
+QUILLON_API_URL = "https://quillon.xyz/api/v1"
+"@
+        Add-Content -Path $codexFile -Value $tomlBlock -Encoding UTF8
+        Write-Host "  [+] Codex configured at $codexFile"
+        Write-Host "      -> Restart Codex (codex --reload) for MCP to load"
+    } else {
+        Write-Host "  [+] Codex config already has quillon-wallet entry"
+    }
 }
 if ($hasClaude) {
     $claudeSettings = "$env:USERPROFILE\.claude\settings.json"
