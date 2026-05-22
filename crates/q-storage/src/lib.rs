@@ -2144,12 +2144,12 @@ impl QStorage {
         let from = self.height_cache.cached();
         let to = self.advance_contiguous_tip(from).await?;
         if to > from {
-            let to_bytes = to.to_be_bytes().to_vec();
+            let to_bytes = to.to_be_bytes();
             self.hot_db
-                .put(CF_BLOCKS, b"qblock:latest".to_vec(), to_bytes.clone())
+                .put(CF_BLOCKS, b"qblock:latest", &to_bytes)
                 .await?;
             self.hot_db
-                .put(CF_BLOCKS, b"qblock:contiguous_verified".to_vec(), to_bytes)
+                .put(CF_BLOCKS, b"qblock:contiguous_verified", &to_bytes)
                 .await?;
             self.height_cache.update(to).await;
         }
