@@ -3978,6 +3978,29 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         }
                     } else {
                         // QUG transfer - update wallet_balances (original logic)
+                        //
+                        // v10.11.15 ROOT-CAUSE FIX: this branch ALSO now persists the
+                        // balance change to RocksDB via save_wallet_balance_authoritative.
+                        // Pre-v10.11.15, the branch only mutated the in-memory
+                        // wallet_balances HashMap and saved the tx RECORD via
+                        // save_transaction — but never the balance change itself. Result:
+                        //   - After restart: in-memory state lost; balances revert to pre-tx
+                        //   - Even without restart: signed /api/v1/wallets/<addr>/balance
+                        //     reads from RocksDB; the HashMap update was invisible to the
+                        //     query
+                        //   - tx_status reports "confirmed at block <current_round>" via the
+                        //     surrounding TxStatus::Confirmed mark; observers see
+                        //     "confirmed but balance unchanged"
+                        //   - Block 18,258,533 (and every block during the bug window) has
+                        //     0 non-coinbase transactions; the tx never landed in a block
+                        //     because dag_knight removed it from mempool before block_producer
+                        //     could pack it
+                        //
+                        // This single missing persist call was the bug. 14 hours of
+                        // diagnosis pointed at apply-pipeline strip; instrumentation in
+                        // v10.11.13/.14 showed mempool/producer/save_qblock were never even
+                        // reached — because the tx was consumed by THIS callback, applied
+                        // to memory, and dropped without persisting.
                         let mut balances = state.wallet_balances.write().await;
 
                         // Deduct from sender
@@ -3993,6 +4016,26 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                             let old_recipient_balance = balances.get(&tx.to).copied().unwrap_or(0);
                             let new_recipient_balance = old_recipient_balance + tx.amount;
                             balances.insert(tx.to, new_recipient_balance);
+
+                            // v10.11.15: PERSIST to RocksDB. The authoritative variant
+                            // bypasses the max-wins guard — debits are expected to LOWER
+                            // the value, so the standard save_wallet_balance would refuse
+                            // them and we'd be back to the money-printer pattern.
+                            // Use the SHA3-256 hex address as the storage key.
+                            let from_hex = hex::encode(&tx.from);
+                            let to_hex = hex::encode(&tx.to);
+                            if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&tx.from, new_sender_balance).await {
+                                warn!("v10.11.15: Failed to persist sender QUG balance ({}): {}", &from_hex[..16], e);
+                            }
+                            if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&tx.to, new_recipient_balance).await {
+                                warn!("v10.11.15: Failed to persist recipient QUG balance ({}): {}", &to_hex[..16], e);
+                            }
+                            tracing::warn!(
+                                "💸 [v10.11.15 NATIVE-QUG APPLY] {} → {} amount={} fee={} | sender {} → {} | recipient {} → {}",
+                                &from_hex[..16], &to_hex[..16], tx.amount, tx.fee,
+                                old_sender_balance, new_sender_balance,
+                                old_recipient_balance, new_recipient_balance,
+                            );
 
                             // v7.3.1: Collect transaction fee (previously burned!)
                             // Split between founder wallet and node operator based on promille setting
