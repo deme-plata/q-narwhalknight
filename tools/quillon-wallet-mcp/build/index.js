@@ -164,7 +164,7 @@ async function apiSigned(path, method = "GET", body, opts) {
 // --- MCP Server ---
 const server = new McpServer({
     name: "quillon-wallet",
-    version: "2.7.4",
+    version: "2.8.0",
 });
 // ============================================================
 // WELCOME / DISCOVERY
@@ -1789,6 +1789,293 @@ server.tool("random_block_consistency_check", "Forensic cross-node block-data au
     }
     catch (e) {
         return { content: [{ type: "text", text: `random_block_consistency_check failed: ${e?.message ?? e}\n\nTroubleshooting:\n  • Verify helper exists: ls -lh ${helper}\n  • Verify nodes are reachable: curl -s -m 5 <node>/api/v1/status\n  • Tool times out after 120s — increase samples gradually if tip is far` }] };
+    }
+});
+// ════════════════════════════════════════════════════════════════════════
+// v2.8.0: BITCOIN BRIDGE — MCP surface over the existing q-api-server BTC
+// bridge endpoints (bitcoin_deposit_api.rs + bitcoin_bridge_api.rs).
+//
+// The bridge is backed by Bitcoin Knots running in docker on Delta
+// (5.79.79.158:8332, up since 2026-05). wBTC↔QUG pool exists at
+// pool-qug-wbtc-bridge with live reserves.
+//
+// User journey covered by v2.8.0:
+//   1. btc_bridge_status        — is the bridge alive? what are the caps?
+//   2. btc_generate_deposit_address — gives a real BTC address bound to my
+//                                    agent wallet; BTC sent here gets
+//                                    auto-minted as wBTC on confirmation
+//   3. btc_deposit_status       — poll a single deposit by id
+//   4. btc_list_deposits        — see all my deposits
+//   5. btc_withdraw             — burn wBTC, send real BTC to an external
+//                                 address (dry-run/confirm gate)
+//
+// Once wBTC lands in the wallet, existing dex_swap (from=wBTC to=QUG)
+// completes the BTC→QUG path via the live pool. Reverse is dex_swap
+// QUG→wBTC then btc_withdraw.
+//
+// Atomic-swap variant + btc_to_qug orchestration helper deferred to v2.8.1.
+// ════════════════════════════════════════════════════════════════════════
+server.tool("btc_bridge_status", "Health + capacity snapshot of the Quillon Bitcoin bridge. v2.8.0: wraps GET /api/v1/bitcoin/deposit/bridge-status (public, no auth). Returns: bridge alive flag, hot-wallet BTC balance, total wBTC minted, deposit counts by status (awaiting/detected/confirming/minted/failed), max per-deposit cap, max TVL cap, min confirmations required. Use as a first-look before generating a deposit address — if alive=false, deposits will sit forever.", {
+    endpoint: z.string().optional().describe("Optional backend override (shortname or full URL)."),
+}, async ({ endpoint }) => {
+    try {
+        const res = await api("/bitcoin/deposit/bridge-status", "GET", undefined, { endpoint });
+        const d = res?.data ?? res;
+        if (!d) {
+            return { content: [{ type: "text", text: `btc_bridge_status: unexpected response shape: ${JSON.stringify(res).slice(0, 300)}` }] };
+        }
+        const lines = [
+            `=== Bitcoin Bridge Status ===`,
+            ``,
+            `  Bridge alive:           ${d.alive ? "✓ YES" : "❌ NO (deposits will not mint)"}`,
+            `  Min confirmations:      ${d.min_confirmations} blocks`,
+            ``,
+            `  Hot wallet:`,
+            `    Bridge BTC balance:   ${d.wallet_balance_btc?.toFixed(8) ?? "?"} BTC`,
+            ``,
+            `  Caps:`,
+            `    Max per deposit:      ${d.max_deposit_btc?.toFixed(8) ?? "?"} BTC  (${d.max_deposit_sats?.toLocaleString() ?? "?"} sats)`,
+            `    Max total TVL:        ${d.max_tvl_btc?.toFixed(8) ?? "?"} BTC  (${d.max_tvl_sats?.toLocaleString() ?? "?"} sats)`,
+            ``,
+            `  Already minted:`,
+            `    Total wBTC minted:    ${d.total_minted_btc?.toFixed(8) ?? "?"} BTC  (${d.total_minted_sats?.toLocaleString() ?? "?"} sats)`,
+            ``,
+            `  Deposit pipeline:`,
+            `    awaiting:             ${d.deposits_awaiting ?? "?"}  (address generated, no BTC yet)`,
+            `    detected:             ${d.deposits_detected ?? "?"}  (BTC seen in mempool, 0 confirmations)`,
+            `    confirming:           ${d.deposits_confirming ?? "?"}  (1+ confirmations, not yet final)`,
+            `    minted:               ${d.deposits_minted ?? "?"}  (✓ wBTC issued)`,
+            `    failed:               ${d.deposits_failed ?? "?"}  (expired or rejected)`,
+        ];
+        if (!d.alive) {
+            lines.push("");
+            lines.push("⚠ Bridge reports alive=false — generating a deposit address now will");
+            lines.push("  produce an address, but BTC sent to it will sit unprocessed until");
+            lines.push("  the bridge daemon is restored. Wait or contact the operator.");
+        }
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `btc_bridge_status failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("btc_generate_deposit_address", "Generate a Bitcoin deposit address bound to your agent wallet. v2.8.0: wraps POST /api/v1/bitcoin/deposit/address (X-Wallet-Auth signed). Real BTC sent to the returned address will be detected by the bridge, confirmed on Bitcoin's chain (min_confirmations blocks, typically 6), and then auto-minted as wBTC to your wallet — usable in the existing dex_swap (wBTC↔QUG pool is live). Returns deposit_id, btc_address, min/max sats per deposit, min confirmations, expiry, and a `bitcoin:` URI for QR rendering. Track with btc_deposit_status.", {
+    amount_hint_sats: z.number().int().positive().optional().describe("Optional amount hint in satoshis. Informational only — the server doesn't enforce a match; the bridge mints whatever lands at the address (within min/max caps)."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override (shortname or full URL)."),
+}, async ({ amount_hint_sats, seed, endpoint }) => {
+    try {
+        const body = {};
+        if (amount_hint_sats !== undefined)
+            body.amount_hint_sats = amount_hint_sats;
+        const res = await apiSigned("/bitcoin/deposit/address", "POST", body, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `btc_generate_deposit_address failed: ${res?.error ?? "unknown error"}` }] };
+        }
+        const d = res?.data ?? res;
+        const minBtc = (d.min_deposit_sats / 1e8).toFixed(8);
+        const maxBtc = (d.max_deposit_sats / 1e8).toFixed(8);
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== Bitcoin Deposit Address Generated ===`,
+                        ``,
+                        `  Deposit ID:        ${d.deposit_id}`,
+                        `  BTC address:       ${d.btc_address}`,
+                        ``,
+                        `  Send BTC here. Once the bridge sees ${d.min_confirmations} confirmations,`,
+                        `  wBTC is auto-minted to your agent wallet.`,
+                        ``,
+                        `  Caps:`,
+                        `    Min deposit:     ${d.min_deposit_sats.toLocaleString()} sats  (${minBtc} BTC)`,
+                        `    Max deposit:     ${d.max_deposit_sats.toLocaleString()} sats  (${maxBtc} BTC)`,
+                        `    Address expires: in ${d.expires_in_secs.toLocaleString()} seconds  (${(d.expires_in_secs / 3600).toFixed(1)} hours)`,
+                        ``,
+                        `  QR / URI:`,
+                        `    ${d.qr_uri}`,
+                        ``,
+                        `Next steps:`,
+                        `  1. Send BTC from your external wallet to ${d.btc_address}.`,
+                        `  2. Poll: btc_deposit_status deposit_id=${d.deposit_id}`,
+                        `  3. Once status=minted, swap to QUG: dex_swap from_token=wBTC to_token=QUG amount=<received-amount>`,
+                        ``,
+                        `Or use btc_list_deposits to see all your deposits at once.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `btc_generate_deposit_address failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("btc_deposit_status", "Poll a Bitcoin deposit by its ID. v2.8.0: wraps GET /api/v1/bitcoin/deposit/:id (X-Wallet-Auth signed — only the owner of the deposit can see its status). Returns: status (awaiting / detected / confirming / minted / failed / expired), amount received (sats + BTC), confirmation count, Bitcoin txid once on-chain, timestamps. Status meanings: `awaiting` = address generated, no BTC seen yet; `detected` = BTC seen in mempool, 0 confirmations; `confirming` = 1+ confirmations but below min; `minted` = ✓ wBTC has been issued to your wallet; `failed` = irrecoverable.", {
+    deposit_id: z.string().describe("The deposit_id returned from btc_generate_deposit_address."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override."),
+}, async ({ deposit_id, seed, endpoint }) => {
+    try {
+        const res = await apiSigned(`/bitcoin/deposit/${encodeURIComponent(deposit_id)}`, "GET", undefined, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `btc_deposit_status failed: ${res?.error ?? "unknown error"}` }] };
+        }
+        const d = res?.data ?? res;
+        const status = (d.status ?? "?").toString();
+        const statusEmoji = status === "minted" ? "✓"
+            : status === "failed" || status === "expired" ? "❌"
+                : status === "confirming" || status === "detected" ? "⏳"
+                    : "·";
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `=== Bitcoin Deposit Status ===`,
+                        ``,
+                        `  Deposit ID:        ${d.deposit_id}`,
+                        `  BTC address:       ${d.btc_address}`,
+                        `  Status:            ${statusEmoji} ${status.toUpperCase()}`,
+                        ``,
+                        `  Amount received:   ${d.amount_sats?.toLocaleString() ?? "0"} sats  (${d.amount_btc?.toFixed(8) ?? "0.00000000"} BTC)`,
+                        `  Confirmations:     ${d.confirmations ?? 0} / ${d.min_confirmations ?? "?"} required`,
+                        `  BTC txid:          ${d.txid ?? "(none yet — not seen on Bitcoin chain)"}`,
+                        ``,
+                        `  Created:           ${new Date((d.created_at ?? 0) * 1000).toISOString()}`,
+                        `  Updated:           ${new Date((d.updated_at ?? 0) * 1000).toISOString()}`,
+                        ``,
+                        status === "minted"
+                            ? `✓ wBTC has been issued to your wallet. Check with: get_token_balance symbol=wBTC`
+                            : status === "awaiting"
+                                ? `No BTC seen yet at this address. The bridge polls Bitcoin every ~30s; once your tx is broadcast it'll move to 'detected' within a minute or so.`
+                                : status === "detected" || status === "confirming"
+                                    ? `BTC tx is on-chain but needs more confirmations. Poll again in 10 min for the next Bitcoin block.`
+                                    : status === "expired"
+                                        ? `Address expired before BTC arrived. Generate a new one with btc_generate_deposit_address.`
+                                        : `Status '${status}' — check bridge state with btc_bridge_status.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `btc_deposit_status failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("btc_list_deposits", "List ALL Bitcoin deposits ever initiated by your agent wallet. v2.8.0: wraps GET /api/v1/bitcoin/deposits (X-Wallet-Auth signed). Useful after a fresh session or restart: 'do I have any deposits in flight that I forgot about?' Returns array of deposit objects with the same fields as btc_deposit_status.", {
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override."),
+}, async ({ seed, endpoint }) => {
+    try {
+        const res = await apiSigned("/bitcoin/deposits", "GET", undefined, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `btc_list_deposits failed: ${res?.error ?? "unknown error"}` }] };
+        }
+        const deposits = (res?.data ?? res?.deposits ?? res ?? []);
+        if (!Array.isArray(deposits) || deposits.length === 0) {
+            return { content: [{ type: "text", text: `No deposits found for this wallet. Use btc_generate_deposit_address to start one.` }] };
+        }
+        // Sort newest-first by created_at if available
+        const sorted = [...deposits].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+        const lines = [`=== ${sorted.length} Bitcoin Deposit(s) ===`, ``];
+        for (const d of sorted) {
+            const status = (d.status ?? "?").toString();
+            const emoji = status === "minted" ? "✓"
+                : status === "failed" || status === "expired" ? "❌"
+                    : status === "confirming" || status === "detected" ? "⏳"
+                        : "·";
+            const created = d.created_at ? new Date(d.created_at * 1000).toISOString().slice(0, 19).replace("T", " ") : "?";
+            lines.push(`  ${emoji} ${status.toUpperCase().padEnd(11)} ${created} UTC  id=${(d.deposit_id ?? "?").slice(0, 16)}…`);
+            lines.push(`    address: ${d.btc_address ?? "?"}`);
+            lines.push(`    amount:  ${d.amount_sats?.toLocaleString() ?? "0"} sats  (confirmations: ${d.confirmations ?? 0}/${d.min_confirmations ?? "?"})`);
+            if (d.txid)
+                lines.push(`    txid:    ${d.txid}`);
+            lines.push(``);
+        }
+        lines.push(`Poll a specific one with: btc_deposit_status deposit_id=<id>`);
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `btc_list_deposits failed: ${e?.message ?? e}` }] };
+    }
+});
+server.tool("btc_withdraw", "Redeem wBTC for real on-chain Bitcoin. v2.8.0: wraps POST /api/v1/bitcoin/withdraw (X-Wallet-Auth signed). The server deducts wBTC from your balance FIRST, then broadcasts a Bitcoin transaction to the destination address. If the broadcast fails, the wBTC is refunded. Per CLAUDE.md 'executing actions with care': defaults to confirm:false dry-run that shows the destination + amount + fee priority; pass confirm:true to actually submit. Fee priority maps to Bitcoin Knots conf_target — economy=30 blocks (~60min), normal=6 blocks (~30min), fast=2 blocks (~10min).", {
+    btc_address: z.string().describe("Destination Bitcoin address. bech32 (bc1q…) or legacy (1…/3…) accepted. Must be a real on-chain address — typo here loses the funds."),
+    amount_sats: z.number().int().positive().describe("Amount to withdraw in satoshis (1 BTC = 100,000,000 sats)."),
+    fee_priority: z.enum(["economy", "normal", "fast"]).optional().describe("Bitcoin network fee priority. Default: normal (~30min). Use fast for time-sensitive moves, economy for cheap-and-patient."),
+    seed: z.string().optional().describe("Optional seed override (otherwise: file → QNK_SEED env)."),
+    endpoint: z.string().optional().describe("Optional backend override."),
+    confirm: z.boolean().optional().describe("Set true to actually submit. Without it, returns a dry-run summary."),
+}, async ({ btc_address, amount_sats, fee_priority, seed, endpoint, confirm }) => {
+    // Bitcoin address sanity. Real validation happens server-side via bitcoin::Address;
+    // this is just a typo-guard so we don't burn a server roundtrip on obvious junk.
+    const addr = btc_address.trim();
+    const looksValid = /^bc1[ac-hj-np-z02-9]{6,87}$/i.test(addr) || // bech32 / bech32m
+        /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(addr); // legacy P2PKH/P2SH
+    if (!looksValid) {
+        return { content: [{ type: "text", text: `Invalid BTC address format: "${addr.slice(0, 40)}"\n  Expected bech32 (bc1q…) or legacy (starts with 1 or 3).\n  Per CLAUDE.md "executing actions with care" — refusing to submit. Verify the address (including capitalization for bech32m) and retry.` }] };
+    }
+    if (amount_sats < 1) {
+        return { content: [{ type: "text", text: `Invalid amount: ${amount_sats} sats. Must be a positive integer.` }] };
+    }
+    const amountBtc = amount_sats / 1e8;
+    const fee = fee_priority ?? "normal";
+    const eta = fee === "fast" ? "~10 minutes (2 blocks)"
+        : fee === "economy" ? "~60 minutes (30 blocks)"
+            : "~30 minutes (6 blocks)";
+    if (!confirm) {
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `⚠ BTC WITHDRAW DRY RUN — pass confirm=true to actually broadcast`,
+                        ``,
+                        `  Destination:       ${addr}`,
+                        `  Amount:            ${amount_sats.toLocaleString()} sats  (${amountBtc.toFixed(8)} BTC)`,
+                        `  Fee priority:      ${fee}  (estimated ${eta})`,
+                        ``,
+                        `On confirm:`,
+                        `  1. Server deducts ${amount_sats.toLocaleString()} sats worth of wBTC from your wallet`,
+                        `  2. Server broadcasts a Bitcoin tx to ${addr}`,
+                        `  3. If broadcast fails, wBTC is refunded`,
+                        `  4. Returns the Bitcoin txid; track with mempool.space/tx/<txid>`,
+                        ``,
+                        `⚠ This is irreversible once confirm=true and the BTC tx is broadcast.`,
+                        `  TYPO IN THE DESTINATION ADDRESS = LOST FUNDS. Re-read the address letter by letter.`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    try {
+        const body = {
+            btc_address: addr,
+            amount_sats,
+        };
+        if (fee_priority)
+            body.fee_priority = fee_priority;
+        const res = await apiSigned("/bitcoin/withdraw", "POST", body, { seed, endpoint });
+        if (res?.success === false) {
+            return { content: [{ type: "text", text: `btc_withdraw failed: ${res?.error ?? "unknown error"}\n\nCommon causes:\n  • Insufficient wBTC balance (run get_token_balance symbol=wBTC)\n  • Invalid bitcoin address (server validation stricter than client)\n  • Bridge daemon offline (run btc_bridge_status — check alive=true)\n  • Broadcast failure — wBTC should have been refunded; verify with get_token_balance` }] };
+        }
+        const d = res?.data ?? res;
+        return {
+            content: [{
+                    type: "text",
+                    text: [
+                        `✓ wBTC withdrawn — Bitcoin tx broadcast`,
+                        ``,
+                        `  Destination:       ${d.btc_address ?? addr}`,
+                        `  Amount:            ${d.amount_sats?.toLocaleString() ?? amount_sats.toLocaleString()} sats  (${d.amount_btc?.toFixed(8) ?? amountBtc.toFixed(8)} BTC)`,
+                        `  Bitcoin txid:      ${d.txid ?? "(no txid in response — check server logs)"}`,
+                        ``,
+                        `Track on-chain:`,
+                        `  https://mempool.space/tx/${d.txid ?? "<txid>"}`,
+                        ``,
+                        `Expected confirmations:  ${eta}`,
+                        `Your wBTC balance is now reduced; verify: get_token_balance symbol=wBTC`,
+                    ].join("\n"),
+                }],
+        };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `btc_withdraw failed: ${e?.message ?? e}` }] };
     }
 });
 // ============================================================
@@ -3556,6 +3843,16 @@ server.tool("tx_watch", "Wait for a transaction hash to confirm on-chain, then r
     const start = Date.now();
     let lastStatus = 'unknown';
     let confirmedTx = null;
+    // v2.7.4: Adaptive polling matched to DAG-Knight's ~100ms finality.
+    // Previously the loop waited 2s BEFORE the first poll and then polled at
+    // a flat 2s interval — pure dead air for any sub-2s tx (~98% of them).
+    // Now: poll immediately, then back off exponentially. Tail-bounded at 2s
+    // so long-pending txs don't hammer the server.
+    //
+    // First 5 polls land within ~1s of submit. Most confirmations show up
+    // within the first 2-3 polls.
+    const backoffSchedule = [150, 300, 600, 900, 1200, 1500, 2000];
+    let pollIdx = 0;
     while (Date.now() - start < timeoutMs) {
         try {
             const res = await api(`/transactions/${cleanHash}`, "GET");
@@ -3566,11 +3863,17 @@ server.tool("tx_watch", "Wait for a transaction hash to confirm on-chain, then r
             }
             if (data?.status)
                 lastStatus = data.status;
+            // v10.11.8+ honest status: bail fast on terminal 'dropped' — no point polling further.
+            if (data?.status === 'dropped') {
+                break;
+            }
         }
         catch (e) {
             // tx may not have propagated yet — keep polling
         }
-        await new Promise(r => setTimeout(r, 2000));
+        const delay = backoffSchedule[Math.min(pollIdx, backoffSchedule.length - 1)];
+        pollIdx++;
+        await new Promise(r => setTimeout(r, delay));
     }
     if (!confirmedTx) {
         const waited = Math.floor((Date.now() - start) / 1000);
