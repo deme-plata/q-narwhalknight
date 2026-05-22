@@ -1490,73 +1490,16 @@ impl QStorage {
             warn!("⚠️  [LOCK CONTENTION] Waited {:?} to acquire write lock", lock_acquire_time);
         }
 
-        // Get current height for contiguous calculation
+        // Get current apply-gate height for observability
         let contiguous_height = self.height_cache.cached();
 
-        // Calculate highest contiguous height from the stored blocks
+        // Sort + dedup the batch heights for clean diagnostics
         heights.sort();
         heights.dedup();
-
-        let mut new_contiguous_height = contiguous_height;
-        let mut batch_advanced = 0u64;
-        for height in &heights {
-            if *height == new_contiguous_height + 1 {
-                new_contiguous_height = *height;
-                batch_advanced += 1;
-            } else if *height > new_contiguous_height + 1 {
-                info!("🔍 [TURBO CONTIGUITY] Gap at height {}: expected {}, got {} (cache was {})",
-                      new_contiguous_height + 1, new_contiguous_height + 1, height, contiguous_height);
-                break;
-            }
-        }
-        if batch_advanced > 0 {
-            info!("🔍 [TURBO CONTIGUITY] Batch advanced pointer by {} blocks: {} → {}",
-                  batch_advanced, contiguous_height, new_contiguous_height);
-        } else if !heights.is_empty() {
-            info!("🔍 [TURBO CONTIGUITY] Batch did NOT advance pointer (cache={}, first_height={}, last_height={})",
-                  contiguous_height, heights.first().unwrap(), heights.last().unwrap());
-            warn!("⚠️  [GENESIS INTEGRITY] Batch {} blocks ({}-{}) did NOT extend contiguous chain \
-                   (current contiguous: {}, first_height: {}, expected_next: {}). \
-                   This creates a gap — sequential warp sync will fill it later.",
-                  heights.len(), heights.first().unwrap(), heights.last().unwrap(),
-                  contiguous_height, heights.first().unwrap(), contiguous_height + 1);
-        }
-
-        // v10.2.7: Forward probe — check if blocks from PREVIOUS batches bridge beyond this batch.
-        // Fixes the stuck-height bug where gap-fill stores blocks [A..A+2] but blocks [A+3..] already
-        // exist on disk from prior turbo sync. Without this, the pointer stays at A+2 instead of
-        // advancing through the pre-existing blocks to the next real gap.
-        if new_contiguous_height > contiguous_height {
-            let mut probe = new_contiguous_height + 1;
-            let probe_limit = probe + 10_000; // Bounded scan — don't block the write path
-            while probe <= probe_limit {
-                let probe_key = format!("qblock:height:{}", probe);
-                match self.hot_db.get(CF_BLOCKS, probe_key.as_bytes()).await {
-                    Ok(Some(_)) => {
-                        new_contiguous_height = probe;
-                        probe += 1;
-                    }
-                    _ => break,
-                }
-            }
-            if new_contiguous_height > contiguous_height + (heights.len() as u64) {
-                info!("🔗 [TURBO BRIDGE] Forward probe extended pointer by {} blocks ({} → {})",
-                      new_contiguous_height - contiguous_height, contiguous_height, new_contiguous_height);
-            }
-        }
-
-        // Update height pointer if we extended the chain
-        if new_contiguous_height > contiguous_height {
-            let latest_height_bytes = new_contiguous_height.to_be_bytes().to_vec();
-            batch.push((CF_BLOCKS, b"qblock:latest".to_vec(), latest_height_bytes.clone()));
-            // Also persist verified contiguous checkpoint for fast recovery on restart
-            batch.push((CF_BLOCKS, b"qblock:contiguous_verified".to_vec(), latest_height_bytes));
-        }
 
         // v7.2.8: ALWAYS persist the highest block stored (tip), even if not contiguous.
         // This prevents the "Swiss cheese reset" bug where height drops from 310K to 35K
         // on restart because qblock:latest only tracks contiguous height.
-        // We always write the max — RocksDB is idempotent and the batch is already being written.
         if let Some(&max_stored) = heights.last() {
             batch.push((CF_BLOCKS, b"qblock:tip_height".to_vec(), max_stored.to_be_bytes().to_vec()));
         }
@@ -1565,10 +1508,33 @@ impl QStorage {
         self.hot_db.write_batch_turbo(batch).await
             .context("Failed to write turbo batch to database")?;
 
-        // Update height cache
-        if new_contiguous_height > contiguous_height {
-            self.height_cache.update(new_contiguous_height).await;
-            debug!("📈 [TURBO] Height pointer: {} → {}", contiguous_height, new_contiguous_height);
+        // v10.11.x APPLY-GATE FIX: unconditionally advance the apply gate from the
+        // current cache to wherever storage now reaches. Replaces:
+        //   - the in-batch contiguity walk (broke on first in-batch gap, never resumed)
+        //   - the v10.2.7 forward-probe (gated on batch advancing → deadlocked when
+        //     batches landed past the gap)
+        //   - the per-batch qblock:latest / qblock:contiguous_verified pushes
+        //     (now handled inside tick_contiguity_advance with put_sync semantics)
+        //
+        // One derived query covers every case the previous patches tried to address
+        // piecemeal. See [[v10-11-5-apply-gate-wedge]] memory for the root-cause story.
+        let (gate_from, gate_to) = self.tick_contiguity_advance().await.unwrap_or((contiguous_height, contiguous_height));
+        if gate_to > gate_from {
+            info!("🔗 [APPLY-GATE] Advanced {} → {} (+{} blocks) after batch of {}",
+                  gate_from, gate_to, gate_to - gate_from, num_blocks);
+        } else if !heights.is_empty() && heights.first().map_or(false, |&h| h > gate_from + 1) {
+            // Observability: the batch stored blocks ABOVE the apply gate. The gate
+            // didn't advance because intermediate blocks are still missing. The 5s
+            // background tick will pick this up once they arrive. Kept as info+warn
+            // pair so operators can see the pattern in logs (matches the pre-v10.11.x
+            // [TURBO CONTIGUITY] / [GENESIS INTEGRITY] signals).
+            info!("🔍 [TURBO CONTIGUITY] Batch ({}-{}) stored past apply gate {} (gap not yet closed)",
+                  heights.first().unwrap(), heights.last().unwrap(), gate_from);
+            warn!("⚠️  [GENESIS INTEGRITY] Batch {} blocks ({}-{}) did NOT extend contiguous chain \
+                   (current contiguous: {}, first_height: {}, expected_next: {}). \
+                   Background contiguity tick will close the gap when intermediate blocks land.",
+                  heights.len(), heights.first().unwrap(), heights.last().unwrap(),
+                  gate_from, heights.first().unwrap(), gate_from + 1);
         }
 
         let lock_hold_time = lock_start.elapsed();
@@ -2090,6 +2056,76 @@ impl QStorage {
         // Tier 2: canonical key (for pre-v10.9.55 blocks)
         let height_key = format!("qblock:height:{}", height).into_bytes();
         Ok(self.hot_db.get(CF_BLOCKS, &height_key).await?.is_some())
+    }
+
+    /// v10.11.x: derived contiguous-tip query — the apply gate as a derived
+    /// property of storage, not a write-side counter.
+    ///
+    /// Walks forward from `from_height` and returns the highest H such that
+    /// `[from_height+1..=H]` are all present. Idempotent. Bounded by
+    /// `qblock:tip_height` (the storage tip) and by `MAX_ADVANCE_PROBES`
+    /// per call (caller should re-invoke if the gap is larger).
+    ///
+    /// **Architectural intent:** contiguous tip is a DERIVED property of
+    /// storage state. Every previous mechanism (v10.2.7 forward-probe gated
+    /// on batch advancement, v7.3.10 fast-recovery 100-block heuristic,
+    /// swiss-cheese high-probe scan, safe_floor anchor, POINTER-HEAL on
+    /// boot) was a patch on the consequence of treating it as a write-side
+    /// counter. This is the simpler model: ask storage directly, anytime.
+    ///
+    /// Used by [`tick_contiguity_advance`] (called from write-path end +
+    /// 5s background tick in main.rs).
+    pub async fn advance_contiguous_tip(&self, from_height: u64) -> Result<u64> {
+        const MAX_ADVANCE_PROBES: u64 = 100_000;
+
+        // Storage tip — never advance past it.
+        let storage_tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await? {
+            Some(b) if b.len() == 8 => {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&b);
+                u64::from_be_bytes(arr)
+            }
+            _ => return Ok(from_height), // no persisted tip → nothing to advance through
+        };
+
+        if from_height >= storage_tip {
+            return Ok(from_height);
+        }
+
+        let upper = (from_height + MAX_ADVANCE_PROBES).min(storage_tip);
+        let mut h = from_height;
+
+        // is_height_present is a two-tier ~µs check (v10.9.55 marker + canonical key)
+        while h < upper {
+            if self.is_height_present(h + 1).await? {
+                h += 1;
+            } else {
+                return Ok(h); // real gap → stop. Background tick will retry later.
+            }
+        }
+        Ok(h)
+    }
+
+    /// Convenience wrapper for callers (write-path end + background tick).
+    /// Runs [`advance_contiguous_tip`] and atomically persists the advance
+    /// to both `qblock:latest` and `qblock:contiguous_verified`, then
+    /// updates the in-memory `height_cache`.
+    ///
+    /// Returns `(from, to)` — `to > from` means progress was made.
+    pub async fn tick_contiguity_advance(&self) -> Result<(u64, u64)> {
+        let from = self.height_cache.cached();
+        let to = self.advance_contiguous_tip(from).await?;
+        if to > from {
+            let to_bytes = to.to_be_bytes().to_vec();
+            self.hot_db
+                .put(CF_BLOCKS, b"qblock:latest".to_vec(), to_bytes.clone())
+                .await?;
+            self.hot_db
+                .put(CF_BLOCKS, b"qblock:contiguous_verified".to_vec(), to_bytes)
+                .await?;
+            self.height_cache.update(to).await;
+        }
+        Ok((from, to))
     }
 
     /// Get QBlock by height

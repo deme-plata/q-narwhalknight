@@ -9264,6 +9264,54 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     let app_state = Arc::new(state);
 
+    // ────────────────────────────────────────────────────────────────────
+    // v10.11.x APPLY-GATE BACKGROUND TICK
+    // ────────────────────────────────────────────────────────────────────
+    // The apply gate (qblock:latest + height_cache) tracks the highest
+    // contiguous block height. It used to advance ONLY inside
+    // save_qblocks_batch_turbo, gated on the incoming batch's first height
+    // matching `current+1`. That gate deadlocked when:
+    //   - Boot did a POINTER-HEAL to a checkpoint pointer (e.g. 18,098,949)
+    //   - Subsequent batches arrived for ranges ABOVE the gate (e.g.
+    //     18,114,950+) because the sync engine's fetch decisions use
+    //     current_height_atomic (storage tip), not the contiguous tip
+    //   - Each batch's first height > gate+1 → in-batch walk breaks on
+    //     first iteration → v10.2.7 forward-probe never fires → gate stays
+    //     parked at 18,098,949 indefinitely while 16K+ blocks sit stored
+    //     above it
+    //
+    // This tick runs every 5s, calls the new derived-query
+    // `tick_contiguity_advance()`, and walks the gate forward through
+    // any stored-but-not-yet-walked blocks. Lock-free read path; idempotent;
+    // bounded at 100K probes per call.
+    //
+    // See [[v10-11-5-apply-gate-wedge]] memory for the wedge story; the
+    // architectural reasoning lives in the doc-comment on
+    // `advance_contiguous_tip` in crates/q-storage/src/lib.rs.
+    {
+        let storage_for_contiguity = app_state.storage_engine.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // skip first immediate tick — wait 5s after boot
+            loop {
+                interval.tick().await;
+                match storage_for_contiguity.tick_contiguity_advance().await {
+                    Ok((from, to)) if to > from => {
+                        info!(
+                            "🔗 [CONTIGUITY-TICK] Apply gate advanced {} → {} (+{} blocks, background scan)",
+                            from, to, to - from
+                        );
+                    }
+                    Ok(_) => {} // no advance, nothing to log
+                    Err(e) => {
+                        warn!("[CONTIGUITY-TICK] advance failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // v10.10.10: load agent-panel in-memory rings from disk + spawn periodic
     // auto-persist tasks. Files live at
     //   $Q_DB_PATH/agent_panel_score_history.json
