@@ -183,7 +183,7 @@ async function apiSigned(
 // --- MCP Server ---
 const server = new McpServer({
   name: "quillon-wallet",
-  version: "2.8.0",
+  version: "2.8.1",
 });
 
 // ============================================================
@@ -2316,6 +2316,234 @@ server.tool(
       };
     } catch (e: any) {
       return { content: [{ type: "text", text: `btc_withdraw failed: ${e?.message ?? e}` }] };
+    }
+  }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// v2.8.1: portfolio_overview — birdview of agent wallet holdings + pool-
+// implied USD values + LP positions + total mark-to-market net worth.
+//
+// Composes /wallet/tokens (signed, my balances) with /liquidity/pools
+// (public, all pool reserves) to derive a per-token price from the best
+// available pool (preferring QUGUSD pairs for direct $-quote, falling
+// back to QUG-paired pools × spot QUG price).
+//
+// Output: ranked table by value, total portfolio USD, per-token caveats
+// (thin pool / no pool / overflow), and LP-position summary.
+//
+// Mark-to-market caveat surfaced explicitly: thin pools (e.g. our own
+// QUG/PACI with only 110 QUG depth) give spectacular paper values that
+// can't be realized — selling the full inventory back through the pool
+// would collapse the price. The tool tags each token with a depth
+// indicator so operators don't mistake paper for cash.
+// ════════════════════════════════════════════════════════════════════════
+server.tool(
+  "portfolio_overview",
+  "Birdview of the agent wallet's holdings + pool-implied USD values + LP positions + total mark-to-market net worth. v2.8.1: composes /wallet/tokens with /liquidity/pools; derives each token's price from the best available pool (preferring QUGUSD pairs for direct $-quote, falling back to QUG-paired pools × spot QUG price). Tags each token with a depth indicator (deep/medium/thin) so operators don't mistake paper-valuation on a thin pool for realizable cash. Lists LP positions separately. Use this as the first read of any session to know your inventory and where the value sits.",
+  {
+    sort_by: z.enum(["value", "balance", "symbol"]).optional().describe("Sort order. Default: value (largest USD first)."),
+    seed: z.string().optional().describe("Optional seed override."),
+    endpoint: z.string().optional().describe("Optional backend override. Use 'epsilon' to bypass LB routing."),
+  },
+  async ({ sort_by, seed, endpoint }) => {
+    try {
+      // 1. Get my balances (signed — only own wallet)
+      const balRes = await apiSigned("/wallet/tokens", "GET", undefined, { seed, endpoint }) as any;
+      const tokensField = balRes?.data?.tokens ?? balRes?.tokens ?? {};
+      if (typeof tokensField !== "object") {
+        return { content: [{ type: "text", text: `portfolio_overview: unexpected /wallet/tokens shape` }] };
+      }
+      // 2. Get all pools (public)
+      const poolsRes = await api("/liquidity/pools", "GET", undefined, { endpoint }) as any;
+      const pools = (poolsRes?.data ?? poolsRes?.pools ?? []) as any[];
+
+      // 3. Find QUG/QUGUSD pool to anchor a USD price for QUG
+      let qugUsdPrice: number | null = null;
+      let qugUsdSource = "";
+      for (const p of pools) {
+        const t0 = String(p.token0 || "").toUpperCase();
+        const t1 = String(p.token1 || "").toUpperCase();
+        if ((t0 === "QUG" && t1 === "QUGUSD") || (t0 === "QUGUSD" && t1 === "QUG")) {
+          const r0 = Number(BigInt(p.reserve0) / 10n ** 18n) / 1e6;
+          const r1 = Number(BigInt(p.reserve1) / 10n ** 18n) / 1e6;
+          // price QUG = QUGUSD-side / QUG-side
+          if (t0 === "QUG") qugUsdPrice = r1 / r0;
+          else qugUsdPrice = r0 / r1;
+          qugUsdSource = p.pool_id;
+          break;
+        }
+      }
+
+      // 4. For each token I hold, derive a USD price.
+      type Row = {
+        symbol: string;
+        name: string;
+        balance: number;
+        balance_str: string;
+        contract_address: string | null;
+        price_usd: number | null;
+        value_usd: number | null;
+        source: string;
+        depth_tag: string; // "deep" / "medium" / "thin" / "no-pool" / "n/a"
+        is_lp: boolean;
+      };
+      const rows: Row[] = [];
+
+      const findPriceForCustom = (sym: string, contractAddr: string | null): { price: number | null; src: string; depth: string } => {
+        // Strategy: search pools where this token (by address or symbol) is one side.
+        // Prefer pair against QUGUSD (direct USD); fallback to QUG-pair × QUG price.
+        let best: { price: number | null; src: string; depth: string; isUsdSide: boolean } = {
+          price: null, src: "(no pool)", depth: "no-pool", isUsdSide: false
+        };
+        for (const p of pools) {
+          const t0 = String(p.token0 || "");
+          const t1 = String(p.token1 || "");
+          const matchSym = sym.toUpperCase();
+          const matchAddr = contractAddr || "";
+          const isToken0 = t0.toUpperCase() === matchSym || (matchAddr && t0 === matchAddr);
+          const isToken1 = t1.toUpperCase() === matchSym || (matchAddr && t1 === matchAddr);
+          if (!isToken0 && !isToken1) continue;
+          const otherSide = isToken0 ? t1.toUpperCase() : t0.toUpperCase();
+          const r0 = Number(BigInt(p.reserve0) / 10n ** 18n) / 1e6;
+          const r1 = Number(BigInt(p.reserve1) / 10n ** 18n) / 1e6;
+          const tokenSideReserve = isToken0 ? r0 : r1;
+          const otherSideReserve = isToken0 ? r1 : r0;
+          if (tokenSideReserve <= 0) continue;
+
+          let candidatePrice: number | null = null;
+          let usdSide = false;
+          let qugEquivDepth = 0;
+          if (otherSide === "QUGUSD") {
+            candidatePrice = otherSideReserve / tokenSideReserve;
+            usdSide = true;
+            qugEquivDepth = qugUsdPrice ? otherSideReserve / qugUsdPrice : 0;
+          } else if (otherSide === "QUG") {
+            const qugPerToken = otherSideReserve / tokenSideReserve;
+            candidatePrice = qugUsdPrice ? qugPerToken * qugUsdPrice : null;
+            qugEquivDepth = otherSideReserve;
+          } else {
+            continue; // skip non-QUG/QUGUSD pairs for now
+          }
+          // Depth tag based on QUG-equivalent pool depth
+          let depth = "thin";
+          if (qugEquivDepth > 10_000) depth = "deep";
+          else if (qugEquivDepth > 1_000) depth = "medium";
+          else if (qugEquivDepth > 50) depth = "thin";
+          else depth = "very-thin";
+          // Prefer USD-pair over QUG-pair, and deeper pool over shallower
+          if (best.price === null || (usdSide && !best.isUsdSide) || (usdSide === best.isUsdSide && depth === "deep")) {
+            best = { price: candidatePrice, src: `${p.pool_id} (${otherSide}-pair)`, depth, isUsdSide: usdSide };
+          }
+        }
+        return best;
+      };
+
+      for (const [sym, info] of Object.entries(tokensField as Record<string, any>)) {
+        const bal = Number(info.balance ?? 0);
+        if (bal <= 0) continue;
+        const isLp = sym.toUpperCase().startsWith("LP-");
+        let priceUsd: number | null = null;
+        let valueUsd: number | null = null;
+        let source = "";
+        let depth = "n/a";
+        if (sym.toUpperCase() === "QUGUSD") {
+          priceUsd = 1;
+          valueUsd = bal;
+          source = "stablecoin";
+          depth = "deep";
+        } else if (sym.toUpperCase() === "QUG") {
+          priceUsd = qugUsdPrice;
+          valueUsd = qugUsdPrice ? bal * qugUsdPrice : null;
+          source = qugUsdPrice ? `QUG/QUGUSD ${qugUsdSource}` : "(no QUG/QUGUSD pool)";
+          depth = "deep";
+        } else if (isLp) {
+          source = "LP position — value = your share of pool reserves";
+          depth = "n/a";
+        } else {
+          const r = findPriceForCustom(sym, info.contract_address ?? null);
+          priceUsd = r.price;
+          valueUsd = priceUsd !== null ? bal * priceUsd : null;
+          source = r.src;
+          depth = r.depth;
+        }
+        rows.push({
+          symbol: sym,
+          name: info.name ?? "",
+          balance: bal,
+          balance_str: info.balance ?? "0",
+          contract_address: info.contract_address ?? null,
+          price_usd: priceUsd,
+          value_usd: valueUsd,
+          source,
+          depth_tag: depth,
+          is_lp: isLp,
+        });
+      }
+
+      // 5. Sort
+      const sortKey = sort_by ?? "value";
+      rows.sort((a, b) => {
+        if (sortKey === "balance") return b.balance - a.balance;
+        if (sortKey === "symbol") return a.symbol.localeCompare(b.symbol);
+        // value
+        const av = a.value_usd ?? -1;
+        const bv = b.value_usd ?? -1;
+        return bv - av;
+      });
+
+      // 6. Totals
+      const totalUsd = rows.reduce((s, r) => s + (r.value_usd ?? 0), 0);
+      const realizableUsd = rows
+        .filter((r) => r.depth_tag === "deep" || r.depth_tag === "medium" || r.symbol.toUpperCase() === "QUGUSD" || r.symbol.toUpperCase() === "QUG")
+        .reduce((s, r) => s + (r.value_usd ?? 0), 0);
+      const paperOnlyUsd = totalUsd - realizableUsd;
+      const noPriceCount = rows.filter((r) => r.value_usd === null && !r.is_lp).length;
+
+      // 7. Render
+      const fmt = (n: number, d = 2) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+      const out: string[] = [
+        `=== Portfolio Overview ===`,
+        ``,
+        `  Wallet:   ${balRes?.data?.address ? "qnk" + balRes.data.address : "(seed-derived)"}`,
+        `  QUG spot: ${qugUsdPrice ? "$" + fmt(qugUsdPrice) + " (via " + qugUsdSource + ")" : "(no QUG/QUGUSD pool found)"}`,
+        `  Pools loaded: ${pools.length}`,
+        ``,
+        `  ┌─${"─".repeat(11)}─┬─${"─".repeat(20)}─┬─${"─".repeat(14)}─┬─${"─".repeat(18)}─┬─${"─".repeat(11)}─┐`,
+        `  │ ${"Token".padEnd(11)} │ ${"Balance".padStart(20)} │ ${"Price ($)".padStart(14)} │ ${"Value ($)".padStart(18)} │ ${"Depth".padEnd(11)} │`,
+        `  ├─${"─".repeat(11)}─┼─${"─".repeat(20)}─┼─${"─".repeat(14)}─┼─${"─".repeat(18)}─┼─${"─".repeat(11)}─┤`,
+      ];
+      for (const r of rows) {
+        const pStr = r.price_usd !== null ? fmt(r.price_usd, 6) : "—";
+        const vStr = r.value_usd !== null ? fmt(r.value_usd, 2) : "(no market)";
+        const dTag = r.is_lp ? "LP" : r.depth_tag;
+        out.push(`  │ ${r.symbol.padEnd(11)} │ ${fmt(r.balance, 4).padStart(20)} │ ${pStr.padStart(14)} │ ${vStr.padStart(18)} │ ${dTag.padEnd(11)} │`);
+      }
+      out.push(`  └─${"─".repeat(11)}─┴─${"─".repeat(20)}─┴─${"─".repeat(14)}─┴─${"─".repeat(18)}─┴─${"─".repeat(11)}─┘`);
+      out.push(``);
+      out.push(`  ═══ TOTALS ═══`);
+      out.push(`    Mark-to-market: $${fmt(totalUsd)}`);
+      out.push(`    Realizable (deep+medium pools only): $${fmt(realizableUsd)}`);
+      if (paperOnlyUsd > 0) {
+        out.push(`    Paper-only (thin-pool — can't realize at quoted price): $${fmt(paperOnlyUsd)}`);
+      }
+      if (noPriceCount > 0) {
+        out.push(`    Tokens with no market: ${noPriceCount} (held but no pool to price against)`);
+      }
+      out.push(``);
+      out.push(`  ═══ DEPTH LEGEND ═══`);
+      out.push(`    deep        > 10,000 QUG-equiv depth in pricing pool (~$22M+)`);
+      out.push(`    medium      1,000 – 10,000 QUG-equiv depth`);
+      out.push(`    thin        50 – 1,000 QUG-equiv (selling full stack tanks price)`);
+      out.push(`    very-thin   < 50 QUG-equiv (essentially you-vs-yourself)`);
+      out.push(`    no-pool     no liquidity pool exists for this token`);
+      out.push(``);
+      out.push(`  Note: thin-pool values are MARK-TO-MARKET, not realizable. The displayed`);
+      out.push(`  price is what the next 1-unit swap would fill at; selling your full`);
+      out.push(`  inventory would crash the pool. Treat realizable line as cash equivalent.`);
+      return { content: [{ type: "text", text: out.join("\n") }] };
+    } catch (e: any) {
+      return { content: [{ type: "text", text: `portfolio_overview failed: ${e?.message ?? e}` }] };
     }
   }
 );
