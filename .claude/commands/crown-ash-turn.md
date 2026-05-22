@@ -17,6 +17,19 @@ into a coherent dynastic story.
 
 ## Procedure
 
+0. **Watchdog check.** Read `~/.claude/quillon-cna-halt` (JSON). If it
+   exists AND its `stale_after` timestamp is in the future, the watchdog
+   has tripped — output the sentinel's `suggested_action` to the user
+   and EXIT immediately. Do NOT fetch state or submit actions while a
+   halt is in force. The /loop will keep waking but each wake is cheap.
+   The sentinel auto-expires after 1 hour OR the operator clears it
+   manually (`rm ~/.claude/quillon-cna-halt`).
+
+   Also read `~/.claude/quillon-cna-ask-human.json` (separate file from
+   the halt sentinel). If present, surface its "needs human input"
+   prompt at the TOP of your output before proceeding with the turn —
+   the agent still acts, but the human sees the flag.
+
 1. **Read your strategy journal first** at `.claude/quillon-crown-ash-journal.md`
    (create if missing). It contains:
    - Your faction name + ID + religion + culture
