@@ -512,6 +512,25 @@ impl ProductionMempool {
     pub async fn get_transactions_for_block(&self, max_count: usize) -> Vec<Transaction> {
         let pending = self.pending_transactions.read().await;
 
+        // v10.11.14 instrumentation: at mempool-draw time, count Valid vs
+        // Invalid. We've observed 0 non-coinbase txs in saved blocks despite
+        // admitted send_signed txs. This log surfaces whether
+        // pending_transactions actually holds our txs and they're Valid, or
+        // perform_validation has flagged them Invalid (in which case the
+        // .filter() below drops them silently).
+        let mut valid_count = 0usize;
+        let mut invalid_count = 0usize;
+        for tx in pending.values() {
+            if tx.validation_status == ValidationStatus::Valid { valid_count += 1; }
+            else { invalid_count += 1; }
+        }
+        if pending.len() > 0 {
+            tracing::warn!(
+                "📦 [MEMPOOL-DRAW v10.11.14] pending_total={} valid={} invalid={} max_take={}",
+                pending.len(), valid_count, invalid_count, max_count,
+            );
+        }
+
         let mut transactions: Vec<_> = pending
             .values()
             .filter(|tx| tx.validation_status == ValidationStatus::Valid)
@@ -524,11 +543,19 @@ impl ProductionMempool {
                 .then_with(|| a.received_at.cmp(&b.received_at))
         });
 
-        transactions
+        let chosen: Vec<Transaction> = transactions
             .into_iter()
             .take(max_count)
             .map(|tx| tx.transaction.clone())
-            .collect()
+            .collect();
+
+        if chosen.len() > 0 {
+            tracing::warn!(
+                "📦 [MEMPOOL-DRAW v10.11.14] returning {} txs to block-pack",
+                chosen.len(),
+            );
+        }
+        chosen
     }
 
     /// Remove transactions that have been included in a block
