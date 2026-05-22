@@ -1420,7 +1420,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
 
         <div className="flex-1 flex items-center justify-center">
           <motion.div
-            className="w-full max-w-md"
+            className="w-full max-w-5xl"
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ duration: 0.5, delay: 0.1 }}
@@ -1459,14 +1459,22 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             </div>
 
             {/* ════════════════════════════════════════════════════════════ */}
-            {/*  Quillon Agentic AI — center-of-screen onboarding card.     */}
+            {/*  Two-card grid: Quillon Agentic AI (left) + BIP39 form       */}
+            {/*  (right). Stacks on small viewports (< lg breakpoint),       */}
+            {/*  side-by-side on lg+. Heading + tagline sit above as a       */}
+            {/*  shared header. items-start keeps each card at its natural   */}
+            {/*  height — no forced equal-height stretching since the form   */}
+            {/*  is intrinsically taller than the AI teaser.                 */}
+            {/* ════════════════════════════════════════════════════════════ */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+            {/* ════════════════════════════════════════════════════════════ */}
+            {/*  Quillon Agentic AI — onboarding card (left column).         */}
             {/*  Discoverable surface for the setup-ai.sh / MCP flow.        */}
-            {/*  Sits ABOVE the human seed-phrase login form (which is      */}
-            {/*  unchanged below). Mnemonic input remains the human path;    */}
-            {/*  this is the agent path.                                     */}
+            {/*  The BIP39 seed-phrase login form sits to the right.         */}
             {/* ════════════════════════════════════════════════════════════ */}
             <motion.div
-              className="relative mb-6 rounded-2xl overflow-hidden cursor-pointer group"
+              className="relative rounded-2xl overflow-hidden cursor-pointer group"
               style={{
                 background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.18) 0%, rgba(79, 70, 229, 0.14) 50%, rgba(14, 165, 233, 0.16) 100%)',
                 border: '1px solid rgba(167, 139, 250, 0.35)',
@@ -1511,7 +1519,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     </div>
                   </div>
                   <div className="text-violet-300/60 text-[10px] uppercase tracking-wider">
-                    For Claude · Cursor · GPT clients
+                    For Claude · Cursor · Grok · GPT clients
                   </div>
                 </div>
 
@@ -1548,7 +1556,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 {/* CTA row */}
                 <div className="flex items-center justify-between pt-1">
                   <div className="text-violet-300/60 text-[11px]">
-                    Or use the BIP39 phrase below — both work.
+                    Or use the BIP39 phrase — both work.
                   </div>
                   <button
                     type="button"
@@ -1778,6 +1786,8 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 </motion.div>
               )}
             </motion.div>
+
+            </div>{/* /two-card grid */}
 
             {/* Security Note */}
             <motion.p
