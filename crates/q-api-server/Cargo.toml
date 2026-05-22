@@ -24,6 +24,10 @@ path = "src/bin/quillon-bank-cli.rs"
 # v6.1.0: libc for THP disable + malloc tuning (prevents OOM on 8GB servers)
 libc = "0.2"
 
+# v10.11.12: NonceTracker persistence — direct rocksdb access from
+# transaction_utils.rs so post-restart sends don't collide on stale nonces.
+rocksdb = { workspace = true }
+
 # Ring buffer for TUI log layer
 ringbuf = "0.3"
 
