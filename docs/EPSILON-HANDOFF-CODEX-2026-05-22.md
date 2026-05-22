@@ -336,7 +336,51 @@ Commits on `agent/cross-shard-simd-validation` ahead of last production deploy:
 | `04dfb2bb` | send_transaction mnemonic derivation — SHA3-256 not BIP39-PBKDF2 (v10.11.14, LIKELY ROOT-CAUSE FIX) |
 | `2289550a` | + MEMPOOL-DRAW instrumentation (v10.11.14) |
 | `5b6932a6` | MCP v2.9.0 + UI multi-agent: Adrian feedback fixes |
-| `<latest>` | fix: add rocksdb dep to q-api-server (the actual build fix) |
+| `09ae7513` | fix: add rocksdb dep to q-api-server (compile fix #1 for v10.11.14) |
+| `<latest>` | fix: NonceTracker borrow lifetime — clone Arc out of guard (compile fix #2 for v10.11.14) |
+
+**Build attempt history:**
+1. First build of v10.11.14 — failed: 5 errors (rocksdb crate not declared as q-api-server dep + 3 type-inference errors that cascade from the missing crate)
+2. Second build — failed: 1 error (E0597 lifetime — MutexGuard borrow couldn't satisfy cf_handle's bound)
+3. Third build — failed: 1 error (E0597 lifetime again — `if let Some(cf)` inside persist() scoped cf too tight for the BoundColumnFamily<'_> needed by put_cf)
+4. Fourth build (in progress when this doc was last touched) — uses `match` in persist() to bind cf at the function scope, matching what load_persisted already did. Should succeed.
+
+If a fifth build attempt is needed, the commits to look at first are anything touching `crates/q-api-server/src/transaction_utils.rs` (NonceTracker code) since that's where the recent rust compile errors landed.
+
+---
+
+## 13. Crown & Ash is a second witness for the same root-cause bug
+
+While the v10.11.14 build was compiling, I (Claude Code, the agent) played
+a few turns of Crown & Ash via the MCP. The play surfaced exactly the same
+bug pattern as the QUG chain-wide tx-drop:
+
+**Salt League** (F#3, SaltCult, 4 coastal mercantile provinces) was claimed
+and tested. Result split cleanly into two classes of action:
+
+| Action class | Examples | Result |
+|---|---|---|
+| **Direct province mutation** | `BuildImprovement` (Saltmere → University, Warehouse Row → Fortification) | ✅ APPLIED — visible in `crown_ash_realm` within a turn |
+| **Relational-state mutation** | `RaiseArmy`, `ProposeTreaty` (x3), `DeclareWar`, `EstablishTradeRoute` | ❌ Queued, never resolve. Realm shows `armies 0, treaties 0, wars 0` |
+
+The relational actions ALL queue successfully via the MCP API (returning
+`queue position: 1, turn: <N>`) but never become visible state. This is
+the SAME pattern as send_signed / dex_swap on the QUG path: the apply
+pipeline that consumes queued actions and applies relational state changes
+is wedged. Build improvements work because they mutate province struct
+directly without going through the tx-apply path.
+
+For Codex: if you ever doubt the diagnosis, replay the Salt League trial:
+join faction 3 with a fresh wallet, build a University somewhere
+(persists), then queue a RaiseArmy or DeclareWar (does NOT persist). The
+asymmetry is the bug. When v10.11.14 lands and you fix the chain-wide
+apply-pipeline issue, Crown & Ash's relational mechanics should unblock
+in the same patch.
+
+Salt League's current state (resume here when you want to continue):
+- 4 provinces: Saltmere (#14, capital, Port+Market+University), Tidehollow (#15, Port+Market), Coinport (#16, Port+Market), Warehouse Row (#17, Farmstead+Market+Fortification)
+- 0 armies, 0 treaties, 0 wars — the relational queue items waiting on the apply-pipeline fix
+- Population drifting down slowly (4773 → ~4600 over ~150 turns) — needs Granary/Hospital builds long-term
 
 The mnemonic-derivation fix at handlers.rs:4849 (`send_transaction_inner` Path A) might be all you need for the "send 100 still 2652" symptom from wallet UI. The instrumentation will tell you whether `send_signed` (different code path) is also broken or whether v10.11.14 is enough.
 
