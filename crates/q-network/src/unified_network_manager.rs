@@ -4575,35 +4575,41 @@ impl UnifiedNetworkManager {
                                 // v1.0.12-beta: Check if this is a pending batch sync request
                                 // v1.0.15-beta: Convert request_id to String for HashMap lookup
                                 // v1.3.10-beta: Enhanced logging for response channel delivery debugging
+                                // v10.11.21: scope-bound the std::sync::MutexGuard so it is provably
+                                // dropped before the .send().await further down. The async state
+                                // machine considers `pending` live until end of containing block
+                                // even with an explicit drop(), which fails the Send check for the
+                                // tokio::spawn that hosts handle_behaviour_event.
                                 let request_id_str = format!("{:?}", request_id);
-                                let mut pending = self.pending_block_requests.lock().unwrap();
+                                {
+                                    let mut pending = self.pending_block_requests.lock().unwrap();
 
-                                // v1.3.10-beta: Log pending requests for debugging channel mismatches
-                                let pending_keys: Vec<_> = pending.keys().cloned().collect();
-                                if !pending_keys.is_empty() {
-                                    info!("📋 [RESPONSE DELIVERY] Looking for request_id: {}", &request_id_str);
-                                    info!("   Pending requests ({}): {:?}",
-                                          pending_keys.len(),
-                                          pending_keys.iter().take(5).collect::<Vec<_>>());
-                                }
-
-                                if let Some(tx) = pending.remove(&request_id_str) {
-                                    // Send blocks to waiting BatchSyncEngine
-                                    if let Err(_) = tx.send(response.blocks.clone()) {
-                                        warn!("⚠️  [BATCH SYNC] Failed to deliver blocks: receiver dropped");
-                                    } else {
-                                        info!("✅ [BATCH SYNC] Successfully delivered {} blocks via channel (request_id: {})",
-                                               response.blocks.len(), &request_id_str[..request_id_str.len().min(30)]);
-                                    }
-                                } else {
-                                    // v1.3.10-beta: Log when no matching request found (potential channel mismatch)
+                                    // v1.3.10-beta: Log pending requests for debugging channel mismatches
+                                    let pending_keys: Vec<_> = pending.keys().cloned().collect();
                                     if !pending_keys.is_empty() {
-                                        warn!("⚠️  [RESPONSE DELIVERY] NO MATCHING REQUEST for ID: {}", &request_id_str);
-                                        warn!("   Available pending keys: {:?}", pending_keys);
-                                        warn!("   Blocks will be forwarded to consensus but NOT to TurboSync channel");
+                                        info!("📋 [RESPONSE DELIVERY] Looking for request_id: {}", &request_id_str);
+                                        info!("   Pending requests ({}): {:?}",
+                                              pending_keys.len(),
+                                              pending_keys.iter().take(5).collect::<Vec<_>>());
                                     }
-                                }
-                                drop(pending); // Release lock
+
+                                    if let Some(tx) = pending.remove(&request_id_str) {
+                                        // Send blocks to waiting BatchSyncEngine
+                                        if let Err(_) = tx.send(response.blocks.clone()) {
+                                            warn!("⚠️  [BATCH SYNC] Failed to deliver blocks: receiver dropped");
+                                        } else {
+                                            info!("✅ [BATCH SYNC] Successfully delivered {} blocks via channel (request_id: {})",
+                                                   response.blocks.len(), &request_id_str[..request_id_str.len().min(30)]);
+                                        }
+                                    } else {
+                                        // v1.3.10-beta: Log when no matching request found (potential channel mismatch)
+                                        if !pending_keys.is_empty() {
+                                            warn!("⚠️  [RESPONSE DELIVERY] NO MATCHING REQUEST for ID: {}", &request_id_str);
+                                            warn!("   Available pending keys: {:?}", pending_keys);
+                                            warn!("   Blocks will be forwarded to consensus but NOT to TurboSync channel");
+                                        }
+                                    }
+                                } // pending MutexGuard dropped here — provably before .await below
 
                                 if response.has_more {
                                     info!("   More blocks available beyond height {}", response.end_height);
