@@ -991,6 +991,50 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
       {/* All content sits above the background + particles */}
       <div className="relative" style={{ zIndex: 3 }}>
 
+        {/* ════════════════════════════════════════════════════════════ */}
+        {/*  Top-Left Logo Badge — moved here from center 2026-05-22     */}
+        {/*  to free up vertical space for the AI onboarding card +      */}
+        {/*  login form. Keeps the gold-border ring + cosmic glow at      */}
+        {/*  a compact size; full FloatingParticles + orbit ring          */}
+        {/*  removed (they belong to a hero treatment, not a corner       */}
+        {/*  badge).                                                      */}
+        {/* ════════════════════════════════════════════════════════════ */}
+        <motion.div
+          className="absolute top-3 left-3 z-40"
+          initial={{ opacity: 0, scale: 0.7 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.5, delay: 0.1 }}
+        >
+          <div className="w-14 h-14 relative">
+            {/* Compact cosmic glow */}
+            <motion.div
+              className="absolute inset-[-6px] rounded-full"
+              style={{
+                background: 'radial-gradient(circle, rgba(212,175,55,0.18) 0%, rgba(255,165,0,0.08) 40%, transparent 70%)',
+              }}
+              animate={{
+                scale: [1, 1.12, 1],
+                opacity: [0.55, 0.9, 0.55],
+              }}
+              transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+            />
+            {/* Gold border ring */}
+            <div className="absolute inset-0 rounded-full" style={{
+              background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
+              padding: '2px',
+            }}>
+              <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-1.5">
+                <img
+                  src="/quillon-logo.png"
+                  alt="Quillon Graph Logo"
+                  className="w-full h-full object-contain"
+                  style={{ filter: 'invert(1)' }}
+                />
+              </div>
+            </div>
+          </div>
+        </motion.div>
+
         {/* Quick Actions Bar - Top Right */}
         <div
           className="absolute top-3 right-3 flex items-center gap-1.5 z-50"
@@ -1383,54 +1427,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           >
             {/* Logo and Title */}
             <div className="text-center mb-12">
-              <motion.div
-                className="inline-block mb-6"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ duration: 0.5 }}
-              >
-                <div className="w-40 h-40 mx-auto relative">
-                  {/* Floating particles around logo */}
-                  <FloatingParticles />
-
-                  {/* Cosmic glow effect - enhanced with pulsing rings */}
-                  <motion.div
-                    className="absolute inset-[-20px] rounded-full"
-                    style={{
-                      background: 'radial-gradient(circle, rgba(212,175,55,0.15) 0%, rgba(255,165,0,0.08) 40%, transparent 70%)',
-                    }}
-                    animate={{
-                      scale: [1, 1.15, 1],
-                      opacity: [0.6, 1, 0.6],
-                    }}
-                    transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
-                  />
-
-                  {/* Outer orbit ring */}
-                  <motion.div
-                    className="absolute inset-[-10px] rounded-full border border-amber-500/10"
-                    animate={{ rotate: 360 }}
-                    transition={{ duration: 20, repeat: Infinity, ease: 'linear' }}
-                  >
-                    <div className="absolute top-0 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-amber-400/60" />
-                  </motion.div>
-
-                  {/* Gold border ring */}
-                  <div className="absolute inset-0 rounded-full" style={{
-                    background: 'linear-gradient(135deg, #D4AF37 0%, #FFD700 25%, #FFA500 50%, #FFD700 75%, #D4AF37 100%)',
-                    padding: '3px'
-                  }}>
-                    <div className="w-full h-full bg-gradient-to-b from-slate-900 via-blue-950 to-slate-900 rounded-full flex items-center justify-center p-4">
-                      <img
-                        src="/quillon-logo.png"
-                        alt="Quillon Graph Logo"
-                        className="w-full h-full object-contain"
-                        style={{ filter: 'invert(1)' }}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
+              {/* Hero logo moved to top-left badge 2026-05-22 — see top of   */}
+              {/* this file. Center now opens directly with the heading +    */}
+              {/* AI onboarding card, giving the form more breathing room.   */}
 
               <motion.h1
                 className="text-4xl lg:text-5xl font-bold bg-gradient-to-r from-amber-400 via-yellow-500 to-amber-600 bg-clip-text text-transparent"
