@@ -9781,8 +9781,15 @@ impl BalanceStorage for QStorage {
             &address[..16.min(address.len())], current, new_balance, amount
         );
 
-        // Save new balance
-        self.save_wallet_balance(&addr_array, new_balance).await?;
+        // v10.11.18 ROOT-CAUSE FIX: use save_wallet_balance_authoritative for
+        // debits. Pre-fix this called save_wallet_balance which has a max-wins
+        // guard (per CLAUDE.md Rule 1 — prevents stale replay from destroying
+        // higher balances). But a DEBIT is exactly old > new — max-wins SKIPS
+        // the write, the debit silently never lands, and the recipient is
+        // credited while the sender keeps full balance. Net effect: money is
+        // minted from thin air per transfer. The authoritative variant exists
+        // (lib.rs:4667) precisely for this case — debits bypass max-wins.
+        self.save_wallet_balance_authoritative(&addr_array, new_balance).await?;
 
         debug!(
             "💸 [BALANCE CONSENSUS] Subtracted {} from {}, new balance: {}",
