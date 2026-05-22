@@ -1519,7 +1519,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     </div>
                   </div>
                   <div className="text-violet-300/60 text-[10px] uppercase tracking-wider">
-                    For Claude · Cursor · Grok · GPT clients
+                    For Claude · Cursor · Codex · GPT · Grok clients
                   </div>
                 </div>
 
@@ -2173,8 +2173,16 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                     Claude Code
                   </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Cursor
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Codex (ChatGPT 5.5)
+                  </span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">ChatGPT (coming soon)</span>
-                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">Cursor (coming soon)</span>
+                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">Grok (coming soon)</span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">More TBA</span>
                 </div>
               </div>

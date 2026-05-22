@@ -2955,19 +2955,27 @@ impl Transaction {
 
         let signature = Signature::from_bytes(&signature_bytes);
 
-        // v10.10.0: Canonical signing target is signable_payload (signature
-        // field zeroed). Backwards compatibility: pre-activation blocks were
-        // signed against self.hash() which has a chicken-and-egg property
-        // that no client-side signer can satisfy correctly; only the
-        // OAuth-mediated /transactions/send server-side signer ever produced
-        // signatures for this path, and those skipped this verify entirely
-        // by inserting directly into the mempool. So switching the verifier
-        // to signable_payload does not invalidate any historical block —
-        // it only enables a path that has never functioned before.
+        // v10.11.7 (2026-05-21): accept signatures over EITHER signable_payload
+        // OR self.hash().
+        //
+        // Why: empirical reality contradicted the v10.10.0 comment. Slint wallet
+        // and the server's /transactions/send handler both sign `self.hash()`
+        // (the tx's id field). The verifier here was changed to compare against
+        // signable_payload(), which they never produce — so every browser+Slint
+        // send was getting rejected at the mempool with `signature invalid`
+        // (txs landed in mempool, then evicted before block inclusion).
+        //
+        // Both targets are deterministic functions of the same tx body; accepting
+        // either still proves the signer holds the private key. Try canonical
+        // first (the intended future-state), fall back to hash (the legacy
+        // reality). When all clients have migrated to canonical, drop the fallback.
         let canonical = self.signable_payload();
-
-        verifying_key.verify(&canonical, &signature)
-            .map_err(|e| format!("Ed25519 signature verification failed: {}", e))?;
+        let hash_target = self.hash();
+        if verifying_key.verify(&canonical, &signature).is_err()
+            && verifying_key.verify(hash_target.as_ref(), &signature).is_err()
+        {
+            return Err("Ed25519 signature verification failed: matches neither signable_payload nor hash".to_string());
+        }
 
         Ok(())
     }

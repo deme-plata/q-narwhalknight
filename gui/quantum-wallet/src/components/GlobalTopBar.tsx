@@ -5,6 +5,7 @@ import { qnkAPI, type MiningRewardEvent } from '../services/api';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import NetworkSelector from './NetworkSelector';
 import BlockStreamBar from './BlockStreamBar';
+import MemoRender from './MemoRender';
 
 interface GlobalTopBarProps {
   authenticated?: boolean;
@@ -124,7 +125,8 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
               block_height: txData.block_height,
               confirmations: txData.confirmations,
               fee: txData.fee ? (Number(txData.fee) / 1e24) : 0,
-              token_type: txData.token_type
+              token_type: txData.token_type,
+              memo: txData.memo,
             }
           });
         } else {
@@ -484,6 +486,10 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
                         <div className="text-amber-100 font-medium text-xs">{selectedDetail.data.timestamp}</div>
                       </div>
                     </div>
+
+                    {selectedDetail.data.memo && (
+                      <MemoRender memo={selectedDetail.data.memo} mode="full" />
+                    )}
 
                     <div className="p-3 bg-purple-500/10 border border-purple-500/30 rounded-lg">
                       <div className="flex items-center gap-2 text-purple-300 text-sm">

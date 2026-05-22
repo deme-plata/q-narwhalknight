@@ -44,6 +44,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
+import MemoRender from './MemoRender';
 
 // Mirrors the shape used by Dashboard.tsx's Transaction interface.
 // Keep this in sync with Dashboard.tsx:69-84.

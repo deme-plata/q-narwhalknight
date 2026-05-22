@@ -147,25 +147,13 @@ export function QFluxStatsPill() {
   useEffect(() => {
     let cancelled = false;
 
-    // Matches the pattern from NodeSettingsModal/getAuthHeaders (v9.0.3) —
-    // X-Wallet-Auth carries the address; Authorization: Bearer carries
-    // either the OAuth token or the wallet address as fallback.
-    function getAuthHeaders(): Record<string, string> {
-      try {
-        const wallet = localStorage.getItem('walletAddress') || '';
-        const authToken = localStorage.getItem('authToken') || '';
-        if (!wallet && !authToken) return { accept: 'application/json' };
-        return {
-          'X-Wallet-Auth': wallet,
-          Authorization: `Bearer ${authToken || wallet}`,
-          accept: 'application/json',
-        };
-      } catch { return { accept: 'application/json' }; }
-    }
-
+    // v10.11.7: switched to /admin/flux/stats-local which is public (no auth).
+    // The "-local" route is intentionally exempt from AEGIS-QL so explorer +
+    // public dashboards can render q-flux health for any visitor, signed-in
+    // or not. Same JSON shape as the authenticated /admin/flux/stats.
     async function tick() {
       try {
-        const r = await fetch('/api/v1/admin/flux/stats', { headers: getAuthHeaders() });
+        const r = await fetch('/api/v1/admin/flux/stats-local', { headers: { accept: 'application/json' } });
         if (r.ok) {
           const j = await r.json();
           if (j?.data && !cancelled) {

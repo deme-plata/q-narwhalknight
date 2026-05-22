@@ -110,6 +110,7 @@ const DEMO_INDEX_FUNDS: IndexFund[] = [
       { symbol: 'wBTC',    name: 'Wrapped Bitcoin',weight: 10, targetWeight: 10, price: 100000,  priceChange24h: -0.3, holdings: 2.894,     value: 289400 },
     ],
     managementFee: 0.10, // 0.1% mint/redeem fee (matches handlers.rs:11586 fee_rate=0.999)
+    methodology: 'risk-adjusted',
     lastRebalance: Date.now() - 14 * 24 * 60 * 60 * 1000,
     nextRebalance: Date.now() + 0.5 * 24 * 60 * 60 * 1000,
     myShares: 0,
