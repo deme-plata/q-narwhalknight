@@ -1283,6 +1283,22 @@ impl BlockProducer {
             // v3.5.25-beta: Use tx.id (not tx.hash()) to match how P2P handler stores status
             if let Some(ref tx_status_map) = self.tx_status {
                 let block_height = block.header.height;
+                // v10.11.13: instrumentation — count of txs producer is marking
+                // Confirmed at this height + how many are actually inside block.transactions.
+                // Comparing this against /api/v1/blocks/N catches the "Confirmed without
+                // inclusion" bug class. If user_tx_ids_for_status.len() > 0 but the saved
+                // block returns 0 non-coinbase via API, the bug is somewhere between this
+                // point and storage layout.
+                let total_in_block = block.transactions.len();
+                let coinbase_in_block = block.transactions.iter().filter(|t| t.is_coinbase()).count();
+                tracing::warn!(
+                    "📦 [PRODUCER-CONFIRM v10.11.13] marking {} user_tx_ids as Confirmed at h={} (block has {} total / {} coinbase / {} transfers)",
+                    user_tx_ids_for_status.len(),
+                    block_height,
+                    total_in_block,
+                    coinbase_in_block,
+                    total_in_block - coinbase_in_block,
+                );
                 for tx_id in &user_tx_ids_for_status {
                     tx_status_map.insert(
                         *tx_id,

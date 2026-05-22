@@ -192,6 +192,23 @@ impl QTransaction {
         let block_bytes = bincode::serialize(block)
             .context("Failed to serialize block with bincode")?;
 
+        // v10.11.13: instrumentation for "tx_status confirmed but block empty" bug.
+        // tx_status reports send_signed txs as confirmed at height N, but /api/v1/blocks/N
+        // shows 0 non-coinbase txs (observed 2026-05-22 for Adrian/Viktor/me). This log
+        // captures whether the block has transfers AT SAVE TIME, so we can distinguish:
+        // (a) producer marks Confirmed without packing → transfers=0 here too
+        // (b) save persists transfers but read strips them → transfers>0 here, 0 via API
+        let _coinbase_count = block.transactions.iter().filter(|t| t.is_coinbase()).count();
+        let _transfer_count = block.transactions.len() - _coinbase_count;
+        tracing::warn!(
+            "📦 [SAVE-QBLOCK-TX v10.11.13] h={} total={} coinbase={} transfers={} bytes={}",
+            block.header.height,
+            block.transactions.len(),
+            _coinbase_count,
+            _transfer_count,
+            block_bytes.len(),
+        );
+
         // 🚨 v1.0.17-beta CRITICAL FIX: Use string keys not raw binary!
         // BUG: Was using height.to_be_bytes() as key (e.g. 0x0000000000000001)
         // CORRECT: Use "qblock:height:1" string format (matches all other code)

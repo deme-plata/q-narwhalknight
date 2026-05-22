@@ -1232,6 +1232,22 @@ impl QStorage {
             }
         }
 
+        // v10.11.13: instrumentation — same purpose as the version in
+        // transaction.rs, but covers the StorageEngine direct-save path
+        // (no rocksdb-transaction wrapper). Cheap counter pre-write so we
+        // see what every save attempt contains.
+        {
+            let coinbase_count = block.transactions.iter().filter(|t| t.is_coinbase()).count();
+            let transfer_count = block.transactions.len() - coinbase_count;
+            warn!(
+                "📦 [SAVE-QBLOCK-DIRECT v10.11.13] h={} total={} coinbase={} transfers={}",
+                block.header.height,
+                block.transactions.len(),
+                coinbase_count,
+                transfer_count,
+            );
+        }
+
         // 🚨 v1.1.9: GLOBAL WRITE LOCK - Prevents race conditions with batch writes
         // All three write paths must share this lock to prevent pointer corruption
         let _global_guard = self.global_write_lock.lock().await;
