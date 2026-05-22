@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, memo, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown, Trophy, Bot } from 'lucide-react';
+import { Search, Copy, Check, ExternalLink, Hash, User, Blocks, Shield, X, Clock, ArrowRight, CheckCircle, XCircle, Key, FileCode, Wifi, Zap, Globe, MessageCircle, Bell, Send, UserCircle, CreditCard, LogOut, BookOpen, Palette, Pickaxe, Settings, FileText, Code, Twitter, Facebook, Download, ChevronDown, Trophy, Bot, Sparkles } from 'lucide-react';
 import { TICKER_SYMBOL } from '../constants/ticker';
 import { qnkAPI } from '../services/api';
 import type { MiningStatsEvent } from '../services/api';
@@ -358,6 +358,7 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
   const [connectedAgentsList, setConnectedAgentsList] = useState<Array<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number}>>([]);
   const [chainTvl, setChainTvl] = useState<number>(0);
   const [showAgentsModal, setShowAgentsModal] = useState(false);
+  const [aiCopied, setAiCopied] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState<{address: string; alias?: string; pvl: number; tx_count_24h: number; win_rate?: number} | null>(null);
   const [showMultiWallet, setShowMultiWallet] = useState(false);
 
@@ -2423,7 +2424,16 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                       // v3.4.3: Convert raw amounts to human-readable (1 QUG = 10^24 raw units - 24 decimal precision)
                       const DECIMALS = 1e24;
                       const humanAmount = selectedDetail.data.amount ? selectedDetail.data.amount / DECIMALS : 0;
-                      const humanFee = selectedDetail.data.fee ? selectedDetail.data.fee / DECIMALS : 0;
+                      const rawFee = selectedDetail.data.fee ?? 0;
+                      const humanFee = rawFee ? rawFee / DECIMALS : 0;
+                      // Format fees that are smaller than 6-decimal precision can show.
+                      // MIN_TRANSACTION_FEE_V1 = 2100 base units = 2.1e-21 QUG → .toFixed(6) renders "0.000000" (looks like zero).
+                      // Show base units + "min" tag so the fee never appears as 0 when it's actually charged.
+                      const formatFee = () => {
+                        if (humanFee >= 0.000001) return `${humanFee.toFixed(6)} ${TICKER_SYMBOL}`;
+                        const baseUnits = Number(rawFee).toLocaleString('en-US');
+                        return `${baseUnits} base units (min)`;
+                      };
                       return (
                         <>
                           {/* Amount - only show if we have full access AND amount exists */}
@@ -2479,10 +2489,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                           </div>
 
                           {/* Fee - only show if we have full access AND fee exists */}
-                          {hasFullAccess && humanFee > 0 && (
+                          {hasFullAccess && rawFee > 0 && (
                             <div className="p-3 bg-slate-800/50 rounded-lg">
                               <div className="text-amber-300/60 text-xs mb-1">Fee</div>
-                              <div className="text-amber-100 font-medium">{humanFee.toFixed(6)} {TICKER_SYMBOL}</div>
+                              <div className="text-amber-100 font-medium font-mono">{formatFee()}</div>
                             </div>
                           )}
 
@@ -2805,6 +2815,68 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
                   ))}
                 </div>
               )}
+
+              {/* ════════════════════════════════════════════════════════════ */}
+              {/*  Set up your own AI agent — onboarding card inside the      */}
+              {/*  Connected Agents modal. Mirrors the LoginScreen AI card    */}
+              {/*  (added 2026-05-22, commit 22a89fad/082af233/099632d0) so   */}
+              {/*  logged-in users can also discover the setup-ai.sh + MCP    */}
+              {/*  flow without having to log out first.                       */}
+              {/* ════════════════════════════════════════════════════════════ */}
+              <div
+                className="mt-5 relative rounded-xl overflow-hidden"
+                style={{
+                  background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.16) 0%, rgba(79, 70, 229, 0.12) 50%, rgba(14, 165, 233, 0.14) 100%)',
+                  border: '1px solid rgba(167, 139, 250, 0.32)',
+                }}
+              >
+                <motion.div
+                  className="absolute inset-0 opacity-40 pointer-events-none"
+                  style={{
+                    background: 'linear-gradient(110deg, transparent 30%, rgba(167, 139, 250, 0.18) 45%, transparent 60%)',
+                    backgroundSize: '200% 100%',
+                  }}
+                  animate={{ backgroundPosition: ['200% 0', '-100% 0'] }}
+                  transition={{ duration: 4.5, repeat: Infinity, ease: 'linear' }}
+                />
+                <div className="relative p-4 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)' }}>
+                      <Sparkles className="w-4 h-4 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-violet-100 font-bold text-sm leading-tight">
+                        Set up your own AI agent
+                      </div>
+                      <div className="text-violet-300/70 text-[10px] uppercase tracking-widest mt-0.5">
+                        Quillon Agentic AI · 44 tools · for Claude · Cursor · Grok · GPT clients
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-violet-100/85 text-xs leading-snug">
+                    Talk to your wallet. Send, swap, deploy contracts, monitor sync — all from your AI client.
+                  </div>
+                  <div className="relative bg-slate-950/60 rounded-lg px-3 py-2 font-mono text-[11px] text-violet-200 border border-violet-500/20">
+                    <span className="text-violet-400 select-none">$ </span>
+                    <span>curl -fsSL https://quillon.xyz/setup-ai.sh | bash</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText('curl -fsSL https://quillon.xyz/setup-ai.sh | bash');
+                        setAiCopied(true);
+                        setTimeout(() => setAiCopied(false), 1500);
+                      }}
+                      className={`absolute top-1 right-1 px-2 py-0.5 text-[9px] font-bold tracking-wider uppercase rounded transition-all ${
+                        aiCopied
+                          ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/50'
+                          : 'bg-violet-600/30 text-violet-200 border border-violet-400/40 hover:bg-violet-600/50'
+                      }`}
+                    >
+                      {aiCopied ? '✓ Copied' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              </div>
 
               <p className="text-[10px] text-gray-600 text-center mt-5">
                 Opt-in is voluntary. Non-opted agents stay private. Stats are agent-self-reported via signed claims to the chain.
