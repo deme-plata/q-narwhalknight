@@ -4740,6 +4740,107 @@ function synthesizeRealm(world, wallet) {
     const wars = (world?.wars ?? []).filter((w) => w?.attacker === fid || w?.defender === fid);
     return { faction: me, provinces, armies, treaties, wars };
 }
+server.tool("crown_ash_delta", "Crown & Ash — minimal turn-over-turn delta vs the caller's last observation. Designed for use inside /loop /crown-ash-turn so the agent doesn't burn tokens re-reading the whole world each wake. Reads `~/.claude/quillon-crown-ash-last-observation.json` (created/updated automatically), fetches current world+realm, computes (current - last), writes the new observation back, returns ONLY the delta + a one-line summary. First call returns 'no prior observation; treat next call as the first delta.'", {
+    wallet: z.string().optional().describe("Wallet address (qnk...). Defaults to the configured seed's address."),
+}, async ({ wallet }) => {
+    try {
+        const os = await import("node:os");
+        const path = await import("node:path");
+        const fs = await import("node:fs");
+        const obsPath = path.join(os.homedir(), ".claude", "quillon-crown-ash-last-observation.json");
+        // Fetch current
+        const worldRes = await api(`${CROWN_ASH_PATH}/world`);
+        const world = worldRes.data ?? worldRes;
+        let myAddr = wallet;
+        if (!myAddr) {
+            try {
+                const { seed } = loadSeed({});
+                myAddr = deriveKeys(seed).address;
+            }
+            catch { /* anon */ }
+        }
+        const current = {
+            turn: world.turn,
+            my_faction_id: null,
+            my_provinces: 0,
+            my_armies: 0,
+            my_treasury: 0,
+            my_treaties: 0,
+            my_wars: 0,
+            total_provinces: world.provinces?.length ?? 25,
+            total_armies: world.armies?.length ?? 0,
+            total_treaties: world.treaties?.length ?? 0,
+            total_wars: world.wars?.length ?? 0,
+            ts: new Date().toISOString(),
+        };
+        if (world.factions && myAddr) {
+            const cleanAddr = myAddr.startsWith("qnk") ? myAddr.slice(3) : myAddr;
+            const me = world.factions.find((f) => (f.player_wallet ?? "").replace(/^qnk/, "").toLowerCase() === cleanAddr.toLowerCase());
+            if (me) {
+                current.my_faction_id = me.id;
+                current.my_provinces = me.province_ids?.length ?? 0;
+                current.my_armies = world.armies?.filter((a) => a.faction_id === me.id).length ?? 0;
+                current.my_treasury = me.treasury ?? 0;
+                current.my_treaties = world.treaties?.filter((t) => t.party_a === me.id || t.party_b === me.id).length ?? 0;
+                current.my_wars = world.wars?.filter((w) => w.aggressor === me.id || w.defender === me.id).length ?? 0;
+            }
+        }
+        let prior = null;
+        try {
+            prior = JSON.parse(fs.readFileSync(obsPath, "utf-8"));
+        }
+        catch { /* first run */ }
+        // Persist new observation
+        try {
+            fs.mkdirSync(path.dirname(obsPath), { recursive: true });
+            fs.writeFileSync(obsPath, JSON.stringify(current, null, 2));
+        }
+        catch (e) {
+            /* don't fail the tool if persistence fails */
+        }
+        if (!prior) {
+            return { content: [{ type: "text", text: [
+                            `Crown & Ash — first observation captured (no prior to diff against).`,
+                            ``,
+                            `turn=${current.turn}  faction=${current.my_faction_id ?? "(none / not joined)"}`,
+                            `  provinces=${current.my_provinces}  armies=${current.my_armies}  treaties=${current.my_treaties}  wars=${current.my_wars}`,
+                            `total: provinces=${current.total_provinces}  armies=${current.total_armies}  treaties=${current.total_treaties}  wars=${current.total_wars}`,
+                            ``,
+                            `Next /loop tick will return a real delta.`,
+                        ].join("\n") }] };
+        }
+        const turns = current.turn - prior.turn;
+        const deltas = [];
+        const mark = (k, p, c) => { if (c !== p)
+            deltas.push(`  ${k}: ${p} → ${c} (Δ${c > p ? "+" : ""}${c - p})`); };
+        mark("my_provinces", prior.my_provinces, current.my_provinces);
+        mark("my_armies", prior.my_armies, current.my_armies);
+        mark("my_treaties", prior.my_treaties, current.my_treaties);
+        mark("my_wars", prior.my_wars, current.my_wars);
+        mark("my_treasury", prior.my_treasury, current.my_treasury);
+        mark("total_armies", prior.total_armies, current.total_armies);
+        mark("total_treaties", prior.total_treaties, current.total_treaties);
+        mark("total_wars", prior.total_wars, current.total_wars);
+        const summary = deltas.length === 0
+            ? `STABLE — nothing changed in ${turns} turns. Consider sleeping longer.`
+            : `${deltas.length} fields changed in ${turns} turns. Investigate.`;
+        return { content: [{ type: "text", text: [
+                        `Crown & Ash — Δ since last observation`,
+                        `  turn ${prior.turn} → ${current.turn} (${turns} turns elapsed, ${(Date.now() - new Date(prior.ts).getTime()) / 1000 | 0}s wall)`,
+                        ``,
+                        deltas.length ? deltas.join("\n") : "  (no changes)",
+                        ``,
+                        `Summary: ${summary}`,
+                        ``,
+                        `Current snapshot:`,
+                        `  you: provinces=${current.my_provinces} armies=${current.my_armies} treaties=${current.my_treaties} wars=${current.my_wars} treasury=${current.my_treasury}`,
+                        `  net: provinces=${current.total_provinces} armies=${current.total_armies} treaties=${current.total_treaties} wars=${current.total_wars}`,
+                    ].join("\n") }] };
+    }
+    catch (e) {
+        return { content: [{ type: "text", text: `crown_ash_delta failed: ${e?.message ?? e}` }] };
+    }
+});
 server.tool("crown_ash_world", "Crown & Ash — heraldic world snapshot (provinces, factions, treaties). Returns a stylised text banner with religion glyphs, claim status, and a treaty/war ledger.", {}, async () => {
     try {
         const res = await api(`${CROWN_ASH_PATH}/world`);
