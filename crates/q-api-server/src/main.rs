@@ -9290,6 +9290,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // `advance_contiguous_tip` in crates/q-storage/src/lib.rs.
     {
         let storage_for_contiguity = app_state.storage_engine.clone();
+        let upgrade_mgr_for_contiguity = app_state.upgrade_manager.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -9302,6 +9303,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             "🔗 [CONTIGUITY-TICK] Apply gate advanced {} → {} (+{} blocks, background scan)",
                             from, to, to - from
                         );
+                        // v10.11.10: also push the new height through the upgrade gate.
+                        // Without this, data.upgrades.current_height (the API surface that
+                        // operators read in /api/v1/status) stays parked at the value
+                        // upgrade_manager was last set to via block-production or sync
+                        // paths. For a long-running node where storage advances via
+                        // gossipsub but block-production has stalled, the visible symptom
+                        // (status field) keeps lying about the apply gate height until
+                        // a new locally-produced block lands. Closing that gap here.
+                        upgrade_mgr_for_contiguity.set_height(to);
                     }
                     Ok(_) => {} // no advance, nothing to log
                     Err(e) => {
