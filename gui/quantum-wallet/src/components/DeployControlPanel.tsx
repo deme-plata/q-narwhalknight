@@ -26,6 +26,11 @@ import {
   Key, Cpu, Lock, Fingerprint, Hash, Award, BarChart3
 } from 'lucide-react';
 import { getConnectionInfo } from '../services/api';
+// v10.11.16: import walletAuth helpers so bankAction can sign founder-only
+// POST routes (approve/reject/mint/etc.). Pre-fix the bankHeaders just
+// stuffed the bare wallet address into X-Wallet-Auth — AEGIS-QL middleware
+// requires Ed25519-signed JSON, so every approve_loan returned 401.
+import { keypairFromMnemonic, generateAuthHeader } from '../services/walletAuth';
 
 const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
@@ -1903,12 +1908,65 @@ export default function DeployControlPanel() {
   }, [walletAddress, miningPoolUrlInput, fetchMiningModeStatus]);
 
   // Bank admin actions
+  //
+  // v10.11.16: founder-only POST routes (approve_loan, mint, distribute_profits,
+  // etc.) sit behind AEGIS-QL middleware which requires a JSON-encoded
+  // X-Wallet-Auth header signed via Ed25519, NOT a bare wallet address.
+  // Pre-fix bankHeaders just put the address string in X-Wallet-Auth →
+  // every founder action returned 401. Now we sign the request path with
+  // the wallet's private key (derived from localStorage walletSeed/
+  // walletMnemonic via the same path the rest of the wallet uses).
   const bankAction = useCallback(async (cmd: string, method: string, path: string, body?: any) => {
     addBankLog(cmd, 'Executing...', true);
     try {
+      let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      // Try to sign for POST/PUT/DELETE — read-only GET still works without
+      // founder auth so we can leave GETs alone.
+      if (method !== 'GET') {
+        try {
+          // walletMnemonic / walletSeed convention: the wallet stores its
+          // mnemonic in localStorage when imported, the per-address seed
+          // in `quillon:seed:<addr>`, and `walletSeed` as the canonical
+          // active seed. For Ed25519 signing we need the private key —
+          // try the canonical seed path first.
+          const seed = localStorage.getItem('walletSeed');
+          const mnemonic = localStorage.getItem('walletMnemonic');
+          let privateKey: Uint8Array | null = null;
+          if (seed) {
+            // seed is 64-char hex per multi-wallet drawer's generateWallet().
+            // Derive priv via SHA3-256(seed_string_utf8) — matches the
+            // server's import_wallet derivation at handlers.rs:2562.
+            const sha3 = await import('@noble/hashes/sha3');
+            const utils = await import('@noble/hashes/utils');
+            privateKey = sha3.sha3_256(utils.utf8ToBytes(seed));
+          } else if (mnemonic) {
+            const kp = await keypairFromMnemonic(mnemonic);
+            privateKey = kp.privateKey;
+          }
+          if (privateKey) {
+            const authHeader = await generateAuthHeader(
+              privateKey,
+              walletAddress.startsWith('qnk') ? walletAddress : `qnk${walletAddress}`,
+              path.replace(/^\/api\/v1/, '/api/v1'), // server expects full path
+              'Ed25519',
+            );
+            headers['X-Wallet-Auth'] = authHeader;
+          } else {
+            // Fall back to legacy bare-address header (still 401 on protected
+            // routes but useful for log/debug paths)
+            headers['X-Wallet-Auth'] = walletAddress;
+          }
+        } catch (e: any) {
+          addBankLog(cmd, `Auth header generation failed: ${e?.message ?? e}`, false);
+          return;
+        }
+      } else {
+        headers['X-Wallet-Auth'] = walletAddress;
+      }
+
       const resp = await fetch(path, {
         method,
-        headers: bankHeaders,
+        headers,
         body: body ? JSON.stringify(body) : undefined,
       });
       const text = await resp.text();
@@ -2270,7 +2328,13 @@ export default function DeployControlPanel() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -40 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed top-4 left-1/2 transform -translate-x-1/2 w-[1640px] max-w-[95vw] max-h-[90vh] overflow-y-auto rounded-2xl z-[99999]"
+            /* v10.11.16 UI fix: replaced fixed-width `w-[1640px]` + `left-1/2
+              translate-x-1/2` (which left the panel half-off-screen on
+              viewports < 1640px because the translate calc lagged the
+              actual rendered width). Use inset-x-0 + mx-auto + max-w
+              instead — natural flex-style centering that works at any
+              viewport. */
+            className="fixed top-4 inset-x-0 mx-auto w-full max-w-[1600px] px-4 max-h-[90vh] overflow-y-auto rounded-2xl z-[99999]"
             style={{
               background: 'linear-gradient(135deg, rgba(15, 10, 35, 0.98) 0%, rgba(30, 20, 55, 0.98) 100%)',
               border: '2px solid rgba(16, 185, 129, 0.3)',
