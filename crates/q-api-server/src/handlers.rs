@@ -4835,21 +4835,37 @@ async fn send_transaction_inner(
         // ── Path A: Mnemonic provided (traditional flow + first-time OAuth2 bootstrap) ──
         let mnemonic_str = request.mnemonic.as_ref().unwrap();
 
-        let mnemonic = match Mnemonic::parse_in(Language::English, mnemonic_str) {
-            Ok(m) => m,
-            Err(e) => {
-                error!("Invalid mnemonic phrase: {}", e);
-                return Ok(Json(ApiResponse::error(format!(
-                    "Invalid mnemonic phrase: {}",
-                    e
-                ))));
-            }
-        };
+        // v10.11.11 (2026-05-22): MUST match the wallet UI's derivation
+        // (gui/quantum-wallet/src/services/walletAuth.ts:228 — sha3_256(mnemonic)
+        // → ed25519 priv key). Also matches import_wallet at handlers.rs:2562-2575.
+        //
+        // The pre-v10.11.11 derivation here used BIP39 PBKDF2 (`mnemonic.to_seed("")`)
+        // which produces a COMPLETELY DIFFERENT private key for the same mnemonic.
+        // Result: server signed every tx with a key whose pub key didn't match
+        // tx.from, mempool rejected with "Ed25519 signature verification failed:
+        // Verification equation was not satisfied". No wallet send via HTTP path
+        // could ever land — the chain was effectively unusable from the web UI.
+        //
+        // We still validate the mnemonic as BIP39 (wordlist + checksum) to keep
+        // the brainwallet-resistance the May 2026 import_wallet fix added; we
+        // only diverge on the key-DERIVATION step.
+        let normalized = mnemonic_str.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Err(e) = Mnemonic::parse_in(Language::English, &normalized) {
+            error!("Invalid mnemonic phrase: {}", e);
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid mnemonic phrase: {}",
+                e
+            ))));
+        }
 
-        // Generate seed from mnemonic (BIP39 standard: 512-bit seed)
-        let seed = mnemonic.to_seed("");
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&seed[..32]);
+        // SHA3-256(mnemonic_normalized_utf8) → 32-byte Ed25519 private key.
+        // IDENTICAL to handlers.rs:2562-2567 and walletAuth.ts:228.
+        let key_bytes: [u8; 32] = {
+            use q_types::{Digest, Sha3_256};
+            let mut hasher = Sha3_256::new();
+            hasher.update(normalized.as_bytes());
+            hasher.finalize().into()
+        };
         let sk = SecretKey::from_bytes(&key_bytes);
         let vk = sk.verifying_key();
         let pubkey = vk.to_bytes();
