@@ -6055,16 +6055,16 @@ server.tool(
 
 server.tool(
   "bank_metrics",
-  "Quillon Bank — public metrics + health. Reads /banking/metrics + /stablecoin/status + /treasury/reserves. Shows total clients, reserve coverage, QNKUSD circulating, recent loan volume. Use to check the bank is healthy before applying for a loan or messaging admin.",
+  "Quillon Bank — public metrics + health. Reads /quillon-bank/metrics + /stablecoin/status + /treasury/reserves. Shows total clients, reserve coverage, QNKUSD circulating, recent loan volume. Use to check the bank is healthy before applying for a loan or messaging admin.",
   {
     endpoint: z.string().optional().describe("Optional backend override."),
   },
   async ({ endpoint }) => {
     try {
       const [metrics, stablecoin, reserves] = await Promise.all([
-        api(`/banking/metrics`, "GET", undefined, { endpoint }).catch(() => null),
-        api(`/banking/stablecoin/status`, "GET", undefined, { endpoint }).catch(() => null),
-        api(`/banking/treasury/reserves`, "GET", undefined, { endpoint }).catch(() => null),
+        api(`/quillon-bank/metrics`, "GET", undefined, { endpoint }).catch(() => null),
+        api(`/quillon-bank/stablecoin/status`, "GET", undefined, { endpoint }).catch(() => null),
+        api(`/quillon-bank/treasury/reserves`, "GET", undefined, { endpoint }).catch(() => null),
       ]) as any[];
       const m = (metrics as any)?.data ?? metrics ?? {};
       const s = (stablecoin as any)?.data ?? stablecoin ?? {};
@@ -6115,19 +6115,22 @@ server.tool(
         `  Term:             ${duration_days ?? 30} days`,
         `  Purpose:          ${purpose ?? "(none)"}`,
         ``,
-        `On confirm: submits to /banking/lending/apply. Admin must approve`,
+        `On confirm: submits to /quillon-bank/lending/apply. Admin must approve`,
         `before QNKUSD is issued.`,
       ].join("\n") }] };
     }
     try {
-      const body = {
-        applicant_wallet: signerAddress,
-        collateral_qug,
-        requested_qnkusd,
-        duration_days: duration_days ?? 30,
-        purpose: purpose ?? "",
-      };
-      const res = await apiSigned(`/banking/lending/apply`, "POST", body, { seed, endpoint }) as any;
+      // v2.9.6 — corrected payload schema. Server's ApplyLoanRequest at
+      // quillon_bank_api.rs expects: wallet_address (not applicant_wallet),
+      // loan_amount as RAW u128 (24-decimal NOT display), collateral_amount
+      // as f64 display QUG, collateral_type "QUG", term_months (not days).
+      // Hand-build body so the u128 loan_amount lands as a raw integer
+      // literal (per u128_in_json_gotcha.md — JSON.stringify mangles to
+      // scientific notation which serde u128 rejects).
+      const loanAmountRaw = toBaseUnits(requested_qnkusd, AMM_DECIMALS);
+      const termMonths = Math.max(1, Math.round((duration_days ?? 30) / 30));
+      const rawBody = `{"wallet_address":"${signerAddress}","loan_amount":${loanAmountRaw},"collateral_amount":${collateral_qug},"collateral_type":"QUG","term_months":${termMonths},"purpose":${JSON.stringify(purpose ?? "")}}`;
+      const res = await apiSigned(`/quillon-bank/lending/apply`, "POST", undefined, { seed, endpoint, rawBody }) as any;
       const d = res?.data ?? res;
       return { content: [{ type: "text", text: [
         `✅ Loan application submitted`,
@@ -6150,7 +6153,7 @@ server.tool(
 
 server.tool(
   "bank_loan_status",
-  "Quillon Bank — list your loan applications + current statuses. Reads /banking/lending/applications and filters to your wallet (X-Wallet-Auth-derived). Status values: pending_review, approved, active, paid_back, defaulted, liquidated.",
+  "Quillon Bank — list your loan applications + current statuses. Reads /quillon-bank/lending/applications and filters to your wallet (X-Wallet-Auth-derived). Status values: pending_review, approved, active, paid_back, defaulted, liquidated.",
   {
     seed: z.string().optional(),
     endpoint: z.string().optional(),
@@ -6159,12 +6162,12 @@ server.tool(
     try {
       const { seed: rawSeed } = loadSeed({ seedArg: seed });
       const signerAddress = deriveKeys(rawSeed).address;
-      const res = await api(`/banking/lending/applications`, "GET", undefined, { endpoint }) as any;
+      const res = await api(`/quillon-bank/lending/applications`, "GET", undefined, { endpoint }) as any;
       const all = res?.data?.applications ?? res?.applications ?? res?.data ?? [];
       if (!Array.isArray(all)) {
         return { content: [{ type: "text", text: `bank_loan_status: unexpected response shape` }] };
       }
-      const mine = all.filter((a: any) => (a.applicant_wallet ?? a.borrower ?? "").toLowerCase() === signerAddress.toLowerCase());
+      const mine = all.filter((a: any) => (a.wallet_address ?? a.applicant_wallet ?? a.borrower ?? "").toLowerCase() === signerAddress.toLowerCase());
       if (mine.length === 0) {
         return { content: [{ type: "text", text: `No loan applications found for ${signerAddress}.\n\nUse bank_apply_for_loan to submit one.` }] };
       }
@@ -6200,7 +6203,7 @@ server.tool(
       return { content: [{ type: "text", text: `⚠ PAYBACK DRY RUN — loan=${loan_id} amount=${amount_qnkusd} QNKUSD. Set confirm=true to execute.` }] };
     }
     try {
-      const res = await apiSigned(`/banking/lending/payback`, "POST", { loan_id, amount_qnkusd }, { seed, endpoint }) as any;
+      const res = await apiSigned(`/quillon-bank/lending/payback`, "POST", { loan_id, amount_qnkusd }, { seed, endpoint }) as any;
       const d = res?.data ?? res;
       return { content: [{ type: "text", text: [
         `✅ Loan payback submitted`,
@@ -6227,7 +6230,7 @@ server.tool(
   },
   async ({ subject, body, seed, endpoint }) => {
     try {
-      const res = await apiSigned(`/banking/messages/send`, "POST", { subject, body }, { seed, endpoint }) as any;
+      const res = await apiSigned(`/quillon-bank/messages/send`, "POST", { subject, body }, { seed, endpoint }) as any;
       const d = res?.data ?? res;
       return { content: [{ type: "text", text: [
         `✅ Message sent to bank admin`,
