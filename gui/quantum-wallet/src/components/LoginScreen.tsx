@@ -1459,6 +1459,112 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               </motion.p>
             </div>
 
+            {/* ════════════════════════════════════════════════════════════ */}
+            {/*  Quillon Agentic AI — center-of-screen onboarding card.     */}
+            {/*  Discoverable surface for the setup-ai.sh / MCP flow.        */}
+            {/*  Sits ABOVE the human seed-phrase login form (which is      */}
+            {/*  unchanged below). Mnemonic input remains the human path;    */}
+            {/*  this is the agent path.                                     */}
+            {/* ════════════════════════════════════════════════════════════ */}
+            <motion.div
+              className="relative mb-6 rounded-2xl overflow-hidden cursor-pointer group"
+              style={{
+                background: 'linear-gradient(135deg, rgba(124, 58, 237, 0.18) 0%, rgba(79, 70, 229, 0.14) 50%, rgba(14, 165, 233, 0.16) 100%)',
+                border: '1px solid rgba(167, 139, 250, 0.35)',
+                boxShadow: '0 0 30px rgba(124, 58, 237, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
+              }}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.75, duration: 0.5 }}
+              whileHover={{ scale: 1.01 }}
+              onClick={() => setShowAIModal(true)}
+            >
+              {/* Animated shimmer overlay */}
+              <motion.div
+                className="absolute inset-0 opacity-40 pointer-events-none"
+                style={{
+                  background: 'linear-gradient(110deg, transparent 30%, rgba(167, 139, 250, 0.18) 45%, transparent 60%)',
+                  backgroundSize: '200% 100%',
+                }}
+                animate={{ backgroundPosition: ['200% 0', '-100% 0'] }}
+                transition={{ duration: 4.5, repeat: Infinity, ease: 'linear' }}
+              />
+
+              <div className="relative p-5 space-y-3">
+                {/* Header row */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <motion.div
+                      className="w-9 h-9 rounded-xl flex items-center justify-center"
+                      style={{ background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)' }}
+                      animate={{ rotate: [0, 4, -4, 0] }}
+                      transition={{ duration: 6, repeat: Infinity, ease: 'easeInOut' }}
+                    >
+                      <Sparkles className="w-5 h-5 text-white" />
+                    </motion.div>
+                    <div>
+                      <div className="text-violet-100 font-bold text-base leading-none">
+                        Quillon Agentic AI
+                      </div>
+                      <div className="text-violet-300/80 text-[10px] uppercase tracking-widest mt-1">
+                        44 wallet tools · MCP-compatible
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-violet-300/60 text-[10px] uppercase tracking-wider">
+                    For Claude · Cursor · GPT clients
+                  </div>
+                </div>
+
+                {/* Pitch line */}
+                <div className="text-violet-100/85 text-sm leading-snug">
+                  Talk to your wallet. Send, swap, deploy contracts, monitor sync — all from your AI client. Set up in 30 seconds, then sign messages with your seed instead of clicking buttons.
+                </div>
+
+                {/* Install command + copy */}
+                <div
+                  className="relative bg-slate-950/60 rounded-lg px-3 py-2.5 font-mono text-xs text-violet-200 border border-violet-500/20"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <span className="text-violet-400 select-none">$ </span>
+                  <span>curl -fsSL https://quillon.xyz/setup-ai.sh | bash</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigator.clipboard.writeText('curl -fsSL https://quillon.xyz/setup-ai.sh | bash');
+                      setAiCopied(true);
+                      setTimeout(() => setAiCopied(false), 1500);
+                    }}
+                    className={`absolute top-1.5 right-1.5 px-2.5 py-1 text-[10px] font-bold tracking-wider uppercase rounded transition-all ${
+                      aiCopied
+                        ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/50'
+                        : 'bg-violet-600/30 text-violet-200 border border-violet-400/40 hover:bg-violet-600/50'
+                    }`}
+                  >
+                    {aiCopied ? '✓ Copied' : 'Copy'}
+                  </button>
+                </div>
+
+                {/* CTA row */}
+                <div className="flex items-center justify-between pt-1">
+                  <div className="text-violet-300/60 text-[11px]">
+                    Or use the BIP39 phrase below — both work.
+                  </div>
+                  <button
+                    type="button"
+                    className="text-violet-200 text-xs font-semibold flex items-center gap-1 hover:text-violet-100 transition-colors"
+                    onClick={(e) => { e.stopPropagation(); setShowAIModal(true); }}
+                  >
+                    Learn more
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+
             {/* Login Form - frosted glass card */}
             <motion.div
               className="relative rounded-3xl p-8 backdrop-blur-xl"
