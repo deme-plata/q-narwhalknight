@@ -17120,6 +17120,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         "🚫 [HEIGHT CLAMP] CLAMPING absurd network_height {} → {} (local: {}, cap: local+5M)",
                         network_height, hard_cap, local_height
                     );
+                    // This is the only intentional downward clamp. All normal height
+                    // discovery paths must be monotonic, otherwise mining can briefly
+                    // reopen while the node is still thousands of blocks behind.
                     app_state_decay.highest_network_height.store(
                         hard_cap,
                         std::sync::atomic::Ordering::SeqCst,
@@ -17133,7 +17136,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // AND last_update is non-zero (we've received at least one peer announcement)
                 // v8.3.0: Also require local > 100K — fresh-syncing nodes with stale peers
                 // (disconnected Windows clients) were decaying 3M → local, destroying sync target.
-                if staleness > 60 && network_height > local_height && last_update > 0 && local_height > 100_000 {
+                // v10.11.31: Do not decay while TurboSync still has active peers advertising
+                // a tip at or above the current global height. Epsilon was alternating
+                // `network=tip` and `network=local`, briefly reopening mining while still
+                // ~2k blocks behind.
+                let active_tip_height = if let Some(ref turbo_sync) = app_state_decay.turbo_sync {
+                    turbo_sync
+                        .get_peer_registry_info()
+                        .await
+                        .iter()
+                        .map(|(_, h)| *h)
+                        .max()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                if staleness > 60
+                    && network_height > local_height
+                    && last_update > 0
+                    && local_height > 100_000
+                    && active_tip_height < network_height
+                {
                     let gap = network_height - local_height;
                     // Decay by 10% of gap, minimum 1 block
                     let decay_amount = (gap / 10).max(1);
@@ -17668,10 +17691,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }
 
                 // v9.1.7: Process batch every 2000 submissions OR every 50ms (whichever first)
+                // v10.11.28: cap VDF batches at 128. 2000-wide rayon batches can exceed
+                // the timeout under miner bursts, leaving the global VDF gate closed and
+                // making mining look stuck while the API stays alive.
                 // With 8 shards (down from 48), each shard handles more. Larger batches
                 // mean fewer spawn_blocking calls, better rayon utilization, less overhead.
                 // 8 shards × 2000/batch × 20 batches/sec = 320K submissions/sec theoretical.
-                if batch_buffer.len() >= 2000 || last_batch_process.elapsed().as_millis() >= 50 {
+                if batch_buffer.len() >= 128 || last_batch_process.elapsed().as_millis() >= 25 {
                     let start = std::time::Instant::now();
 
                     // ==================================================================================
@@ -17681,6 +17707,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // 100 blake3 × 500 = 50K hash ops. At 10.7s/batch, throughput was ~47 sub/sec.
                     // v1.0.3: Uses rayon par_iter to spread VDF across ALL cores (48 on Epsilon).
                     // Expected: 50K ops / 48 cores = ~1042 ops/core → <50ms per batch.
+                    // v10.11.31: Keep the submission pipeline aligned with the mining
+                    // challenge gate. `get_mining_challenge` returns 503 when the node is
+                    // more than 10 blocks behind, but this batch path previously kept
+                    // verifying queued/stale submissions until the gap exceeded 10,000
+                    // blocks. On Epsilon that meant a ~1.8k block gap still spawned heavy
+                    // VDF verification, starving API health checks while sync was trying
+                    // to catch up.
+                    const MINING_SYNC_GATE_THRESHOLD: u64 = 10;
+                    let gate_current_height = app_state_mining
+                        .current_height_atomic
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let gate_network_height = app_state_mining
+                        .highest_network_height
+                        .load(std::sync::atomic::Ordering::SeqCst);
+                    let gate_blocks_behind =
+                        gate_network_height.saturating_sub(gate_current_height);
+                    let gate_allow_solo = std::env::var("Q_ALLOW_SOLO_MINING")
+                        .map(|v| v == "true" || v == "1")
+                        .unwrap_or(false);
+                    if gate_current_height > 0
+                        && gate_blocks_behind > MINING_SYNC_GATE_THRESHOLD
+                        && !gate_allow_solo
+                    {
+                        warn!(
+                            "🚀 [SYNC-GATE] Dropping {} mining submissions before VDF: {} blocks behind > {} threshold",
+                            batch_buffer.len(),
+                            gate_blocks_behind,
+                            MINING_SYNC_GATE_THRESHOLD
+                        );
+                        batch_buffer.clear();
+                        last_batch_completed = std::time::Instant::now();
+                        last_batch_process = std::time::Instant::now();
+                        watchdog_warned = false;
+                        continue;
+                    }
+
                     let pre_verify_count = batch_buffer.len();
                     let verify_buffer = std::mem::take(&mut batch_buffer);
                     // v10.0.5: Add 30s timeout to spawn_blocking VDF verification.
@@ -17715,9 +17777,98 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         cur_h > 0 && cur_h >= activation
                     };
 
+                    // v10.11.27: timeout() does not cancel spawn_blocking work. Under miner
+                    // bursts, timed-out VDF jobs kept running and accumulated hundreds of
+                    // blocking threads. Keep one VDF batch in flight and shed excess load.
+                    // v10.11.30: add a generation token and stale-gate recovery. timeout()
+                    // cannot cancel spawn_blocking, and an old worker can finish after a
+                    // newer batch starts. Only the current generation may clear the gate.
+                    static VDF_VERIFY_IN_FLIGHT: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    // v10.11.34: isolate VDF verification from Tokio's shared blocking pool.
+                    static VDF_POOL: std::sync::OnceLock<rayon::ThreadPool> =
+                        std::sync::OnceLock::new();
+                    fn vdf_pool() -> &'static rayon::ThreadPool {
+                        VDF_POOL.get_or_init(|| {
+                            rayon::ThreadPoolBuilder::new()
+                                .num_threads(8)
+                                .thread_name(|i| format!("vdf-verify-{}", i))
+                                .build()
+                                .expect("VDF thread pool")
+                        })
+                    }
+                    static VDF_VERIFY_COOLDOWN_UNTIL_MS: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    static VDF_VERIFY_STARTED_AT_MS: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    static VDF_VERIFY_GENERATION: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let cooldown_until = VDF_VERIFY_COOLDOWN_UNTIL_MS
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    if now_ms < cooldown_until {
+                        warn!(
+                            "🛡️ [Shard {}] Dropping {} submissions: VDF cooldown active for {}ms",
+                            shard_id, pre_verify_count, cooldown_until.saturating_sub(now_ms)
+                        );
+                        last_batch_completed = std::time::Instant::now();
+                        last_batch_process = std::time::Instant::now();
+                        watchdog_warned = false;
+                        continue;
+                    }
+                    let acquired_vdf_gate = VDF_VERIFY_IN_FLIGHT
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::Acquire,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    if acquired_vdf_gate.is_err() {
+                        let started_at = VDF_VERIFY_STARTED_AT_MS
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        let stale_for_ms = now_ms.saturating_sub(started_at);
+                        if started_at > 0 && stale_for_ms > 45_000 {
+                            if VDF_VERIFY_IN_FLIGHT
+                                .compare_exchange(
+                                    true,
+                                    false,
+                                    std::sync::atomic::Ordering::AcqRel,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                            {
+                                VDF_VERIFY_STARTED_AT_MS.store(0, std::sync::atomic::Ordering::Release);
+                                VDF_VERIFY_COOLDOWN_UNTIL_MS.store(
+                                    now_ms + 5_000,
+                                    std::sync::atomic::Ordering::Release,
+                                );
+                                error!(
+                                    "🚨 [Shard {}] VDF gate stale for {}ms — force-reopened after cooldown (v10.11.30)",
+                                    shard_id, stale_for_ms
+                                );
+                            }
+                        }
+                        warn!(
+                            "🛡️ [Shard {}] Dropping {} submissions: VDF verification already in flight (stale_for={}ms)",
+                            shard_id, pre_verify_count, stale_for_ms
+                        );
+                        last_batch_completed = std::time::Instant::now();
+                        last_batch_process = std::time::Instant::now();
+                        watchdog_warned = false;
+                        continue;
+                    }
+                    let vdf_generation = VDF_VERIFY_GENERATION
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                        .saturating_add(1);
+                    VDF_VERIFY_STARTED_AT_MS.store(now_ms, std::sync::atomic::Ordering::Release);
+
                     let verified_result = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
                         tokio::task::spawn_blocking(move || {
+                            vdf_pool().install(|| {
                             use rayon::prelude::*;
                             let results: Vec<Option<q_api_server::MiningSubmission>> = verify_buffer
                                 .into_par_iter()
@@ -17855,6 +18006,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 }
                             }
                             (verified, rejected)
+                            })
                         }),
                     ).await {
                         Ok(Ok(result)) => result,
@@ -17864,10 +18016,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         }
                         Err(_timeout) => {
                             error!("🚨 [Shard {}] VDF spawn_blocking TIMED OUT after 30s! Dropping {} submissions (v10.0.5 safety)", shard_id, pre_verify_count);
-                            error!("   This prevents permanent mining stall from blocking pool exhaustion");
+                            error!("   v10.11.30: reopening VDF gate after cooldown; generation guard prevents stale worker races");
+                            let until_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64 + 10_000;
+                            VDF_VERIFY_COOLDOWN_UNTIL_MS.store(until_ms, std::sync::atomic::Ordering::Release);
                             (Vec::new(), pre_verify_count)
                         }
                     };
+                    if VDF_VERIFY_GENERATION.load(std::sync::atomic::Ordering::Acquire) == vdf_generation {
+                        VDF_VERIFY_STARTED_AT_MS.store(0, std::sync::atomic::Ordering::Release);
+                        VDF_VERIFY_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                    } else {
+                        warn!(
+                            "🛡️ [Shard {}] VDF generation {} completed stale; current generation owns gate",
+                            shard_id, vdf_generation
+                        );
+                    }
                     batch_buffer = verified_result.0;
                     let rejected_count = verified_result.1;
                     if rejected_count > 0 {
@@ -18182,7 +18348,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // network_height - 0 = network_height, which ALWAYS exceeds the threshold.
                     // This caused ALL mining solutions to be silently discarded, so miners never
                     // received coinbase rewards despite solutions being accepted.
-                    const BATCH_FAST_SYNC_THRESHOLD: u64 = 10_000;
+                    const BATCH_FAST_SYNC_THRESHOLD: u64 = MINING_SYNC_GATE_THRESHOLD;
                     let early_current_height = app_state_mining
                         .current_height_atomic
                         .load(std::sync::atomic::Ordering::SeqCst);
@@ -18399,7 +18565,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // This prevents stale network_height from blocking production after sync
                         if current_height > 0 && current_height >= network_height {
                             // We've caught up or surpassed network height - update it
-                            app_state_mining.highest_network_height.store(
+                            app_state_mining.highest_network_height.fetch_max(
                                 current_height,
                                 std::sync::atomic::Ordering::SeqCst,
                             );
@@ -18424,7 +18590,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         // Thresholds:
                         // - >10,000 blocks behind: PAUSE mining for maximum sync speed (2000+ BPS)
                         // - ≤10,000 blocks behind: Allow mining (DAG-Knight handles conflicts)
-                        const FAST_SYNC_THRESHOLD: u64 = 10_000;
+                        const FAST_SYNC_THRESHOLD: u64 = MINING_SYNC_GATE_THRESHOLD;
                         let blocks_behind = network_height.saturating_sub(current_height);
                         // v10.2.7: Bootstrap validators NEVER enter fast sync mode — they must
                         // always produce blocks, even when behind. The "behind" state on a bootstrap
@@ -18463,9 +18629,30 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
                         ).await {
                             Ok(Err(e)) => {
-                                error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
-                                error!("   Forcing producer resync to prevent height drift");
-                                return; // Skip this production cycle, retry after resync (v9.8.3: return from async block)
+                                // v10.11.25: sync_from_storage() wraps get_highest_contiguous_block()
+                                // in its own 5s RocksDB timeout. Under compaction / explorer load this
+                                // can return a storage timeout even while current_height_atomic and
+                                // highest_network_height agree. Treating that timeout as a hard height
+                                // desync made every production cycle return before produce_blocks(),
+                                // so miners kept submitting but explorer height/balances never moved.
+                                //
+                                // If we are already at the observed network tip, proceed with the
+                                // in-memory producer height and let duplicate/monotonicity guards below
+                                // protect storage. Real sync/desync errors still abort this cycle.
+                                let msg = e.to_string();
+                                if msg.contains("RocksDB timeout: get_highest_contiguous_block")
+                                    && current_height > 0
+                                    && current_height >= network_height
+                                {
+                                    warn!(
+                                        "⚠️ [BLOCK-PROD] sync_from_storage storage-height timeout at tip (cur_h={}, net_h={}) — proceeding with production",
+                                        current_height, network_height
+                                    );
+                                } else {
+                                    error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
+                                    error!("   Forcing producer resync to prevent height drift");
+                                    return; // Skip this production cycle, retry after resync (v9.8.3: return from async block)
+                                }
                             }
                             Err(_) => {
                                 warn!("⏱️ [TIMEOUT] sync_from_storage() timed out after 10s — skipping sync, proceeding with production");
@@ -19448,18 +19635,71 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             {
                                 use q_storage::balance_consensus::BalanceConsensusError;
 
-                                // Use the shared balance consensus engine (tracks block rate for emission)
-                                // Previously created a fresh BalanceConsensusEngine per block (no rate history)
-                                match app_state_mining.balance_consensus_engine
-                                    .process_block_mining_rewards(
-                                        &*app_state_mining.storage_engine,
-                                        &new_block,
-                                    )
-                                    .await
-                                {
+                                // v10.11.26: Use the transaction path for locally-produced blocks.
+                                // The non-TX path calls add_balance() once per coinbase tx, and each
+                                // add_balance() performs a synced RocksDB wallet write. With hundreds
+                                // of rewards in one block this held the production loop for 60s+ and
+                                // starved API/SSE. The TX path batches balance updates into one commit,
+                                // matching the sync and P2P block-apply paths.
+                                let balance_tx = match app_state_mining.storage_engine.begin_transaction().await {
+                                    Ok(tx) => tx,
+                                    Err(e) => {
+                                        error!("❌ Failed to begin balance transaction for local block {}: {:?}", new_block.header.height, e);
+                                        continue;
+                                    }
+                                };
+
+                                let reward_updates = app_state_mining.balance_consensus_engine
+                                    .process_block_mining_rewards_tx(&balance_tx, &new_block)
+                                    .await;
+
+                                match reward_updates {
                                     Ok(updates) => {
+                                        if let Err(e) = balance_tx.commit().await {
+                                            error!("❌ Failed to commit local block {} balance transaction: {:?}", new_block.header.height, e);
+                                            continue;
+                                        }
+
                                         debug!("💰 {} balance updates for block {}",
                                               updates.len(), new_block.header.height);
+
+                                        // Update the native balance cache from deterministic deltas.
+                                        // This avoids a RocksDB get_balance() per coinbase tx in the
+                                        // block-production hot path while keeping frontend balances live.
+                                        {
+                                            use q_storage::ChangeReason;
+                                            let mut native_deltas: std::collections::HashMap<[u8; 32], i128> =
+                                                std::collections::HashMap::new();
+                                            for update in &updates {
+                                                if update.token_address.is_some() {
+                                                    continue;
+                                                }
+                                                let raw = update.address.strip_prefix("qnk").unwrap_or(&update.address);
+                                                let Ok(bytes) = hex::decode(raw) else { continue };
+                                                if bytes.len() != 32 {
+                                                    continue;
+                                                }
+                                                let mut addr = [0u8; 32];
+                                                addr.copy_from_slice(&bytes);
+                                                let signed_delta = match update.reason {
+                                                    ChangeReason::TransferSent => -(update.amount as i128),
+                                                    ChangeReason::TransferFailed => 0,
+                                                    _ => update.amount as i128,
+                                                };
+                                                *native_deltas.entry(addr).or_insert(0) += signed_delta;
+                                            }
+                                            if !native_deltas.is_empty() {
+                                                let mut balances = app_state_mining.wallet_balances.write().await;
+                                                for (addr, delta) in native_deltas {
+                                                    let entry = balances.entry(addr).or_insert(0);
+                                                    if delta >= 0 {
+                                                        *entry = entry.saturating_add(delta as u128);
+                                                    } else {
+                                                        *entry = entry.saturating_sub((-delta) as u128);
+                                                    }
+                                                }
+                                            }
+                                        }
 
                                         // Broadcast balance updates via SSE
                                         // v10.2.0: Handle both QUG and token balance updates
@@ -19630,6 +19870,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             }
                                         }
                                     } else {
+                                        // v10.11.26: native coinbase rewards already updated the
+                                        // in-memory wallet cache from BalanceConsensus updates above.
+                                        // Do not issue one RocksDB get_balance() per reward tx here.
+                                        if tx.is_coinbase() || tx.tx_type.is_coinbase() {
+                                            continue;
+                                        }
+
                                         let to_hex = hex::encode(&tx.to);
                                         if let Ok(actual_balance) = app_state_mining.storage_engine.get_balance(&to_hex).await {
                                             balance_updates.push((tx.to, actual_balance));
@@ -20418,7 +20665,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // v1.0.61-beta: Auto-correct stale network_height when we've caught up
                 // This prevents stale network_height from blocking production indefinitely
                 if current_height > 0 && current_height >= network_height {
-                    app_state_block_producer.highest_network_height.store(
+                    app_state_block_producer.highest_network_height.fetch_max(
                         current_height,
                         std::sync::atomic::Ordering::SeqCst,
                     );
@@ -21423,10 +21670,6 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 // Max is >20% above median - likely a Byzantine outlier
                                 debug!("[MEDIAN CHECK] max={} median={} - using median to resist outlier", network_height, median);
                                 network_height = median;
-                                app_state_sync.highest_network_height.store(
-                                    median,
-                                    std::sync::atomic::Ordering::SeqCst,
-                                );
                             }
                         }
                     }
@@ -21492,11 +21735,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                                                 if let Some(bootstrap_height) = json["data"]["current_height"].as_u64() {
                                                     info!("✅ [BOOTSTRAP HTTP FALLBACK] Discovered height: {} from network '{}' (P2P preferred)", bootstrap_height, our_net_id);
-                                                    app_state_sync.highest_network_height.store(
-                                                        bootstrap_height,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                    network_height = bootstrap_height;
+                                                    let previous_height = app_state_sync
+                                                        .highest_network_height
+                                                        .fetch_max(
+                                                            bootstrap_height,
+                                                            std::sync::atomic::Ordering::SeqCst,
+                                                        );
+                                                    network_height = previous_height.max(bootstrap_height);
 
                                                     // v10.2.8: Register THIS bootstrap peer using URL → peer ID mapping.
                                                     // Previously hardcoded for Beta only; now registers ALL responding peers.

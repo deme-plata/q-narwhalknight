@@ -1130,13 +1130,13 @@ pub struct PeerCompatibility {
 /// Problem: 10 failures + 5 min blacklist = network death with single bootstrap peer
 /// Fix: Higher threshold, shorter expiry, special treatment for bootstrap peers
 
-/// Failures before blacklisting (increased from 10 to 50)
+/// Failures before blacklisting (increased from 50 to 200)
 /// Rationale: NAT traversal alone can cause 5-10 "failures" per connection attempt
-const BLACKLIST_FAILURE_THRESHOLD: u32 = 50;
+const BLACKLIST_FAILURE_THRESHOLD: u32 = 200;
 
-/// Blacklist expiry reduced from 300s to 60s (1 minute)
+/// Blacklist expiry reduced from 60s to 15s
 /// Rationale: Network conditions change fast, retry sooner
-const BLACKLIST_EXPIRY_SECS: u64 = 60;
+const BLACKLIST_EXPIRY_SECS: u64 = 15;
 
 /// v1.0.86-beta: Failure decay interval - decay 1 failure every 30 seconds
 /// Prevents failure accumulation from transient issues
@@ -1164,7 +1164,7 @@ const BOOTSTRAP_BLACKLIST_MULTIPLIER: u32 = 3;
 // in-flight RAM at 32 × 200-block-cap × ~150 KB/block ≈ 960 MB, well under
 // the 50 GB cgroup high-water mark. Empirically the 16-permit cap became
 // the dominant ceiling on serving fresh-sync peers in parallel.
-pub const BLOCK_PACK_BASE_PERMITS: usize = 32;
+pub const BLOCK_PACK_BASE_PERMITS: usize = 128;
 
 /// Adaptive block-pack semaphore — extra permits (only acquirable once fully synced).
 /// At tip, IO/memory pressure is low and we can comfortably serve more peers in parallel,
@@ -1175,18 +1175,16 @@ pub const BLOCK_PACK_EXTRA_PERMITS: usize = 32;
 
 /// v10.9.27: Client-side per-peer block-pack inflight cap.
 ///
-/// Mirrors the *server-side* `BLOCK_PACK_BASE_PERMITS` (4) on the remote peer's
+/// Mirrors the *server-side* `BLOCK_PACK_BASE_PERMITS` on the remote peer's
 /// `block_pack_semaphore`. A syncing client should not fire more concurrent
 /// block-pack requests at a single peer than that peer can drain — otherwise
 /// the extra requests sit in libp2p's request queue, the 10s+ request-response
 /// timeout fires, and the chunk scheduler's retry loop wastes its budget on
 /// what is really local back-pressure.
 ///
-/// Backward compatible with v10.9.23 Epsilon: the static cap (4) matches the
-/// server semaphore size exactly, so no handshake or capability negotiation is
-/// required. If a future peer raises its server-side cap we can lift this
-/// number; lowering it client-side is always safe.
-pub const CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER: usize = 4;
+/// v10.11.x: lifted 4 → 16 now that the server-side base semaphore is 32 and
+/// the CUBIC gate can lower the effective cap for weaker peers.
+pub const CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER: usize = 16;
 
 /// v10.9.27: Marker substring used by the chunk scheduler in `turbo_sync.rs`
 /// to recognise a client-throttle error and avoid consuming its retry budget.
@@ -2643,7 +2641,7 @@ impl UnifiedNetworkManager {
 
         // v1.2.7-beta: Create channel for async block pack responses (prevents ResponseOmission)
         // v10.11.20: BOUNDED at 64 (was unbounded). See struct-field comment.
-        let (block_pack_response_tx, block_pack_response_rx) = mpsc::channel(64);
+        let (block_pack_response_tx, block_pack_response_rx) = mpsc::channel(256);
 
         // v1.3.3-beta: Improved Tor detection for adaptive timeouts and batch sizes
         // Detect Tor from multiple sources:
@@ -2985,7 +2983,7 @@ impl UnifiedNetworkManager {
 
     /// Effective per-peer in-flight cap = `min(static cap, cubic_cwnd)`.
     ///
-    /// The static cap is `CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER` (4). CUBIC can
+    /// The static cap is `CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER` (16). CUBIC can
     /// only *lower* the effective cap — never raise it above the static value.
     /// This keeps the existing "never flood a peer faster than its server-side
     /// semaphore can drain" invariant in place while letting CUBIC shrink the
@@ -4284,7 +4282,7 @@ impl UnifiedNetworkManager {
                                 // Spawn task to do the slow DB work.
                                 // v9.1.8: Semaphore limits concurrent block-pack responses to prevent OOM
                                 // (each response can be 50-150MB; unbounded spawns caused 10GB+ RSS → crash)
-                                // Adaptive: base (4) is always available; extra (12) only when fully synced.
+                                // Adaptive: base is always available; extra permits are only used when fully synced.
                                 tokio::spawn(async move {
                                     let _permit = match try_acquire_block_pack_permit(
                                         &base_sem,
@@ -4674,8 +4672,11 @@ impl UnifiedNetworkManager {
                         let is_parse_error = error_str.contains("InvalidData")
                             || error_str.contains("parse response")
                             || error_str.contains("too large");
+                        let is_dial_failure = error_str.contains("DialFailure");
                         if is_parse_error {
                             debug!("   [BLOCK-PACK] Parse/size error — NOT counting as peer failure");
+                        } else if is_dial_failure {
+                            debug!("   [BLOCK-PACK] DialFailure - dial/connect race, NOT counting as peer failure");
                         } else {
                             self.mark_peer_failure(peer);
                         }
@@ -6639,18 +6640,11 @@ impl UnifiedNetworkManager {
                                 };
 
                                 if has_address {
-                                    // v10.10.13 fix: prior code logged "attempting dial" but
-                                    // never actually called swarm.dial() — the libp2p
-                                    // request-response layer expects an established connection,
-                                    // it does NOT auto-dial cached addrs. The cached "Peer not
-                                    // connected but has cached address" loop in v10.10.11/.12
-                                    // caused 100% DialFailure on every block-pack request even
-                                    // with gossipsub mesh up (proven on q-test-v10.10.11-eps +
-                                    // q-test-v10.10.11-delta probes 2026-05-21). Now actually
-                                    // dial each cached address before returning the peer ID;
-                                    // dial completes async on the swarm event loop and is
-                                    // typically connected by the time the request-response
-                                    // handler fires.
+                                    // v10.11.33: request-response does not wait for a fresh dial.
+                                    // Start the dial, then ask TurboSync to retry without consuming
+                                    // its chunk retry budget. Returning Some(pid) here fires
+                                    // send_request immediately and produces DialFailure before the
+                                    // async dial can connect.
                                     let to_dial: Vec<libp2p::Multiaddr> = match self.peer_addresses.try_read() {
                                         Ok(addrs) => addrs.get(&pid).cloned().unwrap_or_default(),
                                         Err(_) => Vec::new(),
@@ -6669,7 +6663,11 @@ impl UnifiedNetworkManager {
                                             ),
                                         }
                                     }
-                                    Some(pid)
+                                    let _ = response_tx.send(Err(anyhow::anyhow!(
+                                        "{}: dial in progress for peer {}",
+                                        CLIENT_THROTTLE_MARKER, pid
+                                    )));
+                                    return;
                                 } else {
                                     // 🚨 v2.1.7: FAIL FAST - no point trying to dial without address
                                     error!("❌ [PEER CHECK] Peer {} is NOT connected and has NO cached address!", pid);
