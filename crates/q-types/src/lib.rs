@@ -600,6 +600,14 @@ pub const QSHARE_TOKEN_ADDRESS: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// QSHARE governance token address (v10.10.4)
+pub const QSHARE_TOKEN_ADDRESS: [u8; 32] = [
+    0x51, 0x53, 0x48, 0x41, 0x52, 0x45, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// v8.7.3: Height at which full deterministic state replay activates.
 /// ALL transaction types (DEX swaps, token ops, stablecoin, governance, etc.)
 /// are replayed from blocks on every node via StateProcessor.
@@ -1118,6 +1126,7 @@ impl TokenType {
         match self {
             TokenType::QUG => QUG_TOKEN_ADDRESS,
             TokenType::QUGUSD => QUGUSD_TOKEN_ADDRESS,
+            TokenType::QSHARE => QSHARE_TOKEN_ADDRESS,
             TokenType::QSHARE => QSHARE_TOKEN_ADDRESS,
             TokenType::Custom(addr) => *addr,
         }
@@ -2644,6 +2653,35 @@ impl Transaction {
         hasher.finalize().into()
     }
 
+    /// v10.11.38: P2P gossipsub signable payload — deterministic format
+    /// computable in both Rust and JavaScript (see walletAuth.ts).
+    pub fn build_p2p_signable_payload(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(118 + self.data.len());
+        buf.push(0x01);
+        buf.extend_from_slice(&self.from);
+        buf.extend_from_slice(&self.to);
+        buf.extend_from_slice(&self.amount.to_le_bytes());
+        buf.extend_from_slice(&self.fee.to_le_bytes());
+        buf.extend_from_slice(&self.nonce.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp.timestamp().to_le_bytes());
+        let token_byte: u8 = match &self.token_type {
+            TokenType::QUG => 0,
+            TokenType::QUGUSD => 1,
+            _ => 2,
+        };
+        buf.push(token_byte);
+        let data_len = self.data.len() as u32;
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&self.data);
+        buf
+    }
+
+    pub fn p2p_signable_hash(&self) -> TxHash {
+        let mut hasher = Sha3_256::new();
+        hasher.update(&self.build_p2p_signable_payload());
+        hasher.finalize().into()
+    }
+
     /// v1.0.60-beta: Check if this is a coinbase (mining reward) transaction
     /// Coinbase transactions have from == [0u8; 32] (zero address)
     pub fn is_coinbase(&self) -> bool {
@@ -2971,10 +3009,12 @@ impl Transaction {
         // reality). When all clients have migrated to canonical, drop the fallback.
         let canonical = self.signable_payload();
         let hash_target = self.hash();
+        let p2p_hash = self.p2p_signable_hash();
         if verifying_key.verify(&canonical, &signature).is_err()
             && verifying_key.verify(hash_target.as_ref(), &signature).is_err()
+            && verifying_key.verify(p2p_hash.as_ref(), &signature).is_err()
         {
-            return Err("Ed25519 signature verification failed: matches neither signable_payload nor hash".to_string());
+            return Err("Ed25519 signature verification failed: matches neither signable_payload, hash, nor p2p_signable_hash".to_string());
         }
 
         Ok(())
