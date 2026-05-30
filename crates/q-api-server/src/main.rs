@@ -14880,10 +14880,23 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 &announcement.peer_id[..20.min(announcement.peer_id.len())]);
                                         }
 
-                                        app_state_gossip.highest_network_height.store(
-                                            announcement.highest_block,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        );
+                                        // Q_AUTHORITATIVE_STANDALONE: this node holds the authoritative genesis
+                                        // DB and must produce on its OWN canonical tip. When set, do NOT let
+                                        // peer-announced heights raise our network-height view, else a
+                                        // divergent/ahead peer set we cannot sync from pins us permanently
+                                        // 'behind' and gates block production forever. DB is untouched; this
+                                        // only affects the in-memory height view driving is_synced gates. Off by default.
+                                        let authoritative_standalone = std::env::var("Q_AUTHORITATIVE_STANDALONE")
+                                            .map(|v| v == "true" || v == "1")
+                                            .unwrap_or(false);
+                                        if !authoritative_standalone {
+                                            app_state_gossip.highest_network_height.store(
+                                                announcement.highest_block,
+                                                std::sync::atomic::Ordering::SeqCst,
+                                            );
+                                        } else if announcement.highest_block > our_height_now + 5_000 {
+                                            warn!("\u{1F7E2} [AUTHORITATIVE-STANDALONE] Seeing peer height {} (our {}) but NOT following \u2014 producing on own tip", announcement.highest_block, our_height_now);
+                                        }
                                         debug!(
                                             "📊 [TURBO SYNC] Network height updated to {}",
                                             announcement.highest_block
