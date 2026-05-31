@@ -14894,8 +14894,12 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 announcement.highest_block,
                                                 std::sync::atomic::Ordering::SeqCst,
                                             );
-                                        } else if announcement.highest_block > our_height_now + 5_000 {
-                                            warn!("\u{1F7E2} [AUTHORITATIVE-STANDALONE] Seeing peer height {} (our {}) but NOT following \u2014 producing on own tip", announcement.highest_block, our_height_now);
+                                        } else {
+                                            // Standalone: ignore peer height. Log only the peer value
+                                            // (a copied u64) — do NOT reference our_height_now here; it is a
+                                            // std RwLockReadGuard and using it would extend its borrow across
+                                            // a later .await, making the spawn future non-Send.
+                                            tracing::debug!("\u{1F7E2} [AUTHORITATIVE-STANDALONE] Ignoring peer height {} \u{2014} producing on own tip", announcement.highest_block);
                                         }
                                         debug!(
                                             "📊 [TURBO SYNC] Network height updated to {}",
