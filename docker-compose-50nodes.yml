@@ -1,0 +1,184 @@
+version: '3.8'
+
+# 🚀 50-NODE Q-NARWHALKNIGHT MASSIVE SCALE TEST CONFIGURATION
+# Optimized for horizontal scaling, DNS-phantom bridge testing, and extreme performance validation
+
+networks:
+  qnk-massive:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.50.0.0/16
+
+services:
+  # Monitoring infrastructure
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: qnk-prometheus
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.10
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=1h'
+      - '--web.enable-lifecycle'
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: qnk-grafana
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.11
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+
+  # Load balancer for testing
+  nginx:
+    image: nginx:alpine
+    container_name: qnk-loadbalancer
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.12
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx-massive.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - qnk-node-1
+      - qnk-node-2
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  # 50 Q-NarwhalKnight validator nodes
+  qnk-node-1:
+    image: q-narwhalknight-fixed:latest
+    container_name: qnk-node-1
+    hostname: validator-001
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.101
+    ports:
+      - "8081:8080"
+    environment:
+      - NODE_ID=1
+      - NETWORK_SIZE=50
+      - CONSENSUS_THRESHOLD=34
+      - RUST_LOG=q_api_server=info,q_dns_phantom=info,q_network=info
+      - TOR_ENABLED=true
+      - DNS_PHANTOM_ENABLED=true
+      - BENCHMARK_MODE=true
+      - MAX_TPS=100000
+      - SHARD_ID=0
+      - VALIDATOR_WEIGHT=1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  qnk-node-2:
+    image: q-narwhalknight-fixed:latest
+    container_name: qnk-node-2
+    hostname: validator-002
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.102
+    ports:
+      - "8082:8080"
+    environment:
+      - NODE_ID=2
+      - NETWORK_SIZE=50
+      - CONSENSUS_THRESHOLD=34
+      - RUST_LOG=q_api_server=info,q_dns_phantom=info,q_network=info
+      - TOR_ENABLED=true
+      - DNS_PHANTOM_ENABLED=true
+      - BENCHMARK_MODE=true
+      - MAX_TPS=100000
+      - SHARD_ID=0
+      - VALIDATOR_WEIGHT=1
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Template for remaining 48 nodes (3-50)
+  # Generated dynamically by the test script
+
+  # Performance monitoring node
+  qnk-monitor:
+    image: q-narwhalknight-fixed:latest
+    container_name: qnk-monitor
+    hostname: monitor-node
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.200
+    environment:
+      - NODE_ID=monitor
+      - MONITOR_MODE=true
+      - NETWORK_SIZE=50
+      - RUST_LOG=debug
+    command: ["./monitor", "--network-analysis", "--performance-metrics"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  # Transaction generator for load testing  
+  qnk-loadgen:
+    image: python:3.9-slim
+    container_name: qnk-loadgen
+    hostname: load-generator
+    networks:
+      qnk-massive:
+        ipv4_address: 172.50.0.201
+    volumes:
+      - ./load_generator.py:/app/load_generator.py
+      - ./requirements.txt:/app/requirements.txt
+    working_dir: /app
+    command: ["python", "-u", "load_generator.py"]
+    environment:
+      - TARGET_TPS=100000
+      - TEST_DURATION=300
+      - NODE_COUNT=50
+      - BASE_URL=http://172.50.0.101:8080
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '2.0'
+    depends_on:
+      - qnk-node-1

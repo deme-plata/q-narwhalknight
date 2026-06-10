@@ -1,0 +1,33 @@
+[package]
+name = "q-aegis-ql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Cryptography
+sha3 = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+zeroize = { workspace = true }
+getrandom = "0.2"
+hex = { workspace = true }
+
+# Performance
+rayon = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+# [[bench]]
+# name = "aegis_ql_bench"
+# harness = false

@@ -1,0 +1,39 @@
+[package]
+name = "q-narwhal-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+# 🔐 v1.3.12-beta: SQIsign post-quantum signatures for certificates
+q-crypto-advanced = { path = "../q-crypto-advanced" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+libp2p = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+bincode = { workspace = true }
+
+# 🚀 v3.4.6-beta: DashMap for O(1) spent-outpoint tracking (50-100x mempool insert speedup)
+dashmap = "5.5"
+
+# 🚀 v3.4.6-beta: parking_lot for faster synchronous locks
+parking_lot = "0.12"
+
+[dev-dependencies]
+proptest = { workspace = true }

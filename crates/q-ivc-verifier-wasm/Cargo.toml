@@ -1,0 +1,40 @@
+[package]
+name = "q-ivc-verifier-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM-bindgen wrapper for the Quillon Graph recursive proof verifier (browser wallets). Phase B2 swaps the Phase 1 placeholder for the real LatticeGuard structural verifier."
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Performance", "Window"] }
+hex = "0.4"
+
+# Phase B2: real lattice-guard structural verifier.
+# `default-features = false` strips tokio + libp2p; we only need the
+# always-compiled tip_proof_v2 + tip_proof_client types/functions.
+q-recursive-proofs = { path = "../q-recursive-proofs", default-features = false }
+bincode = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+
+# getrandom with `js` feature is required on wasm32-unknown-unknown so
+# `rand::rngs::OsRng` (transitively pulled by q-lattice-guard) resolves
+# to the browser's `crypto.getRandomValues`.
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"

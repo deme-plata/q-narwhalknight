@@ -1,0 +1,14 @@
+# Q-NarwhalKnight Minimal Docker Image
+FROM scratch
+
+# Copy the compiled binary
+COPY target/release/q-api-server /q-api-server
+
+# Expose port
+EXPOSE 8080
+
+# Environment
+ENV RUST_LOG=info
+
+# Start command
+CMD ["/q-api-server"]

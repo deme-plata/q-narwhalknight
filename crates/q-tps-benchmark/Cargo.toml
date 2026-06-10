@@ -1,0 +1,53 @@
+[package]
+name = "q-tps-benchmark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "tps-benchmark"
+path = "src/main.rs"
+
+[[bin]]
+name = "benchmark_binary_protocol"
+path = "src/benchmark_binary_protocol.rs"
+
+[[bin]]
+name = "benchmark_websocket"
+path = "src/benchmark_websocket.rs"
+
+[[bin]]
+name = "advanced_benchmark"
+path = "src/advanced_benchmark.rs"
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-wallet = { path = "../q-wallet" }
+q-network = { path = "../q-network" }
+q-vm = { path = "../q-vm" }
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+
+# Binary protocol support
+rmp-serde = "1.3"  # MessagePack serialization
+bytes = "1.5"       # Zero-copy byte manipulation
+
+# WebSocket support for 1M+ TPS
+tokio-tungstenite = "0.21"  # WebSocket client
+
+[dev-dependencies]
+rmp-serde = "1.3"
+rand_core = "0.6"
+chrono = { workspace = true }
+postcard = { workspace = true }

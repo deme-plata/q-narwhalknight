@@ -1,0 +1,63 @@
+[package]
+name = "q-sharding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = ["metrics", "load-balancing"]
+metrics = ["prometheus"]
+load-balancing = []
+simd-optimization = []
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-dag-knight = { path = "../q-dag-knight" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-network = { path = "../q-network" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true, optional = true }
+
+# Hashing and crypto
+blake3 = { workspace = true }
+rand = { workspace = true }
+sha3 = { workspace = true }
+uuid = { workspace = true }
+
+# Data structures
+dashmap = "6.1"
+crossbeam = "0.8"
+rayon = "1.10"
+
+# Networking
+libp2p = { workspace = true }
+
+# Performance monitoring
+criterion = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }
+
+[[bench]]
+name = "shard_performance"
+harness = false

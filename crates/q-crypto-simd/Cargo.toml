@@ -1,0 +1,69 @@
+[package]
+name = "q-crypto-simd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Server Alpha <server-alpha@q-narwhalknight.dev>"]
+description = "SIMD-optimized cryptographic operations for Q-NarwhalKnight consensus"
+license = "Apache-2.0"
+
+[[bench]]
+name = "simd_crypto_benchmarks"
+harness = false
+
+[dependencies]
+# Core async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Cryptography
+ring = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+# Post-quantum cryptography
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-kyber = { workspace = true }
+pqcrypto-traits = { workspace = true }
+
+# SIMD support
+wide = "0.7"
+bytemuck = "1.13"
+
+# CPU feature detection
+raw-cpuid = "11.0"
+num_cpus = "1.16"
+
+# Parallel processing for true SIMD performance
+rayon = "1.7"
+parking_lot = "0.12"
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+bincode = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Internal crates
+q-types = { path = "../q-types" }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+hex = { workspace = true }
+
+# Note: Removed core_arch dependency for stable Rust compatibility
+# Using cfg! macros and safe feature detection instead
+
+[features]
+default = ["avx2"]
+avx2 = []
+avx512 = ["avx2"]
+neon = []  # ARM NEON support

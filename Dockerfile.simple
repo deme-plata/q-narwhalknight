@@ -1,0 +1,25 @@
+# Q-NarwhalKnight Simple Phantom Node
+FROM ubuntu:22.04
+
+# Copy the compiled binary
+WORKDIR /app
+COPY target/release/q-api-server /app/q-api-server
+
+# Create data directories
+RUN mkdir -p /app/data/tor /app/data/node /app/logs
+
+# Make binary executable
+RUN chmod +x /app/q-api-server
+
+# Expose ports
+EXPOSE 8080 8333 8334 9050 9051
+
+# Environment variables for DNS-Phantom mode
+ENV RUST_LOG=info
+ENV Q_NODE_DATA_DIR=/app/data/node
+ENV DNS_PHANTOM_ENABLED=true
+ENV TOR_ENABLED=true
+ENV BEP44_ENABLED=true
+
+# Start the application
+CMD ["/app/q-api-server"]

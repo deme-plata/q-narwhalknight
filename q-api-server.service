@@ -1,0 +1,27 @@
+[Unit]
+Description=Q-NarwhalKnight API Server - Quantum Consensus Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight
+Environment="Q_DB_PATH=./data-mine1"
+Environment="RUST_LOG=info"
+ExecStart=/usr/bin/timeout 36000 /opt/orobit/shared/q-narwhalknight/target/release/q-api-server --port 8080
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=q-api-server
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

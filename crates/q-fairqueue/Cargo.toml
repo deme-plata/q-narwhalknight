@@ -1,0 +1,59 @@
+[package]
+name = "q-fairqueue"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Collections and utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Cryptography
+sha3 = { workspace = true }
+blake3 = "1.5"
+hex = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Metrics
+prometheus = { workspace = true, optional = true }
+
+# Priority queues
+priority-queue = "1.3"
+
+# Statistical analysis
+rand = { workspace = true }
+statrs = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tokio-test = "0.4"
+
+[features]
+default = ["standard"]
+standard = []
+quantum_enhanced = []
+metrics = ["prometheus"]

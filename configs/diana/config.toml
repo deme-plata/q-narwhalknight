@@ -1,0 +1,50 @@
+# Q-NarwhalKnight Node Configuration: diana
+# Server Alpha Deployment - Quantum BFT Consensus
+
+[network]
+node_name = "diana"
+listen_address = "127.0.0.1:8004"
+public_address = "127.0.0.1:8004"
+bootstrap_peers = []
+tor_enabled = true
+tor_socks_proxy = "127.0.0.1:9050"
+
+[tor]
+onion_service_enabled = true
+onion_service_key = "ED25519-V3:1oI0AQ5yTsO2pU7wW9zD6eF4hK8m1tH2gN5iJ0kL3qP="
+onion_service_port = 8000
+hidden_service_dir = "/tmp/q-knight-diana"
+circuit_timeout = "30s"
+connection_pool_size = 50
+
+[consensus]
+validator_id = "diana"
+byzantine_threshold = 7  # 2f+1 for f=3 Byzantine nodes (10 total)
+max_validators = 10
+voting_timeout = "10s"
+finalization_timeout = "5s"
+enable_slashing = true
+min_voting_stake = 1000
+
+[mempool]
+max_transactions = 10000
+transaction_timeout = "60s"
+fee_per_byte = 10
+max_transaction_size = 1048576
+
+[dag]
+max_vertex_age = "300s"
+vertex_cache_size = 1000
+vdf_difficulty = 1024
+quantum_enhancement = 0.8
+
+[api]
+rest_enabled = true
+rest_address = "127.0.0.1:9005"
+websocket_enabled = true
+metrics_enabled = true
+
+[logging]
+level = "info"
+file = "logs/diana.log"
+structured = true

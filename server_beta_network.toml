@@ -1,0 +1,39 @@
+[network]
+node_type = "validator"
+enable_discovery = true
+bootstrap_nodes = [
+    # Server Beta nodes (our local nodes)
+    "validator-beta-1:8001",
+    "validator-beta-2:8002",
+    "validator-beta-3:8003",
+    "validator-beta-4:8004",
+    "validator-beta-5:8005",
+    # Server Alpha nodes (expected)
+    "validator-alpha-1:8006",
+    "validator-alpha-2:8007",
+    "validator-alpha-3:8008",
+    "validator-alpha-4:8009",
+    "validator-alpha-5:8010"
+]
+gossip_protocol = "bitcoin_network_routing"
+consensus_timeout = 5000
+enable_metrics = true
+enable_sharding = true
+enable_caching = true
+
+[phase1_sharding]
+shard_count = 4
+auto_scaling = true
+cross_shard_load_balancing = true
+
+[phase2_caching]
+l1_cache_size = "256MB"
+l2_cache_size = "512MB" 
+l3_cache_size = "1GB"
+ml_prefetching = true
+cache_hit_target = 90
+
+[performance]
+target_tps = 100000
+latency_target = "50ms"
+resource_monitoring = true

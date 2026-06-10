@@ -1,0 +1,70 @@
+[package]
+name = "q-bep44-discovery"
+version = "0.1.0"
+edition = "2021"
+description = "REAL BEP-44 DHT + Tor peer discovery for Q-NarwhalKnight"
+
+[dependencies]
+# Core async and utilities
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Real network implementations - working versions
+mainline = "2.0"  # BitTorrent DHT implementation
+bencode = "0.1"   # Bencode encoding for DHT
+sha1 = "0.10"     # SHA1 hashing for DHT
+tokio-socks = "0.5"  # SOCKS5 proxy for real Tor connections
+
+# Real cryptography for BEP-44
+ed25519-dalek = { version = "2.0", features = ["rand_core"] }
+ring = "0.16"
+sha2 = "0.10"
+
+# Network and serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+hex = "0.4"
+bytes = "1.0"
+
+# Random generation
+getrandom = "0.2"
+rand = "0.8"
+fastrand = "2.0"
+
+# Serialization
+bincode = { workspace = true }
+crc32fast = { workspace = true }
+serde_bencode = "0.2"
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# Real network clients
+reqwest = { version = "0.12", features = ["json", "socks"] }
+
+# libp2p for DHT bootstrap - use workspace version 0.53 with all sub-crates re-exported
+libp2p = { workspace = true }
+
+# Configuration
+toml = "0.7"
+base32 = "0.4"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[[bin]]
+name = "massive_scale_test"
+path = "src/bin/massive_scale_test.rs"
+
+[[bin]]
+name = "simple_test"
+path = "src/bin/simple_test.rs"
+
+[[bin]]
+name = "real_test"
+path = "src/bin/real_test.rs"

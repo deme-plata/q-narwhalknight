@@ -1,0 +1,37 @@
+# Q-NarwhalKnight Tor Configuration
+# Enable SOCKS proxy for applications (Docker-optimized)
+SOCKSPort 127.0.0.1:9050
+SOCKSPort [::1]:9050
+SOCKSPolicy accept *
+
+# Enable control port for circuit management (Docker-optimized)
+ControlPort 127.0.0.1:9051
+ControlPort [::1]:9051
+HashedControlPassword 16:872860B76453A77D60CA2BB8C1A7042072093276A3D701AD684053EC4C
+
+# Data directory for Tor
+DataDirectory /app/data/tor
+
+# Enable hidden service for P2P communication
+HiddenServiceDir /app/data/tor/hidden_service/
+HiddenServicePort 8333 127.0.0.1:8080
+HiddenServicePort 9001 127.0.0.1:9001
+
+# Quantum-Enhanced Discovery Settings
+# Enable exit nodes for DNS-phantom discovery
+ExitPolicy accept *:53
+ExitPolicy accept *:443
+ExitPolicy accept *:80
+ExitPolicy reject *:*
+
+# Logging
+Log notice file /app/logs/tor.log
+Log info file /app/logs/tor-debug.log
+
+# Enable bootstrapping for faster startup
+DisableNetwork 0
+ClientOnly 1
+
+# DNS resolution through Tor for phantom discovery
+DNSPort 0.0.0.0:5353
+AutomapHostsOnResolve 1

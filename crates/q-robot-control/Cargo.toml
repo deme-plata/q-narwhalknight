@@ -1,0 +1,75 @@
+[package]
+name = "q-robot-control"
+version = "0.1.0"
+edition = "2021"
+description = "Q-NarwhalKnight Robotic Control Interface - Water-Robot + DAG-BFT Integration"
+authors = ["Q-NarwhalKnight Team <team@q-narwhalknight.dev>"]
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+sha3 = "0.10"
+blake3 = "1.5"
+hex = "0.4"
+reqwest = { version = "0.12", features = ["json", "socks", "stream"] }
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+clap = { version = "4.0", features = ["derive"] }
+
+# Wallet integration
+bip39 = "2.0"
+ed25519-dalek = "2.0"
+x25519-dalek = "2.0"
+
+# Neural interface simulation
+nalgebra = "0.32"
+ndarray = "0.15"
+
+# Robot control
+rppal = { version = "0.14", optional = true } # Raspberry Pi GPIO
+serialport = "4.0"
+
+# Cross-chain integration
+q-types = { path = "../q-types" }
+# q-bitcoin-bridge = { path = "../q-bitcoin-bridge" } # DEACTIVATED
+
+# Real AI model processing - using mistral.rs via HTTP API
+hf-hub = "0.4"
+tokenizers = "0.21"
+safetensors = "0.6"
+memmap2 = "0.9"
+
+# Real networking for distributed processing
+libp2p = { version = "0.53", features = ["noise", "yamux", "tcp", "tokio", "mdns", "gossipsub", "identify", "ping", "request-response", "json"] }
+multiaddr = "0.18"
+
+# Real blockchain integration
+web3 = "0.19"
+ethers = "2.0"
+secp256k1 = "0.29"
+
+# Performance optimizations
+rayon = "1.10"
+crossbeam = "0.8"
+dashmap = "6.1"
+parking_lot = "0.12"
+
+[[bin]]
+name = "robot-control-daemon"
+path = "src/daemon.rs"
+
+[[bin]]
+name = "robot-wallet-cli"
+path = "src/wallet_cli.rs"
+
+[[bin]]
+name = "neural-interface-sim"
+path = "src/bin/neural-interface-sim.rs"

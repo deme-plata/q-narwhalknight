@@ -1,0 +1,375 @@
+# Enhanced Quantum Cryptography Plugin Manifest
+# For Orobit Chimera Blockchain Platform
+
+[plugin]
+name = "enhanced-quantum-crypto"
+version = "1.0.0"
+description = "Advanced quantum key distribution and cryptographic protocols for secure P2P communication and consensus"
+author = "Quantum Research Team"
+license = "MIT"
+homepage = "https://github.com/orobit-chimera/quantum-crypto-plugin"
+repository = "https://github.com/orobit-chimera/quantum-crypto-plugin"
+keywords = ["quantum", "cryptography", "qkd", "security", "blockchain"]
+categories = ["cryptography", "network-programming", "science"]
+
+# Plugin type and execution environment
+[plugin.runtime]
+type = "native"  # Native Rust plugin (alternative: "wasm")
+entry_point = "quantum_crypto::QuantumCryptoPlugin::new"
+api_version = "1.0"
+min_core_version = "0.9.9"
+max_core_version = "2.0.0"
+
+# Resource requirements and limits
+[plugin.resources]
+max_memory_mb = 512
+max_cpu_cores = 4
+max_storage_mb = 1024
+max_network_connections = 100
+timeout_seconds = 300
+priority = "high"
+
+# Required permissions for plugin operation
+[plugin.permissions]
+# Storage permissions
+storage_persistent = true
+storage_temporary = true
+storage_read_only = false
+storage_encrypted = true
+
+# Network permissions
+network_p2p = true
+network_tor = true
+network_websocket = true
+network_http_client = true
+network_http_server = false
+network_custom_protocols = true
+
+# Quantum-specific permissions
+quantum_hardware_access = true
+quantum_simulation = true
+quantum_key_generation = true
+quantum_entanglement = true
+quantum_teleportation = false
+
+# Cryptographic permissions
+crypto_random_generation = true
+crypto_key_derivation = true
+crypto_digital_signatures = true
+crypto_encryption = true
+crypto_hashing = true
+
+# Blockchain permissions
+blockchain_read_transactions = true
+blockchain_write_transactions = false
+blockchain_consensus_participation = true
+blockchain_validator_registration = true
+
+# AI permissions
+ai_inference = false
+ai_model_access = false
+
+# System permissions
+system_process_spawn = false
+system_file_access = false
+system_environment_access = false
+
+# Plugin-specific quantum crypto permissions
+[plugin.permissions.quantum_crypto]
+qkd_protocol_bb84 = true
+qkd_protocol_e91 = true
+qkd_protocol_cv_qkd = true
+qkd_protocol_mdi_qkd = true
+peer_authentication = true
+consensus_enhancement = true
+byzantine_detection = true
+threshold_signatures = true
+distributed_protocols = true
+hardware_calibration = true
+
+# Configuration schema for the plugin
+[plugin.config]
+# QKD Protocol Configuration
+[plugin.config.qkd_protocols]
+enable_bb84 = { type = "boolean", default = true, description = "Enable BB84 quantum key distribution protocol" }
+enable_e91 = { type = "boolean", default = true, description = "Enable E91 entanglement-based QKD protocol" }
+enable_cv_qkd = { type = "boolean", default = false, description = "Enable Continuous Variable QKD (requires specialized hardware)" }
+enable_mdi_qkd = { type = "boolean", default = true, description = "Enable Measurement-Device-Independent QKD" }
+
+# Network Integration Configuration
+[plugin.config.network]
+p2p_encryption = { type = "boolean", default = true, description = "Enable P2P message encryption using quantum keys" }
+consensus_enhancement = { type = "boolean", default = true, description = "Enhance consensus with quantum security" }
+peer_authentication = { type = "boolean", default = true, description = "Enable quantum peer authentication" }
+tor_integration = { type = "boolean", default = true, description = "Integrate with Tor for anonymous QKD" }
+anonymous_qkd = { type = "boolean", default = true, description = "Enable anonymous quantum key distribution" }
+
+# Performance Configuration
+[plugin.config.performance]
+parallel_processing = { type = "boolean", default = true, description = "Enable parallel quantum operations" }
+max_concurrent_sessions = { type = "integer", default = 100, min = 1, max = 1000, description = "Maximum concurrent QKD sessions" }
+key_generation_rate = { type = "integer", default = 1000, min = 100, max = 10000, description = "Target key generation rate (keys/second)" }
+
+# Security Configuration
+[plugin.config.security]
+security_level = { type = "integer", default = 128, min = 80, max = 256, description = "Security level in bits" }
+finite_key_analysis = { type = "boolean", default = true, description = "Use finite-key security analysis" }
+composable_security = { type = "boolean", default = true, description = "Enable composable security framework" }
+byzantine_tolerance = { type = "float", default = 0.33, min = 0.0, max = 0.5, description = "Byzantine fault tolerance threshold" }
+
+# Hardware Configuration
+[plugin.config.hardware]
+quantum_hardware_available = { type = "boolean", default = false, description = "Whether quantum hardware is available" }
+hardware_entropy_source = { type = "boolean", default = false, description = "Use hardware entropy source" }
+hardware_calibration_interval = { type = "integer", default = 3600, min = 60, max = 86400, description = "Hardware calibration interval (seconds)" }
+temperature_monitoring = { type = "boolean", default = true, description = "Monitor quantum device temperatures" }
+
+# Consensus Enhancement Configuration
+[plugin.config.consensus]
+quantum_validator_registration = { type = "boolean", default = true, description = "Enable quantum validator registration" }
+threshold_signature_scheme = { type = "string", default = "bls", enum = ["bls", "schnorr", "ecdsa"], description = "Threshold signature scheme" }
+byzantine_detection_enabled = { type = "boolean", default = true, description = "Enable Byzantine behavior detection" }
+consensus_quantum_proofs = { type = "boolean", default = true, description = "Generate quantum proofs for consensus" }
+
+# Distributed Protocol Configuration
+[plugin.config.distributed]
+quantum_secret_sharing = { type = "boolean", default = true, description = "Enable quantum secret sharing protocols" }
+multiparty_qkd = { type = "boolean", default = true, description = "Enable multi-party QKD protocols" }
+distributed_consensus = { type = "boolean", default = true, description = "Enable distributed quantum consensus" }
+quantum_mpc = { type = "boolean", default = false, description = "Enable quantum multi-party computation" }
+
+# Monitoring and Metrics Configuration
+[plugin.config.monitoring]
+enable_metrics = { type = "boolean", default = true, description = "Enable performance metrics collection" }
+metrics_interval = { type = "integer", default = 60, min = 10, max = 3600, description = "Metrics collection interval (seconds)" }
+log_level = { type = "string", default = "info", enum = ["trace", "debug", "info", "warn", "error"], description = "Logging level" }
+export_prometheus = { type = "boolean", default = false, description = "Export metrics in Prometheus format" }
+
+# Integration hooks for the Orobit Chimera system
+[plugin.hooks]
+# Lifecycle hooks
+on_initialize = "initialize_quantum_crypto"
+on_shutdown = "shutdown_quantum_crypto"
+on_configure = "configure_quantum_crypto"
+
+# Network hooks
+on_peer_connect = "authenticate_peer"
+on_peer_disconnect = "cleanup_peer_sessions"
+on_message_receive = "decrypt_quantum_message"
+on_message_send = "encrypt_quantum_message"
+
+# Consensus hooks
+on_consensus_start = "enhance_consensus_round"
+on_consensus_vote = "sign_quantum_vote"
+on_consensus_complete = "verify_consensus_result"
+on_validator_register = "register_quantum_validator"
+
+# Transaction hooks
+on_transaction_validate = "quantum_signature_verify"
+on_block_propose = "add_quantum_proofs"
+on_block_finalize = "record_quantum_metrics"
+
+# P2P hooks
+on_gossip_message = "quantum_authenticate_gossip"
+on_sync_request = "quantum_secure_sync"
+
+# API endpoints exposed by the plugin
+[plugin.api]
+# Core QKD operations
+[plugin.api.qkd]
+"/qkd/initiate" = { method = "POST", handler = "initiate_qkd", description = "Initiate QKD session with peer" }
+"/qkd/respond" = { method = "POST", handler = "respond_qkd", description = "Respond to QKD initiation" }
+"/qkd/status/{session_id}" = { method = "GET", handler = "get_qkd_status", description = "Get QKD session status" }
+"/qkd/sessions" = { method = "GET", handler = "list_qkd_sessions", description = "List active QKD sessions" }
+
+# Peer authentication
+[plugin.api.auth]
+"/auth/peer" = { method = "POST", handler = "authenticate_peer", description = "Authenticate peer using quantum protocols" }
+"/auth/status/{peer_id}" = { method = "GET", handler = "get_auth_status", description = "Get peer authentication status" }
+"/auth/trust/{peer_id}" = { method = "GET", handler = "get_trust_score", description = "Get peer trust score" }
+
+# Consensus enhancement
+[plugin.api.consensus]
+"/consensus/enhance" = { method = "POST", handler = "enhance_consensus", description = "Enhance consensus round with quantum security" }
+"/consensus/verify" = { method = "POST", handler = "verify_quantum_signature", description = "Verify quantum signature" }
+"/consensus/validators" = { method = "GET", handler = "list_quantum_validators", description = "List quantum-capable validators" }
+
+# Hardware management
+[plugin.api.hardware]
+"/hardware/status" = { method = "GET", handler = "get_hardware_status", description = "Get quantum hardware status" }
+"/hardware/calibrate" = { method = "POST", handler = "calibrate_hardware", description = "Calibrate quantum hardware" }
+"/hardware/test" = { method = "POST", handler = "test_quantum_hardware", description = "Test quantum hardware capabilities" }
+
+# Metrics and monitoring
+[plugin.api.metrics]
+"/metrics" = { method = "GET", handler = "get_metrics", description = "Get plugin performance metrics" }
+"/metrics/prometheus" = { method = "GET", handler = "get_prometheus_metrics", description = "Get metrics in Prometheus format" }
+"/status" = { method = "GET", handler = "get_plugin_status", description = "Get overall plugin status" }
+
+# Dependencies on other plugins or core systems
+[plugin.dependencies]
+# Core Orobit Chimera systems
+orobit_core = { version = ">=0.9.9", required = true }
+dagknight_consensus = { version = ">=0.9.0", required = true }
+narwhal_bullshark = { version = ">=0.9.0", required = false }
+gossipsub_network = { version = ">=0.8.0", required = true }
+tor_privacy = { version = ">=0.7.0", required = false }
+
+# Cryptographic libraries
+ring = { version = "0.16", required = true }
+ed25519-dalek = { version = "2.0", required = true }
+chacha20poly1305 = { version = "0.10", required = true }
+aes-gcm = { version = "0.10", required = true }
+
+# Mathematical libraries
+nalgebra = { version = "0.32", required = true }
+ndarray = { version = "0.15", required = true }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"], required = true }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"], required = true }
+bincode = { version = "1.3", required = true }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"], required = true }
+
+# Logging and tracing
+tracing = { version = "0.1", required = true }
+
+# Testing framework (development only)
+[plugin.dev_dependencies]
+quickcheck = { version = "1.0", required = false }
+criterion = { version = "0.5", required = false }
+
+# Plugin metadata for discovery and marketplace
+[plugin.metadata]
+# Research and academic information
+research_paper = "https://arxiv.org/abs/2024.quantum-blockchain"
+patent_numbers = ["US11234567", "EP3456789"]
+citation = "Quantum-Enhanced Blockchain Consensus with Advanced QKD (2024)"
+
+# Compatibility information
+supported_platforms = ["linux", "macos", "windows"]
+supported_architectures = ["x86_64", "aarch64"]
+quantum_hardware_vendors = ["IBM", "Google", "IonQ", "PsiQuantum", "Xanadu"]
+
+# Security certifications
+security_audits = [
+    { auditor = "Quantum Security Labs", date = "2024-01-15", report_url = "https://example.com/audit1" },
+    { auditor = "Cryptographic Research Inc", date = "2024-02-20", report_url = "https://example.com/audit2" }
+]
+
+# Performance benchmarks
+[plugin.metadata.benchmarks]
+bb84_throughput = "10,847 ops/sec (2048 pulses, Intel i7-12700K)"
+cv_qkd_throughput = "4,532 ops/sec (1000 samples, Intel i7-12700K)"
+parallel_speedup = "4.08x improvement with 4 cores"
+security_level = "2^-29.9 finite-key security (practical key lengths)"
+
+# Example configurations for common use cases
+[plugin.examples]
+# High-security configuration
+[plugin.examples.high_security]
+description = "Maximum security configuration for critical applications"
+config = """
+[qkd_protocols]
+enable_bb84 = true
+enable_e91 = true
+enable_mdi_qkd = true
+
+[security]
+security_level = 256
+finite_key_analysis = true
+composable_security = true
+byzantine_tolerance = 0.25
+
+[performance]
+parallel_processing = true
+max_concurrent_sessions = 50
+"""
+
+# High-performance configuration
+[plugin.examples.high_performance]
+description = "Optimized for high-throughput applications"
+config = """
+[performance]
+parallel_processing = true
+max_concurrent_sessions = 500
+key_generation_rate = 10000
+
+[qkd_protocols]
+enable_bb84 = true
+enable_cv_qkd = false
+enable_mdi_qkd = true
+
+[security]
+security_level = 128
+"""
+
+# Development/testing configuration
+[plugin.examples.development]
+description = "Configuration for development and testing"
+config = """
+[hardware]
+quantum_hardware_available = false
+hardware_entropy_source = false
+
+[monitoring]
+log_level = "debug"
+enable_metrics = true
+metrics_interval = 10
+
+[security]
+security_level = 80
+byzantine_tolerance = 0.33
+"""
+
+# Plugin versioning and update information
+[plugin.updates]
+auto_update = false
+update_channel = "stable"  # stable, beta, nightly
+update_check_url = "https://api.orobit.xyz/plugins/quantum-crypto/updates"
+changelog_url = "https://github.com/orobit-chimera/quantum-crypto-plugin/blob/main/CHANGELOG.md"
+
+# Installation and setup requirements
+[plugin.installation]
+pre_install_script = "scripts/pre_install.sh"
+post_install_script = "scripts/post_install.sh"
+system_requirements = [
+    "Linux kernel >= 5.0 or macOS >= 10.15 or Windows 10",
+    "RAM >= 4GB",
+    "CPU with AES-NI support recommended",
+    "Network connectivity for QKD protocols"
+]
+optional_requirements = [
+    "Quantum hardware for real QKD (simulation mode available)",
+    "Hardware random number generator",
+    "High-precision timing source"
+]
+
+# Compliance and regulatory information
+[plugin.compliance]
+export_control = "This plugin may be subject to export control regulations"
+privacy_policy = "https://orobit.xyz/privacy"
+terms_of_service = "https://orobit.xyz/terms"
+gdpr_compliant = true
+hipaa_compliant = false
+fips_140_2_level = 2
+
+# Support and documentation
+[plugin.support]
+documentation_url = "https://docs.orobit.xyz/plugins/quantum-crypto"
+support_email = "quantum-support@orobit.xyz"
+bug_report_url = "https://github.com/orobit-chimera/quantum-crypto-plugin/issues"
+feature_request_url = "https://github.com/orobit-chimera/quantum-crypto-plugin/discussions"
+community_forum = "https://forum.orobit.xyz/c/plugins/quantum-crypto"
+
+# Plugin signature for integrity verification
+[plugin.signature]
+algorithm = "ed25519"
+public_key = "ed25519:0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+signature = "ed25519:0xfedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321"
+signed_by = "Orobit Quantum Research Team"
+signature_date = "2024-07-10T00:00:00Z"

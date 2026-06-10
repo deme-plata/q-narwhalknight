@@ -1,0 +1,73 @@
+[package]
+name = "q-bounty-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Testnet Bounty Protocol - Trust-minimized reward system for testnet participation"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Local dependencies
+q-types = { path = "../q-types" }
+q-storage = { path = "../q-storage" }
+q-aegis-ql = { path = "../q-aegis-ql" }
+
+# Core async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+postcard = { workspace = true }
+
+# RocksDB storage (not available on Windows - use sled instead)
+# rocksdb is added via platform-specific section below
+
+# Cryptography for identity binding and Merkle trees
+sha3 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# UUID for user IDs
+uuid = { workspace = true }
+
+# Concurrent data structures
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+
+# HTTP client for external API integration
+reqwest = { workspace = true }
+
+# Merkle tree implementation
+rs_merkle = "1.4"
+
+# Social media API integrations
+oauth2 = "4.4"
+
+# Platform-specific storage backends
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sled = "0.34"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

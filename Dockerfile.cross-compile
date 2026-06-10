@@ -1,0 +1,159 @@
+FROM debian:bookworm-slim
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUST_VERSION=stable \
+    PATH="/root/.cargo/bin:${PATH}"
+
+# Install base dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    clang \
+    llvm \
+    wget \
+    xz-utils \
+    python3 \
+    python3-pip \
+    gfortran \
+    libgfortran-12-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${RUST_VERSION}
+
+# Install cross-compilation targets
+RUN rustup target add x86_64-apple-darwin \
+    && rustup target add aarch64-apple-darwin \
+    && rustup target add x86_64-pc-windows-gnu
+
+# Install MinGW-w64 for Windows cross-compilation with all components
+RUN apt-get update && apt-get install -y \
+    mingw-w64 \
+    gcc-mingw-w64-x86-64 \
+    g++-mingw-w64-x86-64 \
+    gcc-mingw-w64-x86-64-posix \
+    g++-mingw-w64-x86-64-posix \
+    binutils-mingw-w64-x86-64 \
+    && update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix \
+    && update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and setup OSXCross for macOS cross-compilation
+WORKDIR /tmp
+RUN git clone https://github.com/tpoechtrager/osxcross.git \
+    && cd osxcross \
+    && wget -nc https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz \
+    && mv MacOSX14.5.sdk.tar.xz tarballs/ \
+    && UNATTENDED=1 ./build.sh
+
+# Setup environment for OSXCross
+ENV PATH="/tmp/osxcross/target/bin:${PATH}" \
+    LD_LIBRARY_PATH="/tmp/osxcross/target/lib:${LD_LIBRARY_PATH}"
+
+# Configure Cargo for cross-compilation
+RUN mkdir -p /root/.cargo && cat > /root/.cargo/config.toml <<'EOF'
+[target.x86_64-apple-darwin]
+linker = "x86_64-apple-darwin23.5-clang"
+ar = "x86_64-apple-darwin23.5-ar"
+rustflags = ["-C", "link-arg=-fuse-ld=/tmp/osxcross/target/bin/x86_64-apple-darwin23.5-ld"]
+
+[target.aarch64-apple-darwin]
+linker = "aarch64-apple-darwin23.5-clang"
+ar = "aarch64-apple-darwin23.5-ar"
+rustflags = ["-C", "link-arg=-fuse-ld=/tmp/osxcross/target/bin/aarch64-apple-darwin23.5-ld"]
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+
+[env]
+# macOS SDK for bindgen
+BINDGEN_EXTRA_CLANG_ARGS_x86_64_apple_darwin = "--sysroot=/tmp/osxcross/target/SDK/MacOSX14.5.sdk -I/tmp/osxcross/target/SDK/MacOSX14.5.sdk/usr/include"
+BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin = "--sysroot=/tmp/osxcross/target/SDK/MacOSX14.5.sdk -I/tmp/osxcross/target/SDK/MacOSX14.5.sdk/usr/include"
+
+# C/C++ compilers
+CC_x86_64_apple_darwin = "x86_64-apple-darwin23.5-clang"
+CXX_x86_64_apple_darwin = "x86_64-apple-darwin23.5-clang++"
+AR_x86_64_apple_darwin = "x86_64-apple-darwin23.5-ar"
+LD_x86_64_apple_darwin = "/tmp/osxcross/target/bin/x86_64-apple-darwin23.5-ld"
+
+CC_aarch64_apple_darwin = "aarch64-apple-darwin23.5-clang"
+CXX_aarch64_apple_darwin = "aarch64-apple-darwin23.5-clang++"
+AR_aarch64_apple_darwin = "aarch64-apple-darwin23.5-ar"
+LD_aarch64_apple_darwin = "/tmp/osxcross/target/bin/aarch64-apple-darwin23.5-ld"
+
+CC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-gcc"
+CXX_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-g++"
+AR_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-ar"
+
+# Disable OpenBLAS source build for cross-compilation
+# Use system BLAS instead
+OPENBLAS_NO_LAPACK = "1"
+OPENBLAS_TARGET = "GENERIC"
+
+# Force aws-lc-sys to use correct linker
+CMAKE_TOOLCHAIN_FILE_x86_64_apple_darwin = "/tmp/osxcross/target/toolchain.cmake"
+CMAKE_TOOLCHAIN_FILE_aarch64_apple_darwin = "/tmp/osxcross/target/toolchain.cmake"
+EOF
+
+# Install pre-built OpenBLAS for cross-compilation workaround
+# We'll use ndarray without BLAS for cross-compilation
+RUN cargo install cargo-features --no-default-features
+
+# Create build script
+RUN cat > /usr/local/bin/build-cross.sh <<'EOF'
+#!/bin/bash
+set -e
+
+cd /workspace
+
+echo "╔═══════════════════════════════════════════════════════════════╗"
+echo "║     Q-NarwhalKnight Cross-Platform Miner Build               ║"
+echo "╚═══════════════════════════════════════════════════════════════╝"
+echo ""
+
+# macOS x86_64 (Intel Mac)
+echo "Building macOS x86_64 (Intel Mac) miner..."
+cargo build --release --target x86_64-apple-darwin --package q-miner \
+  --no-default-features --features "cpu-mining,cli" \
+  2>&1 | tee /tmp/macos-x86_64-miner.log
+echo "✓ macOS x86_64 miner built"
+echo ""
+
+# macOS aarch64 (Apple Silicon)
+echo "Building macOS aarch64 (Apple Silicon) miner..."
+cargo build --release --target aarch64-apple-darwin --package q-miner \
+  --no-default-features --features "cpu-mining,cli" \
+  2>&1 | tee /tmp/macos-aarch64-miner.log
+echo "✓ macOS aarch64 miner built"
+echo ""
+
+# Windows x86_64
+echo "Building Windows x86_64 miner..."
+cargo build --release --target x86_64-pc-windows-gnu --package q-miner \
+  --no-default-features --features "cpu-mining,cli" \
+  2>&1 | tee /tmp/windows-miner.log
+echo "✓ Windows miner built"
+echo ""
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "All miner builds complete!"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "Binaries located at:"
+echo "  macOS x86_64: target/x86_64-apple-darwin/release/q-miner"
+echo "  macOS ARM64:  target/aarch64-apple-darwin/release/q-miner"
+echo "  Windows:      target/x86_64-pc-windows-gnu/release/q-miner.exe"
+echo ""
+EOF
+
+RUN chmod +x /usr/local/bin/build-cross.sh
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]

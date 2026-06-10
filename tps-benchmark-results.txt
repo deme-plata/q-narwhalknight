@@ -1,0 +1,92 @@
+
+================================================================================
+🚀 Quillon-NarwhalKnight Comprehensive TPS Benchmark
+================================================================================
+📡 Testing against: http://localhost:8080
+🔧 Max concurrent: 200
+📅 Date: 2025-10-23 05:32:05 UTC
+================================================================================
+
+💰 Creating test wallets...
+✅ Created 100 wallets
+
+💸 Funding wallets from faucet...
+✅ Funded 10 wallets (faucet may be limited)
+
+🔥 Warming up API with 20 requests...
+✅ Warmup complete
+
+🧪 Test 1: Standard Transaction Throughput
+
+================================================================================
+📊 STANDARD TRANSACTIONS - BENCHMARK RESULTS
+================================================================================
+📈 Total Transactions: 500
+✅ Successful: 500 (100.0%)
+❌ Failed: 0 (0.0%)
+⏱️  Total Time: 1.09s
+⚡ Actual TPS: 457.27
+
+🕐 Latency Statistics:
+  • Average: 370.80ms
+  • Median (P50): 41ms
+  • Min: 1ms
+  • Max: 1025ms
+  • P95: 980ms
+  • P99: 1004ms
+================================================================================
+
+🧪 Test 2: Privacy Mixing Throughput
+
+================================================================================
+📊 PRIVACY MIXING - BENCHMARK RESULTS
+================================================================================
+📈 Total Transactions: 200
+✅ Successful: 0 (0.0%)
+❌ Failed: 200 (100.0%)
+⏱️  Total Time: 0.08s
+⚡ Actual TPS: 0.00
+================================================================================
+
+🧪 Test 3: PaaS API Key Generation Throughput
+
+================================================================================
+📊 PAAS API KEYS - BENCHMARK RESULTS
+================================================================================
+📈 Total Transactions: 100
+✅ Successful: 100 (100.0%)
+❌ Failed: 0 (0.0%)
+⏱️  Total Time: 0.28s
+⚡ Actual TPS: 353.12
+
+🕐 Latency Statistics:
+  • Average: 48.25ms
+  • Median (P50): 27ms
+  • Min: 9ms
+  • Max: 247ms
+  • P95: 86ms
+  • P99: 247ms
+================================================================================
+
+================================================================================
+📊 COMPREHENSIVE BENCHMARK SUMMARY
+================================================================================
+
+Standard Transactions
+  TPS: 457.27
+  Success Rate: 100.0%
+  Latency P50: 41ms, P99: 1004ms
+
+Privacy Mixing
+  TPS: 0.00
+  Success Rate: 0.0%
+
+PaaS API Keys
+  TPS: 353.12
+  Success Rate: 100.0%
+  Latency P50: 27ms, P99: 247ms
+
+================================================================================
+✅ Benchmark Complete!
+💾 Save these results for whitepaper performance claims
+================================================================================

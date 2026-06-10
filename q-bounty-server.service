@@ -1,0 +1,27 @@
+[Unit]
+Description=Q-NarwhalKnight Bounty Server - Testnet Bounty Campaign API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/orobit/shared/q-narwhalknight
+Environment="Q_DB_PATH=./data-bounty"
+Environment="RUST_LOG=info"
+ExecStart=/opt/orobit/shared/q-narwhalknight/target/release/q-bounty-server --port 8081
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=q-bounty-server
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

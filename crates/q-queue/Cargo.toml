@@ -1,0 +1,19 @@
+[package]
+name = "q-queue"
+version.workspace = true
+edition.workspace = true
+description = "High-performance lock-free queue — sub-microsecond IPC, millions msg/sec persistent, GB/s distributed"
+license.workspace = true
+
+[dependencies]
+crc32fast = "1"
+crossbeam-utils = "0.8"
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "queue_bench"
+harness = false

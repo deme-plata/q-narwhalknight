@@ -1,0 +1,295 @@
+fabrice@fabrice-MS-7E56:~/quillon$ sudo docker run -d --name q-node \
+  --network host \
+  --restart unless-stopped \
+  -v $(pwd)/data-fresh1:/data \
+  -v $(pwd)/q-api-server-v1.0.1-beta:/app/q-node:ro \
+  -e Q_DB_PATH=/data \
+  -e Q_P2P_PORT=9001 \
+  ubuntu:24.04 \
+  /bin/bash -c "
+    apt-get update >/dev/null 2>&1
+    apt-get install -y ca-certificates >/dev/null 2>&1
+    echo '🚀 Starting Q-NarwhalKnight node...'
+    exec /app/q-node --port 8080
+  "
+cd4c4a7508d22a6743ee996f89364483a65a2a5a605b2396b4430f5eda313a53
+fabrice@fabrice-MS-7E56:~/quillon$ sudo docker logs -f q-node
+🚀 Starting Q-NarwhalKnight node...
+2025-11-12T06:37:26.335623Z  INFO q_api_server: 🔍 Binary Version Verification:
+2025-11-12T06:37:26.335635Z  INFO q_api_server:    Version: 1.0.0-beta
+2025-11-12T06:37:26.335637Z  INFO q_api_server:    Build Date: 2025-11-11 16:13:09 UTC
+2025-11-12T06:37:26.335639Z  INFO q_api_server:    Build Timestamp: 1762877589
+2025-11-12T06:37:26.335640Z  INFO q_api_server: ✅ Binary age: 0 days
+2025-11-12T06:37:26.335649Z  INFO q_api_server::config: 🔍 Attempting automatic bootstrap discovery from http://185.182.185.227:8080
+⚠️  Warning: Could not load .env file: path not found
+    Continuing without .env (environment variables must be set externally)
+2025-11-12T06:37:26.461073Z  INFO q_api_server::config: ✅ Discovered 2 bootstrap peer(s) automatically
+2025-11-12T06:37:26.461082Z  INFO q_api_server::config:    📡 /ip4/185.182.185.227/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:26.461084Z  INFO q_api_server::config:    📡 /dns4/quillon.xyz/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:26.461089Z  WARN q_api_server::config: ⚡ Fast block production enabled: 2 second intervals (Phase 2 exciting visualization)
+2025-11-12T06:37:26.461091Z  WARN q_api_server::config: ⚡ This is optimized for DAG visualization - consider 5-15s for production
+2025-11-12T06:37:26.461092Z  INFO q_api_server::config: ✅ Single validator mode (default)
+2025-11-12T06:37:26.461094Z  INFO q_api_server::config: ✅ Configuration validated successfully
+2025-11-12T06:37:26.461106Z  INFO q_api_server: 🔄 Transferring 2 automatically discovered bootstrap peer(s) to network config
+2025-11-12T06:37:26.461108Z  INFO q_api_server: 🌐 ════════════════════════════════════════════════════════
+2025-11-12T06:37:26.461110Z  INFO q_api_server: 🌐 Network: Q-NarwhalKnight Testnet Phase 11 - Data Loss FIX (v1.0.1-beta)
+2025-11-12T06:37:26.461112Z  INFO q_api_server: 🌐 Chain ID: 2025
+2025-11-12T06:37:26.461113Z  INFO q_api_server: 🌐 Version: v0.9.90-beta-testnet
+2025-11-12T06:37:26.461116Z  INFO q_api_server: 🌐 Launch Time: 2025-10-23 00:00:00 UTC
+2025-11-12T06:37:26.461120Z  INFO q_api_server: 🌐 ════════════════════════════════════════════════════════
+2025-11-12T06:37:26.461123Z  INFO q_api_server: Starting Q-NarwhalKnight API Server testnet-phase11-node-unknown on port 8080
+2025-11-12T06:37:26.461132Z  INFO q_api_server: 🆔 Generated new node ID: a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:37:26.461133Z  INFO q_api_server: 🚀 Initializing Q-NarwhalKnight Triple-Layer Anonymity Network
+2025-11-12T06:37:26.461135Z  INFO q_api_server: 📡 Node ID: a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:37:26.461137Z  INFO q_api_server: 🧅 Starting Tor client...
+2025-11-12T06:37:55.257949Z  INFO q_api_server: ✅ Tor client initialized successfully
+2025-11-12T06:37:55.257957Z  INFO q_api_server: ⚠️  Bitcoin Bridge DEACTIVATED - module commented out
+2025-11-12T06:37:55.257959Z  INFO q_api_server: ⚠️  DNS Phantom DEACTIVATED - module commented out
+2025-11-12T06:37:55.257961Z  INFO q_api_server: ⚠️  BEP-44 Discovery DEACTIVATED - module commented out
+2025-11-12T06:37:55.257962Z  INFO q_api_server: 🌐 Initializing libp2p Unified Network Manager for Q-NarwhalKnight Testnet Phase 11 - Data Loss FIX (v1.0.1-beta)...
+2025-11-12T06:37:55.257989Z  INFO q_network::unified_network_manager: 🚀 Starting Q-NarwhalKnight Zero-Knowledge Discovery
+2025-11-12T06:37:55.257990Z  INFO q_network::unified_network_manager: 🌐 Network: Q-NarwhalKnight Testnet Phase 11 - Data Loss FIX (v1.0.1-beta)
+2025-11-12T06:37:55.257992Z  INFO q_network::unified_network_manager: 🆔 Local Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258288Z  INFO q_network::unified_network_manager: 📍 Added testnet-phase11 bootstrap peer: 12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw at /ip4/185.182.185.227/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:55.258304Z  INFO q_network::unified_network_manager: 📍 Added testnet-phase11 bootstrap peer: 12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw at /dns4/quillon.xyz/tcp/9001/p2p/12D3KooWEAyLSiaBJoPJBuLkwPZaLaanpTzGwt9n2hnniMAwYsvw
+2025-11-12T06:37:55.258337Z  INFO q_network::unified_network_manager: 🚀 Kademlia DHT bootstrap initiated with 2 peers
+2025-11-12T06:37:55.258339Z  INFO q_network::unified_network_manager: 🌍 Kademlia DHT initialized for clearnet discovery
+2025-11-12T06:37:55.258372Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/blocks
+2025-11-12T06:37:55.258375Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/transactions
+2025-11-12T06:37:55.258377Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/mining-rewards
+2025-11-12T06:37:55.258382Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/dex/swaps
+2025-11-12T06:37:55.258400Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/votes
+2025-11-12T06:37:55.258408Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/ack
+2025-11-12T06:37:55.258415Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/block-requests
+2025-11-12T06:37:55.258421Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/block-responses
+2025-11-12T06:37:55.258427Z  INFO q_network::unified_network_manager: 📢 Subscribed to testnet-phase11 Gossipsub topic: /qnk/testnet-phase11/batch-block-responses
+2025-11-12T06:37:55.258436Z  INFO q_network::distributed_ai: 🤖 Initializing Distributed AI Gossipsub topics
+2025-11-12T06:37:55.258444Z  INFO q_network::unified_network_manager: 🤖 Subscribed to AI inference topic: qnk/ai/inference-request/v1
+2025-11-12T06:37:55.258450Z  INFO q_network::unified_network_manager: 🤖 Subscribed to AI inference topic: qnk/ai/layer-output/v1
+2025-11-12T06:37:55.258456Z  INFO q_network::unified_network_manager: 🤖 Subscribed to AI inference topic: qnk/ai/node-capability/v1
+2025-11-12T06:37:55.258462Z  INFO q_network::unified_network_manager: 🤖 Subscribed to AI inference topic: qnk/ai/coordinator/v1
+2025-11-12T06:37:55.258469Z  INFO q_network::unified_network_manager: 🤖 Subscribed to AI inference topic: qnk/ai/heartbeat/v1
+2025-11-12T06:37:55.258476Z  INFO q_network::unified_network_manager: ✅ Subscribed to 5 AI inference Gossipsub topics
+2025-11-12T06:37:55.258484Z  INFO q_network::unified_network_manager: 🔗 Block sync request-response protocol initialized (BlockPackCodec)
+2025-11-12T06:37:55.258493Z  INFO q_network::unified_network_manager: 🔒 Using fixed libp2p port: 9001
+2025-11-12T06:37:55.258556Z  INFO q_network::unified_network_manager: ✅ Zero-Knowledge Discovery initialized successfully!
+2025-11-12T06:37:55.258569Z  INFO q_network::unified_network_manager: 📡 Discovery mechanisms active:
+2025-11-12T06:37:55.258578Z  INFO q_network::unified_network_manager:   • mDNS (local network, <1 second)
+2025-11-12T06:37:55.258584Z  INFO q_network::unified_network_manager:   • Kademlia DHT (global clearnet discovery)
+2025-11-12T06:37:55.258590Z  INFO q_network::unified_network_manager:   • Identify (peer exchange)
+2025-11-12T06:37:55.258595Z  INFO q_network::unified_network_manager:   • Ping (connection keepalive)
+2025-11-12T06:37:55.258602Z  INFO q_network::unified_network_manager:   • Gossipsub (consensus messaging, 9 topics)
+2025-11-12T06:37:55.258608Z  INFO q_network::unified_network_manager: ℹ️  [BOOTSTRAP] No explicit bootstrap peer configured (Q_BOOTSTRAP_PEER not set)
+2025-11-12T06:37:55.258614Z  INFO q_network::unified_network_manager:    Node will rely on mDNS and Kademlia DHT for peer discovery
+2025-11-12T06:37:55.258627Z  INFO q_api_server: ✅ libp2p Network Manager initialized for Q-NarwhalKnight Testnet Phase 11 - Data Loss FIX (v1.0.1-beta)
+2025-11-12T06:37:55.258633Z  INFO q_api_server:    Local Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258644Z  INFO q_api_server:    Protocols: mDNS, Kademlia DHT, Gossipsub, Identify, Ping
+2025-11-12T06:37:55.258649Z  INFO q_api_server:    Network Topics: /qnk/testnet-phase11/transactions, /qnk/testnet-phase11/blocks, etc.
+2025-11-12T06:37:55.258651Z  INFO q_network::unified_network_manager: 🌉 Gossipsub message forwarding channel established
+2025-11-12T06:37:55.258805Z  INFO q_api_server: 📡 Cached libp2p peer info for bootstrap discovery:
+2025-11-12T06:37:55.258841Z  INFO q_api_server:    Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258848Z  INFO q_api_server:    Address: /ip4/0.0.0.0/tcp/9001/p2p/12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:37:55.258870Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: /qnk/database-updates/1.0.0
+2025-11-12T06:37:55.258878Z  INFO q_api_server: 📢 Pre-subscribed to database updates topic for replication
+2025-11-12T06:37:55.258893Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: /qnk/testnet-phase11/peer-heights
+2025-11-12T06:37:55.258901Z  INFO q_api_server: 📢 Subscribed to /qnk/testnet-phase11/peer-heights for peer discovery (network-aware)
+2025-11-12T06:37:55.258907Z  INFO q_api_server: 🔄 [LEGACY] Skipped block-pack-requests/responses topics (replaced by BlockPackCodec)
+2025-11-12T06:37:55.258919Z  INFO q_api_server: ✅ libp2p manager initialized (storage and event loop will be set up in Phase 3)
+2025-11-12T06:37:55.258925Z  INFO q_api_server: 📡 libp2p_manager extracted successfully - gossipsub channels ready!
+2025-11-12T06:37:55.258982Z  INFO q_api_server: ✅ Balance consensus engine initialized (genesis: 1761436800, dev wallet: qnkefca1e8c1f46e9101)
+2025-11-12T06:37:55.305048Z  INFO q_api_server: 🔧 [v0.9.10] Running height pointer integrity check...
+2025-11-12T06:37:55.305072Z  INFO q_api_server: ✅ [v0.9.10] Height pointer verified/repaired: 0
+2025-11-12T06:37:55.305074Z  INFO q_api_server: 🔍 [v0.9.37] Validating genesis block against network consensus...
+2025-11-12T06:37:55.305077Z  INFO q_api_server: ✅ [v0.9.37] Genesis block validation passed
+2025-11-12T06:37:55.305081Z  INFO q_network::network_manager: 🌐 Initializing NetworkManager for validator a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c (Phase Phase1)
+2025-11-12T06:38:21.164141Z  INFO q_api_server: ✅ NetworkManager initialized - DNS-phantom bridge ready
+2025-11-12T06:38:21.164182Z  INFO q_api_server: ✅ Using pre-configured libp2p manager from main.rs
+2025-11-12T06:38:21.164219Z  INFO q_api_server: Loaded 0 wallet balances from persistent storage
+2025-11-12T06:38:21.164234Z  INFO q_api_server: 💎 Loaded total minted supply: 0 QUG (max: 21M QUG)
+2025-11-12T06:38:21.164243Z  INFO q_api_server: 🪙 Loaded 0 token balances from persistent storage
+2025-11-12T06:38:21.164252Z  INFO q_api_server: 🔐 Loaded 0 password hashes from persistent storage
+2025-11-12T06:38:21.164270Z  INFO q_api_server: 💧 Loaded 0 liquidity pools from persistent storage
+2025-11-12T06:38:21.164337Z  INFO q_api_server: 💳 Found 0 historical transactions in storage (not added to mempool)
+🚀🚀🚀 SMARTCONTRACT ECOSYSTEM INITIALIZATION STARTED 🚀🚀🚀
+Storage engine present: true
+📚📚📚 ABOUT TO LOAD CONTRACT TEMPLATES 📚📚📚
+✅✅✅ CONTRACT TEMPLATES LOADED SUCCESSFULLY ✅✅✅
+💾💾💾 STORAGE ENGINE IS AVAILABLE - LOADING CONTRACTS 💾💾💾
+✅✅✅ CONTRACT LOADING COMPLETED SUCCESSFULLY ✅✅✅
+🎉🎉🎉 SMARTCONTRACT ECOSYSTEM FULLY INITIALIZED 🎉🎉🎉
+2025-11-12T06:38:21.857402Z  INFO q_api_server: 🏦 Quillon Bank initialized - CDP and quantum banking ready
+2025-11-12T06:38:21.857432Z  INFO q_api_server: 🔐 Initializing AEGIS-QL post-quantum authentication...
+2025-11-12T06:38:21.857454Z  WARN q_api_server: ⚠️  SECURITY WARNING: Using embedded development AEGIS key!
+2025-11-12T06:38:21.857460Z  WARN q_api_server:    For production, set QUILLON_FOUNDER_AEGIS_PUBKEY environment variable
+2025-11-12T06:38:21.857585Z  WARN q_api_server: ⚠️  Founder wallet mismatch - check AEGIS key configuration
+2025-11-12T06:38:21.857596Z  INFO q_api_server: ✅ AEGIS-QL authentication initialized (post-quantum secure)
+2025-11-12T06:38:21.857620Z  INFO q_api_server: 💰 No persisted CollateralVault found, creating new vault
+2025-11-12T06:38:21.857627Z  INFO q_api_server: 💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready
+2025-11-12T06:38:21.857652Z  INFO q_api_server: 🏦 Loaded 0 loan applications from persistent storage
+2025-11-12T06:38:21.857664Z  INFO q_api_server: ✅ v0.9.99-beta: Adaptive Block Rewards initialized
+2025-11-12T06:38:21.857670Z  INFO q_api_server:    📊 Emission: 82,031 QUG/year (throughput-independent)
+2025-11-12T06:38:21.857676Z  INFO q_api_server:    ⏰ Halving: Every 4 years (time-based)
+2025-11-12T06:38:21.857682Z  INFO q_api_server:    🎯 Supply cap: 21,000,000 QUG
+2025-11-12T06:38:21.857688Z  INFO q_api_server:    📅 Timeline: 256 years to full emission
+2025-11-12T06:38:21.857693Z  INFO q_api_server:    🔀 Migration: Block 200,000 activation
+2025-11-12T06:38:21.857712Z  INFO q_network::connection_manager: 🚀 PHASE 2: Connection manager started with health monitoring and parallel processing
+2025-11-12T06:38:21.857724Z  INFO q_api_server: ✅ Connection manager initialized for DNS-Phantom → Connection bridging
+2025-11-12T06:38:21.857736Z  INFO q_api_server: ✅ ZK-STARK System initialized - Zero-knowledge proofs enabled
+2025-11-12T06:38:21.857744Z  INFO q_api_server: ✅ ZK-SNARK System initialized - Groth16/PLONK proofs enabled
+2025-11-12T06:38:21.858196Z  INFO q_api_server: ✅ SIMD Crypto Engine initialized - Vectorized cryptography enabled
+🚀 Initializing io_uring adapter with dedicated thread pool
+✅ io_uring adapter initialized successfully
+2025-11-12T06:38:21.858250Z  INFO q_api_server: ✅ Kernel I/O Engine initialized with dedicated thread pool
+2025-11-12T06:38:21.858256Z  INFO q_api_server: 🔓 Initializing LOCK-FREE Block Producer Pool (v0.9.92-beta DEADLOCK FIX)
+2025-11-12T06:38:21.858262Z  INFO q_api_server::lockfree_producer: 🚀 Initializing LOCK-FREE Parallel Block Producer Pool with 8 producers (LOADING FROM STORAGE)
+2025-11-12T06:38:21.858269Z  INFO q_api_server::lockfree_producer:    ✅ v0.9.99-beta: Adaptive block rewards ENABLED
+2025-11-12T06:38:21.858288Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #0 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858297Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #0 spawned and synced from storage
+2025-11-12T06:38:21.858322Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #1 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858336Z  INFO q_api_server::lockfree_producer: ✅ Producer #1: Creating with ADAPTIVE rewards (v0.9.99-beta)
+📡 io_uring worker thread started
+2025-11-12T06:38:21.858347Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=1)...
+2025-11-12T06:38:21.858380Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858392Z  INFO q_api_server::lockfree_producer: ✅ Producer #1 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858313Z  INFO q_api_server::lockfree_producer: ✅ Producer #0: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858410Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=0)...
+2025-11-12T06:38:21.858424Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858333Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #1 spawned and synced from storage
+2025-11-12T06:38:21.858443Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #2 spawned and synced from storage
+2025-11-12T06:38:21.858451Z  INFO q_api_server::lockfree_producer: ✅ Producer #0 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858464Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #2 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858466Z  INFO q_api_server::lockfree_producer: ✅ Producer #2: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858468Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=2)...
+2025-11-12T06:38:21.858476Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858471Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #3 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858477Z  INFO q_api_server::lockfree_producer: ✅ Producer #2 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858481Z  INFO q_api_server::lockfree_producer: ✅ Producer #3: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858461Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #3 spawned and synced from storage
+2025-11-12T06:38:21.858494Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #4 spawned and synced from storage
+2025-11-12T06:38:21.858501Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #5 spawned and synced from storage
+2025-11-12T06:38:21.858508Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #6 spawned and synced from storage
+2025-11-12T06:38:21.858515Z  INFO q_api_server::lockfree_producer:   ✅ Lock-free producer #7 spawned and synced from storage
+2025-11-12T06:38:21.858522Z  INFO q_api_server::lockfree_producer: ✅ LOCK-FREE producer pool initialized with storage sync
+2025-11-12T06:38:21.858528Z  INFO q_api_server: ✅ LOCK-FREE Block Production initialized with 8 producers
+2025-11-12T06:38:21.858531Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #4 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858712Z  INFO q_api_server::lockfree_producer: ✅ Producer #4: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858736Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=4)...
+2025-11-12T06:38:21.858551Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #6 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858752Z  INFO q_api_server::lockfree_producer: ✅ Producer #6: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858754Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=6)...
+2025-11-12T06:38:21.858763Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858764Z  INFO q_api_server::lockfree_producer: ✅ Producer #6 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858696Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=3)...
+2025-11-12T06:38:21.858770Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858772Z  INFO q_api_server::lockfree_producer: ✅ Producer #4 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858782Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858785Z  INFO q_api_server::lockfree_producer: ✅ Producer #3 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858707Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-11-12T06:38:21.858792Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-11-12T06:38:21.858534Z  INFO q_api_server:    🔓 ZERO RwLocks - Channel-based architecture
+2025-11-12T06:38:21.858799Z  INFO q_api_server:    ⚡ ZERO lock contention - Message passing only
+2025-11-12T06:38:21.858801Z  INFO q_api_server:    🛡️  ZERO deadlock risk - No shared mutable state
+2025-11-12T06:38:21.858802Z  INFO q_api_server:    ⚡ Exciting visualization: Multiple blocks will appear simultaneously in different lanes!
+2025-11-12T06:38:21.858804Z  INFO q_api_server::lockfree_producer: 🔄 [LOCK-FREE SYNC] Synchronizing all 8 producers with blockchain state...
+2025-11-12T06:38:21.858730Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:21.858817Z  INFO q_api_server::lockfree_producer: 📝 [LOCK-FREE SYNC] No blocks in storage yet - producers at genesis
+2025-11-12T06:38:21.858742Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #7 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858845Z  INFO q_api_server: 🎯 Initialized DAG-Knight consensus engine (f=1, min_nodes=3)
+2025-11-12T06:38:21.858548Z  INFO q_api_server::lockfree_producer: 🚀 Lock-free producer #5 task starting with storage (restart count: 0)
+2025-11-12T06:38:21.858851Z  INFO q_api_server::lockfree_producer: ✅ Producer #7: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858870Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=7)...
+2025-11-12T06:38:21.858882Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858884Z  INFO q_api_server::lockfree_producer: ✅ Producer #7 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.858862Z  INFO q_api_server::lockfree_producer: ✅ Producer #5: Creating with ADAPTIVE rewards (v0.9.99-beta)
+2025-11-12T06:38:21.858906Z  INFO q_api_server::block_producer: 📂 Loading blockchain state from storage for producer (validator_index=5)...
+2025-11-12T06:38:21.858905Z  INFO q_api_server: 📊 Peer count tracking enabled - atomic counter initialized
+2025-11-12T06:38:21.858909Z  INFO q_api_server: 📡 libp2p peer info cached in AppState for bootstrap discovery
+2025-11-12T06:38:21.858911Z  INFO q_api_server: 🤖 Initializing Distributed AI Coordinator...
+2025-11-12T06:38:21.858914Z  INFO q_network::distributed_ai_coordinator: 🤖 Creating Distributed AI Coordinator for node a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:38:21.858915Z  INFO q_api_server::block_producer: 📝 No existing blockchain state found - starting from genesis
+2025-11-12T06:38:21.858917Z  INFO q_api_server::lockfree_producer: ✅ Producer #5 initialized with storage (ZERO LOCKS, BOUNDED CHANNEL)
+2025-11-12T06:38:21.896521Z  INFO q_network::distributed_ai_coordinator: 💻 Using CPU with 32 cores, 30GB RAM
+2025-11-12T06:38:21.896733Z  INFO q_network::distributed_ai_coordinator: ⚖️  Load balancing: max 2 concurrent requests based on hardware
+2025-11-12T06:38:21.896780Z  INFO q_network::distributed_ai: 🤖 Initializing Distributed AI Gossipsub topics
+2025-11-12T06:38:21.896810Z  INFO q_api_server: ✅ Distributed AI Coordinator initialized
+2025-11-12T06:38:21.896842Z  INFO q_api_server:    Node ID: a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:38:21.896850Z  INFO q_api_server:    Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:21.896856Z  INFO q_api_server: 🔌 Setting network channel on distributed AI coordinator...
+2025-11-12T06:38:21.896862Z  INFO q_api_server: ✅ Network TX channel set on coordinator (direct libp2p integration)
+2025-11-12T06:38:21.896868Z  INFO q_api_server: 📡 Subscribing to distributed AI gossipsub topics...
+2025-11-12T06:38:21.896878Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/inference-request/v1
+2025-11-12T06:38:21.896907Z  INFO q_api_server: ✅ Subscribed to AI topic: qnk/ai/inference-request/v1
+2025-11-12T06:38:21.896915Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/layer-output/v1
+2025-11-12T06:38:21.896921Z  INFO q_api_server: ✅ Subscribed to AI topic: qnk/ai/layer-output/v1
+2025-11-12T06:38:21.896927Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/node-capability/v1
+2025-11-12T06:38:21.896933Z  INFO q_api_server: ✅ Subscribed to AI topic: qnk/ai/node-capability/v1
+2025-11-12T06:38:21.896938Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/coordinator/v1
+2025-11-12T06:38:21.896944Z  INFO q_api_server: ✅ Subscribed to AI topic: qnk/ai/coordinator/v1
+2025-11-12T06:38:21.897009Z  INFO q_network::unified_network_manager: 📢 Subscribed to gossipsub topic: qnk/ai/heartbeat/v1
+2025-11-12T06:38:21.897011Z  INFO q_api_server: ✅ Subscribed to AI topic: qnk/ai/heartbeat/v1
+2025-11-12T06:38:21.897016Z  INFO q_api_server: ✅ AI gossipsub topic subscriptions complete
+2025-11-12T06:38:21.897023Z  INFO q_api_server: ✅ Periodic capability announcement task started
+2025-11-12T06:38:21.897025Z  INFO q_api_server: ✅ Distributed AI Coordinator fully configured and operational
+2025-11-12T06:38:21.897026Z  INFO q_api_server:    Ready for horizontal inference scaling across network
+2025-11-12T06:38:21.897028Z  INFO q_api_server: 🎯 Initializing AI Model Manager (lazy loading)...
+2025-11-12T06:38:21.897045Z  INFO q_api_server: 💓 Starting periodic capability announcement task...
+2025-11-12T06:38:21.897051Z  INFO q_api_server:    Interval: 30 seconds
+2025-11-12T06:38:21.897121Z  INFO q_api_server: ✅ AI Model Manager initialized
+2025-11-12T06:38:21.897126Z  INFO q_api_server:    Models directory: ./gui/quantum-wallet/dist-final/downloads
+2025-11-12T06:38:21.897128Z  INFO q_api_server:    Supported models:
+2025-11-12T06:38:21.897130Z  INFO q_api_server:       • Mistral-7B-Instruct-v0.3 (4.3 GB)
+2025-11-12T06:38:21.897131Z  INFO q_api_server:       • Mistral-Small-3.2-24B-Instruct (14 GB)
+2025-11-12T06:38:21.897132Z  INFO q_api_server:    Features:
+2025-11-12T06:38:21.897133Z  INFO q_api_server:       • Lazy loading (models loaded on-demand)
+2025-11-12T06:38:21.897135Z  INFO q_api_server:       • Automatic model switching
+2025-11-12T06:38:21.897136Z  INFO q_api_server:       • Memory efficient (peak RAM = largest model)
+2025-11-12T06:38:21.897137Z  INFO q_api_server:       • HTTP download from nginx if not cached
+2025-11-12T06:38:21.897139Z  INFO q_api_server: 📊 Atomic peer count integrated into AppState
+2025-11-12T06:38:21.897140Z  INFO q_api_server: 💱 Initializing DEX Components (Token Registry, Price History, Oracle)...
+2025-11-12T06:38:21.897143Z  INFO q_api_server::dex_initialization: 🌊 Initializing DEX components...
+2025-11-12T06:38:21.897144Z  INFO q_api_server::dex_initialization:   → Creating token registry...
+2025-11-12T06:38:21.897193Z  INFO q_api_server::dex_initialization:   → Creating price history manager...
+2025-11-12T06:38:21.897213Z  INFO q_api_server::dex_initialization:   → Creating DEX manager...
+2025-11-12T06:38:21.898110Z  INFO q_api_server: 📢 Announcing capability to network (periodic)...
+2025-11-12T06:38:21.898113Z  INFO q_network::distributed_ai_coordinator: 🔊 ========== ANNOUNCING NODE CAPABILITY TO NETWORK ==========
+2025-11-12T06:38:21.898115Z  INFO q_network::distributed_ai_coordinator: 🆔 Node ID: a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:38:21.898117Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:21.898119Z  INFO q_network::distributed_ai_coordinator: 💪 Capability: CPU { cores: 32, ram_gb: 30 }
+2025-11-12T06:38:21.898121Z  INFO q_network::distributed_ai_coordinator: 📊 Estimated layer capacity: 7 layers
+2025-11-12T06:38:21.898123Z  INFO q_network::distributed_ai_coordinator: 🏆 Capability score: 350
+2025-11-12T06:38:21.898126Z  INFO q_network::distributed_ai_coordinator: 📤 Sending capability announcement to network with retry logic
+2025-11-12T06:38:21.898129Z  INFO q_network::distributed_ai_coordinator: 📡 Topic: qnk/ai/node-capability/v1
+2025-11-12T06:38:21.898131Z  INFO q_network::distributed_ai_coordinator: 🔢 Sequence number: 0
+2025-11-12T06:38:21.898132Z  INFO q_network::distributed_ai_coordinator: ⚡ Priority: Low
+2025-11-12T06:38:21.898138Z  INFO q_network::distributed_ai_coordinator: ✅ Capability announcement sent successfully to network TX channel
+2025-11-12T06:38:21.898140Z  INFO q_network::distributed_ai_coordinator: 🔚 ========== CAPABILITY ANNOUNCEMENT COMPLETE ==========
+
+2025-11-12T06:38:21.898141Z  INFO q_api_server: ✅ Capability announced successfully
+2025-11-12T06:38:26.858932Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:31.859704Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:36.859485Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:41.859360Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:46.859414Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:51.858954Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:38:51.858960Z  INFO q_network::connection_manager: 🏥 PHASE 2: Starting health check for active connections
+2025-11-12T06:38:51.858966Z  INFO q_network::connection_manager: 🏥 PHASE 2: Health check complete - 0/0 connections healthy
+2025-11-12T06:38:51.898013Z  INFO q_api_server: 📢 Announcing capability to network (periodic)...
+2025-11-12T06:38:51.898017Z  INFO q_network::distributed_ai_coordinator: 🔊 ========== ANNOUNCING NODE CAPABILITY TO NETWORK ==========
+2025-11-12T06:38:51.898018Z  INFO q_network::distributed_ai_coordinator: 🆔 Node ID: a4bd06e8bbe79819d3944d1d5eb107facad469ea8629a4be251bf69975bef15c
+2025-11-12T06:38:51.898020Z  INFO q_network::distributed_ai_coordinator: 🌐 Peer ID: 12D3KooWKANMv2UL3Sg1t9H49ChTY6xcyMuUsomiDAKFZNNnfqbR
+2025-11-12T06:38:51.898022Z  INFO q_network::distributed_ai_coordinator: 💪 Capability: CPU { cores: 32, ram_gb: 30 }
+2025-11-12T06:38:51.898024Z  INFO q_network::distributed_ai_coordinator: 📊 Estimated layer capacity: 7 layers
+2025-11-12T06:38:51.898025Z  INFO q_network::distributed_ai_coordinator: 🏆 Capability score: 350
+2025-11-12T06:38:51.898029Z  INFO q_network::distributed_ai_coordinator: 📤 Sending capability announcement to network with retry logic
+2025-11-12T06:38:51.898031Z  INFO q_network::distributed_ai_coordinator: 📡 Topic: qnk/ai/node-capability/v1
+2025-11-12T06:38:51.898032Z  INFO q_network::distributed_ai_coordinator: 🔢 Sequence number: 1
+2025-11-12T06:38:51.898034Z  INFO q_network::distributed_ai_coordinator: ⚡ Priority: Low
+2025-11-12T06:38:51.898037Z  INFO q_network::distributed_ai_coordinator: ✅ Capability announcement sent successfully to network TX channel
+2025-11-12T06:38:51.898039Z  INFO q_network::distributed_ai_coordinator: 🔚 ========== CAPABILITY ANNOUNCEMENT COMPLETE ==========
+
+2025-11-12T06:38:51.898040Z  INFO q_api_server: ✅ Capability announced successfully
+2025-11-12T06:38:56.859358Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:01.859242Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:06.859220Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:11.859067Z DEBUG q_network::connection_manager: 🔍 No new peers to process
+2025-11-12T06:39:16.859234Z DEBUG q_network::connection_manager: 🔍 No new peers to process

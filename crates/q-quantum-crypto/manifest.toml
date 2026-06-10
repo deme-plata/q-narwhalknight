@@ -1,0 +1,100 @@
+[plugin]
+name = "Quantum Cryptography"
+id = "quantum-crypto"
+version = "1.0.0"
+description = "Enhanced quantum cryptography plugin with QKD protocols and P2P quantum-secured communication"
+author = "Orobit Research Labs"
+category = "cryptography"
+tags = ["quantum", "cryptography", "qkd", "security", "p2p", "consensus"]
+
+[pricing]
+model = "free"
+base_price = 0
+currency = "ORB"
+
+[permissions]
+storage_persistent = true
+storage_temporary = true
+network_p2p = true
+network_tor = true
+blockchain_read = true
+blockchain_write = false
+consensus_participate = true
+ai_inference = false
+quantum_hardware = true
+crypto_operations = true
+
+[resource_limits]
+max_memory_mb = 512
+max_cpu_cores = 4
+max_storage_mb = 1024
+max_network_connections = 100
+timeout_seconds = 300
+
+[features]
+qkd_protocols = ["BB84", "E91", "CV-QKD", "MDI-QKD"]
+p2p_encryption = true
+consensus_enhancement = true
+peer_authentication = true
+parallel_processing = true
+max_concurrent_sessions = 100
+key_generation_rate = 1000
+security_level = 128
+finite_key_analysis = true
+composable_security = true
+quantum_hardware_available = false
+hardware_entropy_source = false
+tor_integration = true
+anonymous_qkd = true
+
+[api]
+version = "1.0"
+base_path = "/api/plugins/quantum-crypto"
+
+[[api.endpoints]]
+method = "POST"
+path = "/initiate-qkd"
+description = "Initiate QKD session with peer"
+requires_premium = false
+
+[[api.endpoints]]
+method = "POST"
+path = "/encrypt-p2p-message"
+description = "Encrypt P2P message using quantum keys"
+requires_premium = false
+
+[[api.endpoints]]
+method = "POST"
+path = "/authenticate-peer"
+description = "Authenticate peer using quantum protocols"
+requires_premium = false
+
+[[api.endpoints]]
+method = "GET"
+path = "/status"
+description = "Get plugin status and quantum key statistics"
+requires_premium = false
+
+[frontend]
+icon = "🔬"
+color = "#059669"
+category_display = "Cryptography & Security"
+short_description = "Advanced quantum cryptography with QKD protocols"
+screenshots = []
+demo_available = true
+compatibility = ["web", "mobile"]
+
+[frontend.ui_components]
+settings_panel = true
+status_dashboard = true
+key_management = true
+peer_list = true
+
+[metadata]
+verified = true
+license = "MIT"
+repository = "https://github.com/orobit/quantum-crypto-plugin"
+documentation = "https://docs.orobit.com/plugins/quantum-crypto"
+support_email = "support@orobit.com"
+quantum_secure = true
+peer_reviewed = true

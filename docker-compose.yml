@@ -1,0 +1,37 @@
+version: '3.8'
+
+# Q-NarwhalKnight mainnet-genesis node
+# Run:  docker compose up -d
+# Logs: docker compose logs -f
+# Stop: docker compose down   (data is preserved in the volume)
+
+services:
+  q-node:
+    build: .
+    image: quillon/q-node:latest
+    container_name: q-node
+    restart: unless-stopped
+    ports:
+      - "8080:8080"    # REST API
+      - "9001:9001"    # P2P libp2p
+      - "9002:9002"    # WebSocket (browser P2P)
+    volumes:
+      - qnk-data:/data
+    environment:
+      - Q_NETWORK_ID=mainnet-genesis
+      - RUST_LOG=info
+      - ROCKSDB_BLOCK_CACHE_MB=512
+      - Q_AUTO_UPDATE=1
+      # Optional: set your wallet address for mining rewards
+      # - Q_WALLET_ADDRESS=your_wallet_address_here
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/v1/status"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
+volumes:
+  qnk-data:
+    # Stores: binary (auto-updated), blockchain data, P2P identity keys
+    # ~50GB+ needed for full chain sync

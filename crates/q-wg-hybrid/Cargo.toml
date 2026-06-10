@@ -1,0 +1,47 @@
+[package]
+name = "q-wg-hybrid"
+version.workspace = true
+edition = "2021"
+description = "Rosenpass-style hybrid PQ session-key augmentation for WireGuard"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+
+# Quillon-mesh WireGuard Layer 1 — see CLAUDE.md task #47.
+#
+# WireGuard's wire protocol is fixed (Curve25519 + ChaCha20-Poly1305 + BLAKE2s)
+# and we don't try to replace it. Instead, this crate runs a sidecar that:
+#
+#   1. Generates a Kyber-1024 keypair on startup (saved to disk).
+#   2. Pulls the peer's Kyber-1024 public key out-of-band (today: via the
+#      Quillon-mesh gossipsub topic; the chain has Sybil resistance via
+#      stake; the Kyber pubkey is just one more field in the operator's
+#      announcement).
+#   3. Every epoch: encapsulates a fresh 256-bit secret against the peer's
+#      Kyber pubkey, derives a new WireGuard PSK by XORing the encapsulation
+#      result with the previous PSK, applies the new PSK via the WireGuard
+#      configuration interface, and pushes the ciphertext to the peer over
+#      the same out-of-band channel so they can derive the same PSK on their
+#      end.
+#
+# Result: a session-key attacker now needs to break BOTH Curve25519 (for the
+# WireGuard handshake) AND Kyber-1024 (for the PSK encapsulation). Wire bytes
+# observed by an ISP look identical to vanilla WireGuard — the PSK is opaque
+# to wire observers.
+#
+# What this crate does NOT do (scope is intentionally narrow):
+#   - The systemd unit / OS-level daemon binary. That's downstream wiring.
+#   - The gossipsub topic for Kyber pubkey discovery. Lives in q-network.
+#   - The `wg syncconf` shell-out. Stubbed behind a `WireGuardBackend` trait
+#     so the library can be unit-tested without a real WireGuard interface;
+#     the Linux backend is a thin wrapper around the `wg` CLI.
+
+[dependencies]
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tracing = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"

@@ -1,0 +1,15 @@
+[package]
+name = "q-sqisign"
+version.workspace = true
+edition.workspace = true
+description = "Safe Rust wrapper for SQIsign post-quantum isogeny-based signatures"
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+q-sqisign-sys = { path = "../q-sqisign-sys" }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

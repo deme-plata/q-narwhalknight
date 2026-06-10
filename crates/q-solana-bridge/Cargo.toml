@@ -1,0 +1,38 @@
+[package]
+name = "q-solana-bridge"
+version = "0.3.0"
+edition = "2021"
+authors = ["Server Beta <server-beta@q-narwhalknight.dev>"]
+description = "🌞⚡ Solana Tor-Only Light-Client - Compressed proofs for SPL token verification"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "socks"] }
+blake3 = "1.5"
+bs58 = "0.5"
+hex = "0.4"
+base64 = "0.21"
+tracing = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+
+# Solana-specific dependencies
+solana-client = "1.18"
+solana-sdk = "1.18"
+solana-program = "1.18"
+solana-rpc-client = "1.18"
+spl-token = "4.0"
+
+# Q-NarwhalKnight internal dependencies
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+q-tor-client = { path = "../q-tor-client" }
+
+[features]
+default = ["light-client", "proof-production", "spl-verification"]
+light-client = []
+proof-production = []
+spl-verification = []

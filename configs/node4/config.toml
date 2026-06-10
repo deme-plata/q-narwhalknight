@@ -1,0 +1,36 @@
+# Node 2 Configuration
+[node]
+name = "node4"
+id = "12D3KooWNode4Example"
+role = "validator"
+is_bootstrap = false
+
+[network]
+listen_address = "0.0.0.0"
+p2p_port = 9002
+api_port = 8082
+metrics_port = 9092
+
+[consensus]
+algorithm = "DAG-Knight"
+round_timeout = "2.5s"
+block_time = "500ms"
+max_transactions_per_block = 1000
+
+[discovery]
+enable_mdns = true
+enable_dht = true
+bootstrap_peers = ["/ip4/172.20.0.11/tcp/9001"]
+
+[api]
+enable_cors = true
+max_request_size = "10MB"
+websocket_enabled = true
+sse_enabled = true
+
+[storage]
+database_path = "/data/node4"
+enable_encryption = false
+
+[logging]
+level = "info"

@@ -1,0 +1,60 @@
+[package]
+name = "q-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# Using RocksDB storage instead of SQLite
+q-storage = { path = "../q-storage" }
+async-trait = { workspace = true }
+
+# For mnemonic phrase generation
+bip39 = "2.0"
+pbkdf2 = "0.12"
+hmac = "0.12"
+
+# Post-quantum cryptography
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.8"
+pqcrypto-sphincsplus = "0.6"
+pqcrypto-traits = "0.3"
+
+# Encryption
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+
+# Automatic key management (v2.3.5-beta)
+argon2 = "0.5"
+rand_chacha = "0.3"
+bincode = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+
+# Classical key exchange for true hybrid encryption
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+hkdf = "0.12"
+
+[features]
+default = []
+# ✨ v1.0.58-beta: Enable SQIsign compact signatures (204 bytes vs 49KB SPHINCS+)
+advanced-crypto = ["q-crypto-advanced"]
+
+[dev-dependencies]
+proptest = { workspace = true }

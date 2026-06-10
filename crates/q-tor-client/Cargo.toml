@@ -1,0 +1,73 @@
+[package]
+name = "q-tor-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Core dependencies
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Tor client via SOCKS proxy
+tokio-socks = { workspace = true }
+
+# Arti Tor client dependencies - upgraded to 0.37.0 (Arti 1.8.0 release)
+# Implements Proposal 368: usage-based timeouts on strongly isolated circuits
+# static-sqlite feature enables bundled SQLite for Windows cross-compilation
+# v10.1.9: Use rustls instead of native-tls to avoid dynamic OpenSSL dependency
+arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"] }
+# arti-hyper removed - causes version conflict and not used (dedicated_circuits uses arti-client directly)
+tor-rtcompat = { version = "0.37.0", default-features = false, features = ["tokio", "rustls"] }
+tor-hsservice = "0.37.0"
+url = "2.5"
+
+# Q-NarwhalKnight types
+q-types = { path = "../q-types" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Random generation
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+# JSON serialization
+serde_json = { workspace = true }
+
+# Networking
+libp2p = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+uuid = { workspace = true }
+
+# Cryptography for ZK-STARK and SQIsign
+sha3 = { workspace = true }
+getrandom = "0.2"
+
+# v3.7.4: Post-quantum Dilithium5 for circuit authentication (NIST Level 5)
+pqcrypto-dilithium = { workspace = true }
+pqcrypto-traits = { workspace = true }
+
+# Prometheus metrics
+prometheus = { workspace = true }
+
+# v10.0.9: TOML parsing for Arti config (set memory quota)
+toml = { workspace = true }
+
+# Binary serialization for caching
+bincode = "1.3"
+
+# v3.4.2: Base32 encoding for Tor v3 onion addresses
+base32 = "0.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = { workspace = true }
+tempfile = "3.10"

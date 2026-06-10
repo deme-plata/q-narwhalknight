@@ -1,0 +1,60 @@
+[package]
+name = "q-dag-knight"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+q-narwhal-core = { path = "../q-narwhal-core" }
+# ✨ v1.0.58-beta: Advanced cryptographic primitives (IACR ePrint papers)
+q-crypto-advanced = { path = "../q-crypto-advanced", optional = true }
+q-lattice-vrf = { path = "../q-lattice-vrf" }
+q-quantum-rng = { path = "../q-quantum-rng" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Serialization  
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Collections and utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Cryptography (Phase 0: Classical)
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+
+# VDF for quantum beacon
+vdf = { workspace = true }
+rand = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async synchronization
+async-trait = { workspace = true }
+
+# Hex encoding for debug output
+hex = { workspace = true }
+
+[features]
+# v1.0.60-beta: Genus-2 VDF enabled by default for post-quantum anchor election
+default = ["advanced-crypto"]
+# ✨ v1.0.58-beta: Enable Genus-2 VDF for quantum-resistant anchor election
+advanced-crypto = ["q-crypto-advanced"]
+# v10.0.0: SIMD-accelerated bitfield DAG operations (Phase 2 optimization)
+simd-dag = []
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = "0.4"

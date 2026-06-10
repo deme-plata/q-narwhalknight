@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quillon Miner Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0c0c0c 0%, #1a1a2e 50%, #16213e 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+        
+        .header {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 1rem 2rem;
+            border-bottom: 2px solid #00ffff;
+            backdrop-filter: blur(10px);
+        }
+        
+        .header h1 {
+            color: #00ffff;
+            font-size: 2rem;
+            text-shadow: 0 0 10px #00ffff;
+        }
+        
+        .subtitle {
+            color: #888;
+            font-size: 0.9rem;
+            margin-top: 0.2rem;
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            border-radius: 12px;
+            padding: 1.5rem;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+        
+        .card:hover {
+            border-color: #00ffff;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.3);
+        }
+        
+        .card-title {
+            color: #00ffff;
+            font-size: 1.3rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 0.8rem 0;
+            padding: 0.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+        }
+        
+        .metric-value {
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        
+        .metric-value.primary { color: #00ff88; }
+        .metric-value.secondary { color: #ffaa00; }
+        .metric-value.warning { color: #ff6b6b; }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0.5rem 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #00ffff, #00ff88);
+            transition: width 0.3s ease;
+        }
+        
+        .device-list {
+            list-style: none;
+        }
+        
+        .device-item {
+            background: rgba(0, 0, 0, 0.2);
+            margin: 0.5rem 0;
+            padding: 1rem;
+            border-radius: 8px;
+            border-left: 4px solid #00ffff;
+        }
+        
+        .device-name {
+            font-weight: bold;
+            color: #00ffff;
+        }
+        
+        .device-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+        }
+        
+        .status-online { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+        .status-offline { background: #ff6b6b; }
+        .status-connecting { background: #ffaa00; animation: pulse 1s infinite; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .chart-container {
+            height: 200px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+            border-top: 1px solid rgba(0, 255, 255, 0.2);
+        }
+        
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+                padding: 1rem;
+            }
+            
+            .header {
+                padding: 1rem;
+            }
+            
+            .header h1 {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>⚛️ Quillon Miner</h1>
+        <div class="subtitle">Quantum-Enhanced Anonymous Consensus Mining</div>
+    </div>
+
+    <div class="dashboard">
+        <!-- Mining Overview -->
+        <div class="card">
+            <div class="card-title">
+                ⛏️ Mining Overview
+            </div>
+            <div class="metric">
+                <span>Total Hash Rate</span>
+                <span class="metric-value primary" id="total-hashrate">0.00 GH/s</span>
+            </div>
+            <div class="metric">
+                <span>Pool Status</span>
+                <span class="metric-value" id="pool-status">
+                    <span class="status-indicator status-connecting"></span>Connecting...
+                </span>
+            </div>
+            <div class="metric">
+                <span>Accepted Shares</span>
+                <span class="metric-value primary" id="accepted-shares">0</span>
+            </div>
+            <div class="metric">
+                <span>Rejected Shares</span>
+                <span class="metric-value warning" id="rejected-shares">0</span>
+            </div>
+            <div class="metric">
+                <span>Efficiency</span>
+                <span class="metric-value secondary" id="efficiency">0.00%</span>
+            </div>
+        </div>
+
+        <!-- Hardware Status -->
+        <div class="card">
+            <div class="card-title">
+                🔧 Hardware Status
+            </div>
+            <ul class="device-list" id="device-list">
+                <li class="device-item">
+                    <div class="device-name">🔄 Detecting devices...</div>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Performance Metrics -->
+        <div class="card">
+            <div class="card-title">
+                📊 Performance
+            </div>
+            <div class="metric">
+                <span>Average Temperature</span>
+                <span class="metric-value secondary" id="avg-temperature">0°C</span>
+            </div>
+            <div class="metric">
+                <span>Total Power Usage</span>
+                <span class="metric-value" id="total-power">0W</span>
+            </div>
+            <div class="metric">
+                <span>Power Efficiency</span>
+                <span class="metric-value primary" id="power-efficiency">0.0 MH/W</span>
+            </div>
+            <div class="metric">
+                <span>Uptime</span>
+                <span class="metric-value" id="uptime">0m 0s</span>
+            </div>
+        </div>
+
+        <!-- Network Status -->
+        <div class="card">
+            <div class="card-title">
+                🌐 Network
+            </div>
+            <div class="metric">
+                <span>Pool Connection</span>
+                <span class="metric-value" id="pool-connection">
+                    <span class="status-indicator status-connecting"></span>Connecting
+                </span>
+            </div>
+            <div class="metric">
+                <span>Pool Latency</span>
+                <span class="metric-value secondary" id="pool-latency">0ms</span>
+            </div>
+            <div class="metric">
+                <span>Tor Status</span>
+                <span class="metric-value" id="tor-status">
+                    <span class="status-indicator status-online"></span>Active
+                </span>
+            </div>
+            <div class="metric">
+                <span>Connected Peers</span>
+                <span class="metric-value primary" id="connected-peers">0</span>
+            </div>
+        </div>
+
+        <!-- Hash Rate Chart -->
+        <div class="card" style="grid-column: span 2;">
+            <div class="card-title">
+                📈 Hash Rate History
+            </div>
+            <div class="chart-container">
+                <canvas id="hashrate-chart" width="800" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Earnings -->
+        <div class="card">
+            <div class="card-title">
+                💰 Earnings
+            </div>
+            <div class="metric">
+                <span>Estimated Daily</span>
+                <span class="metric-value primary" id="daily-earnings">0.0000 QUG</span>
+            </div>
+            <div class="metric">
+                <span>Estimated Monthly</span>
+                <span class="metric-value secondary" id="monthly-earnings">0.0000 QUG</span>
+            </div>
+            <div class="metric">
+                <span>Total Earned</span>
+                <span class="metric-value" id="total-earnings">0.0000 QUG</span>
+            </div>
+            <div class="metric">
+                <span>Last Payout</span>
+                <span class="metric-value" id="last-payout">Never</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>🌟 Quillon • Quantum-Enhanced Anonymous Consensus</p>
+        <p>⚛️ Powered by DAG-Knight + Tor + CUDA</p>
+    </div>
+
+    <script>
+        // WebSocket connection for real-time updates
+        const ws = new WebSocket(`ws://${window.location.host}/api/events`);
+        
+        // Hash rate history for chart
+        const hashRateHistory = [];
+        const maxHistoryPoints = 60; // 1 minute of data
+        
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            updateDashboard(data);
+        };
+        
+        ws.onopen = function() {
+            console.log('Connected to miner dashboard');
+            document.getElementById('pool-connection').innerHTML = 
+                '<span class="status-indicator status-online"></span>Connected';
+        };
+        
+        ws.onerror = function() {
+            console.log('Dashboard connection error');
+            document.getElementById('pool-connection').innerHTML = 
+                '<span class="status-indicator status-offline"></span>Disconnected';
+        };
+        
+        function updateDashboard(data) {
+            if (data.type === 'stats_update') {
+                // Update hash rate
+                const hashRateGH = (data.hash_rate / 1e9).toFixed(2);
+                document.getElementById('total-hashrate').textContent = `${hashRateGH} GH/s`;
+                
+                // Update temperature
+                document.getElementById('avg-temperature').textContent = `${data.temperature.toFixed(1)}°C`;
+                
+                // Update power
+                document.getElementById('total-power').textContent = `${data.power.toFixed(1)}W`;
+                
+                // Update efficiency
+                if (data.power > 0) {
+                    const efficiency = (data.hash_rate / 1e6 / data.power).toFixed(1);
+                    document.getElementById('power-efficiency').textContent = `${efficiency} MH/W`;
+                }
+                
+                // Update hash rate history
+                hashRateHistory.push({
+                    timestamp: new Date(data.timestamp),
+                    hashRate: data.hash_rate
+                });
+                
+                if (hashRateHistory.length > maxHistoryPoints) {
+                    hashRateHistory.shift();
+                }
+                
+                // Update chart
+                updateHashRateChart();
+            }
+        }
+        
+        function updateHashRateChart() {
+            const canvas = document.getElementById('hashrate-chart');
+            const ctx = canvas.getContext('2d');
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (hashRateHistory.length < 2) return;
+            
+            // Calculate scale
+            const maxHashRate = Math.max(...hashRateHistory.map(h => h.hashRate));
+            const minHashRate = Math.min(...hashRateHistory.map(h => h.hashRate));
+            const range = maxHashRate - minHashRate || 1;
+            
+            // Draw grid
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.1)';
+            ctx.lineWidth = 1;
+            
+            for (let i = 0; i <= 5; i++) {
+                const y = (canvas.height / 5) * i;
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+            
+            // Draw hash rate line
+            ctx.strokeStyle = '#00ffff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            hashRateHistory.forEach((point, index) => {
+                const x = (canvas.width / (maxHistoryPoints - 1)) * index;
+                const y = canvas.height - ((point.hashRate - minHashRate) / range) * canvas.height;
+                
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            
+            ctx.stroke();
+            
+            // Draw glow effect
+            ctx.shadowColor = '#00ffff';
+            ctx.shadowBlur = 10;
+            ctx.stroke();
+            ctx.shadowBlur = 0;
+        }
+        
+        // Simulate data updates for demo
+        function simulateData() {
+            const mockData = {
+                type: 'stats_update',
+                hash_rate: 2500000000 + (Math.random() - 0.5) * 500000000, // ~2.5 GH/s ± 250 MH/s
+                temperature: 65 + (Math.random() - 0.5) * 10, // 65°C ± 5°C
+                power: 125 + (Math.random() - 0.5) * 25, // 125W ± 12.5W
+                timestamp: new Date().toISOString()
+            };
+            
+            updateDashboard(mockData);
+        }
+        
+        // Start simulation if WebSocket fails
+        setTimeout(() => {
+            if (ws.readyState !== WebSocket.OPEN) {
+                console.log('Starting demo mode');
+                setInterval(simulateData, 1000);
+            }
+        }, 2000);
+        
+        // Initialize charts
+        window.addEventListener('load', () => {
+            updateHashRateChart();
+        });
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(data => {
+                    // Update device list
+                    updateDeviceList(data.devices || []);
+                    
+                    // Update other stats
+                    if (data.accepted_shares !== undefined) {
+                        document.getElementById('accepted-shares').textContent = data.accepted_shares;
+                    }
+                    if (data.rejected_shares !== undefined) {
+                        document.getElementById('rejected-shares').textContent = data.rejected_shares;
+                    }
+                    if (data.efficiency !== undefined) {
+                        document.getElementById('efficiency').textContent = (data.efficiency * 100).toFixed(2) + '%';
+                    }
+                })
+                .catch(console.error);
+        }, 30000);
+        
+        function updateDeviceList(devices) {
+            const deviceList = document.getElementById('device-list');
+            
+            if (devices.length === 0) {
+                deviceList.innerHTML = '<li class="device-item"><div class="device-name">🔄 No devices detected</div></li>';
+                return;
+            }
+            
+            deviceList.innerHTML = devices.map(device => `
+                <li class="device-item">
+                    <div class="device-name">
+                        ${getDeviceIcon(device.device_type)} ${device.device_id}
+                    </div>
+                    <div class="device-stats">
+                        <div>⚡ ${(device.hash_rate / 1e6).toFixed(1)} MH/s</div>
+                        <div>🌡️ ${device.temperature.toFixed(1)}°C</div>
+                        <div>🔋 ${device.power_usage.toFixed(1)}W</div>
+                        <div>📊 ${device.utilization.toFixed(1)}%</div>
+                    </div>
+                </li>
+            `).join('');
+        }
+        
+        function getDeviceIcon(deviceType) {
+            if (typeof deviceType === 'string') {
+                return deviceType === 'CPU' ? '💻' : '🚀';
+            } else if (typeof deviceType === 'object') {
+                if (deviceType.CUDA) return '🚀';
+                if (deviceType.OpenCL) return '⚡';
+                if (deviceType.Vulkan) return '🔥';
+            }
+            return '🔧';
+        }
+    </script>
+</body>
+</html>

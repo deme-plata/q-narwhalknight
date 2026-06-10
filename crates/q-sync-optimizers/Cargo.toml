@@ -1,0 +1,15 @@
+[package]
+name = "q-sync-optimizers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scientific/mathematical sync improvements toolkit for Q-NarwhalKnight turbo sync: Kalman BDP, Bayesian peer scoring, CUBIC AIMD, Little's law, info-theoretic chunk floor, Markov peer states, EWMV RTT, logistic failure prediction"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+rand = "0.8"
+
+[dev-dependencies]
+# Tests don't need anything extra; rand is in main deps for Beta sampling

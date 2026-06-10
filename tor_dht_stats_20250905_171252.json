@@ -1,0 +1,200 @@
+{
+  "network_summary": {
+    "nodes": 7,
+    "total_connections": 42,
+    "total_circuits": 31,
+    "messages_sent": 234,
+    "messages_received": 384,
+    "dht_records": 239,
+    "consensus_votes": 21,
+    "consensus_rounds": 3
+  },
+  "node_details": {
+    "alice": {
+      "node_id": "alice",
+      "peer_id": "bd34175da2659b23",
+      "onion_address": "alice.qnk.onion",
+      "port": 8001,
+      "connected_peers": 6,
+      "dht_records": 31,
+      "messages_sent": 46,
+      "messages_received": 53,
+      "consensus_votes": 3,
+      "tor_circuits": 5
+    },
+    "bob": {
+      "node_id": "bob",
+      "peer_id": "85049bfba2dcef3a",
+      "onion_address": "bob.qnk.onion",
+      "port": 8002,
+      "connected_peers": 6,
+      "dht_records": 30,
+      "messages_sent": 45,
+      "messages_received": 54,
+      "consensus_votes": 3,
+      "tor_circuits": 5
+    },
+    "charlie": {
+      "node_id": "charlie",
+      "peer_id": "9eb51e14564d7fe2",
+      "onion_address": "charlie.qnk.onion",
+      "port": 8003,
+      "connected_peers": 6,
+      "dht_records": 39,
+      "messages_sent": 33,
+      "messages_received": 51,
+      "consensus_votes": 3,
+      "tor_circuits": 5
+    },
+    "diana": {
+      "node_id": "diana",
+      "peer_id": "650d665d663f9591",
+      "onion_address": "diana.qnk.onion",
+      "port": 8004,
+      "connected_peers": 6,
+      "dht_records": 35,
+      "messages_sent": 28,
+      "messages_received": 56,
+      "consensus_votes": 3,
+      "tor_circuits": 5
+    },
+    "eve": {
+      "node_id": "eve",
+      "peer_id": "a43fd36fa9d090d7",
+      "onion_address": "eve.qnk.onion",
+      "port": 8005,
+      "connected_peers": 6,
+      "dht_records": 33,
+      "messages_sent": 28,
+      "messages_received": 56,
+      "consensus_votes": 3,
+      "tor_circuits": 5
+    },
+    "frank": {
+      "node_id": "frank",
+      "peer_id": "8c4a89e6a8736af2",
+      "onion_address": "frank.qnk.onion",
+      "port": 8006,
+      "connected_peers": 6,
+      "dht_records": 35,
+      "messages_sent": 27,
+      "messages_received": 57,
+      "consensus_votes": 3,
+      "tor_circuits": 3
+    },
+    "grace": {
+      "node_id": "grace",
+      "peer_id": "9d6dfbb3cb61fba6",
+      "onion_address": "grace.qnk.onion",
+      "port": 8007,
+      "connected_peers": 6,
+      "dht_records": 36,
+      "messages_sent": 27,
+      "messages_received": 57,
+      "consensus_votes": 3,
+      "tor_circuits": 3
+    }
+  },
+  "network_events": [
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 DHT Records: 33"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Tor Circuits: 5"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u2514\u2500 Messages: 28 sent, 56 received"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "  frank.qnk.onion"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Peer ID: 8c4a89e6a8736af2"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Connected Peers: 6"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 DHT Records: 35"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Tor Circuits: 3"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u2514\u2500 Messages: 27 sent, 57 received"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "  grace.qnk.onion"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Peer ID: 9d6dfbb3cb61fba6"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Connected Peers: 6"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 DHT Records: 36"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.344",
+      "node_id": "NETWORK",
+      "message": "    \u251c\u2500 Tor Circuits: 3"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.345",
+      "node_id": "NETWORK",
+      "message": "    \u2514\u2500 Messages: 27 sent, 57 received"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.346",
+      "node_id": "NETWORK",
+      "message": ""
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.346",
+      "node_id": "NETWORK",
+      "message": "\u26a1 PERFORMANCE METRICS:"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.346",
+      "node_id": "NETWORK",
+      "message": "  Average messages per node: 33.4"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.346",
+      "node_id": "NETWORK",
+      "message": "  Average DHT records per node: 34.1"
+    },
+    {
+      "timestamp": "2025-09-05 17:12:52.346",
+      "node_id": "NETWORK",
+      "message": "  Network connectivity: 100.0%"
+    }
+  ]
+}

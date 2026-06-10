@@ -1,0 +1,61 @@
+[package]
+name = "q-quantum-rng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+q-types = { path = "../q-types" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "rt-multi-thread"] }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+postcard = { workspace = true }
+
+# Cryptography and randomness
+rand = { workspace = true }
+rand_core = { workspace = true }
+sha3 = { workspace = true }
+ring = { workspace = true }
+
+# Quantum entropy analysis
+statrs = { workspace = true }  # Updated to 0.17.1 for rand 0.9 compatibility
+ndarray = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+tokio-util = "0.7"
+
+# Time utilities
+chrono = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio-test = "0.4"
+
+# Platform-specific dependencies
+# Hardware interfaces are Linux-only (require udev, hidapi for USB devices)
+# Only compiled when "hardware" feature is enabled (not needed for cross-compilation)
+[target.'cfg(target_os = "linux")'.dependencies]
+serialport = { version = "4.2", optional = true }
+hidapi = { version = "2.4", optional = true }
+udev = { version = "0.7", optional = true }
+
+[features]
+default = ["simulation"]
+simulation = []          # Use simulated QRNG for Phase 0/1
+hardware = ["serialport", "hidapi", "udev"]  # Enable actual QRNG hardware support (Linux only)
+entropy-analysis = []   # Enable quantum entropy quality analysis
