@@ -6009,6 +6009,32 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         }
     });
 
+    // v10.11.47: env-gated, one-time, throttled, READ-ONLY background backfill of the
+    // transfers index so OLD transfers (esp. on heavy-mining wallets whose sends are
+    // buried under tens of thousands of coinbase) surface in wallet history. Writes ONLY
+    // the additive cf_wallet_transfer_index — never balances/blocks/authoritative state.
+    // Enable with Q_BACKFILL_TRANSFER_INDEX=1; optionally Q_BACKFILL_BLOCKS=<N> (default
+    // 400000 ≈ recent history). Safe to leave the flag set — re-runs are idempotent.
+    if std::env::var("Q_BACKFILL_TRANSFER_INDEX").ok().as_deref() == Some("1") {
+        let storage = state.storage_engine.clone();
+        let height_atomic = state.current_height_atomic.clone();
+        let span = std::env::var("Q_BACKFILL_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(400_000);
+        tokio::spawn(async move {
+            // Let startup/sync settle before backfilling.
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let tip = height_atomic.load(std::sync::atomic::Ordering::Relaxed);
+            let from = tip.saturating_sub(span);
+            tracing::info!("[TRANSFER-BACKFILL] starting (throttled, read-only): blocks {}..={} (span {})", from, tip, span);
+            match storage.backfill_transfer_index_from_blocks(from, tip).await {
+                Ok((b, t)) => tracing::info!("[TRANSFER-BACKFILL] ✅ done: {} blocks, {} transfers indexed", b, t),
+                Err(e) => tracing::error!("[TRANSFER-BACKFILL] failed: {}", e),
+            }
+        });
+    }
+
     // v10.3.15: DAG→height key re-index (background, idempotent)
     // Copies 545K early-history blocks from qblock:dag:{N}:{proposer} to
     // qblock:height:{N} so get_qblocks_range() serves them to syncing nodes.
@@ -26105,13 +26131,39 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // one release in case a follow-up wants to merge its 3 unique
         // gauges (qnk_storage_queue_depth, qnk_storage_congested) into
         // NetworkMetrics; can be deleted in v10.9.28.
-        // v5.1.1: Deploy Admin Panel - master-wallet-only rolling deployment control
+        // v5.1.1: Deploy Admin Panel - rolling deployment control
+        // SECURITY (v10.11.52): The mutating deploy routes (verify/promote/
+        // rollback) previously relied ONLY on the in-handler `is_master_wallet`
+        // check, which string-matches the PUBLIC founder address from
+        // X-Wallet-Auth — so anyone who had ever seen an operator transaction
+        // could POST /promote or /rollback and trigger a production rolling
+        // deploy. Confirmed externally reachable (quillon.xyz returned 403, not
+        // 404, for an unauthenticated POST). These routes now go through the
+        // same AEGIS-QL post-quantum founder-signature middleware that already
+        // guards /admin/dev-fee/config: the request must carry X-Wallet-Address
+        // + X-Timestamp (5-min replay window) + X-AEGIS-Signature valid over the
+        // (operation, timestamp) tuple against the founder's registered key.
+        //
+        // Read-only surfaces stay public, matching the prior v8.6.4 intent:
+        //   - /status & /convergence: read-only topology views
+        //   - /progress: SSE; EventSource cannot send custom headers, so it
+        //     can't carry the AEGIS signature. (Follow-up: gate via the
+        //     query-param token path `validate_wallet_auth_query` — it leaks
+        //     deploy timing but cannot mutate state.)
         .route("/api/v1/admin/deploy/status", get(q_api_server::deploy_admin_api::deploy_status))
-        .route("/api/v1/admin/deploy/verify", post(q_api_server::deploy_admin_api::deploy_verify))
         .route("/api/v1/admin/deploy/progress", get(q_api_server::deploy_admin_api::deploy_progress))
-        .route("/api/v1/admin/deploy/promote", post(q_api_server::deploy_admin_api::deploy_promote))
-        .route("/api/v1/admin/deploy/rollback", post(q_api_server::deploy_admin_api::deploy_rollback))
         .route("/api/v1/admin/deploy/convergence", get(q_api_server::deploy_admin_api::deploy_convergence))
+        .nest(
+            "/api/v1/admin/deploy",
+            axum::Router::new()
+                .route("/verify", post(q_api_server::deploy_admin_api::deploy_verify))
+                .route("/promote", post(q_api_server::deploy_admin_api::deploy_promote))
+                .route("/rollback", post(q_api_server::deploy_admin_api::deploy_rollback))
+                .layer(axum::middleware::from_fn_with_state(
+                    app_state.aegis_auth_state.clone(),
+                    aegis_auth_middleware::verify_founder_signature,
+                )),
+        )
         // v7.1.5: Dev Fee admin - verification, measurement, and config
         // GET is open (read-only status); POST /config goes through AEGIS-QL
         // post-quantum founder-signature middleware. v10.10.12: closes the
@@ -26131,11 +26183,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 )),
         )
         // 🔄 v8.5.0: Auto-update announcement + status + toggle + notifications
+        // /announce stays localhost-gated (ConnectInfo loopback — the local
+        // auto-update trigger path). /status + GET notification-email are
+        // read-only. SECURITY (v10.11.52): the MUTATING /toggle and POST
+        // notification-email previously used an in-handler string-match against
+        // the PUBLIC founder address (`clean_wallet != FOUNDER_WALLET`) —
+        // spoofable by anyone who knew the address, same class as the deploy
+        // bypass. They now carry the AEGIS-QL `verify_founder_signature`
+        // middleware per-route (no routing-tree change, so no conflict risk).
         .route("/api/v1/admin/update/announce", post(q_api_server::deploy_admin_api::admin_announce_update))
         .route("/api/v1/admin/update/status", get(q_api_server::deploy_admin_api::admin_update_status))
-        .route("/api/v1/admin/update/toggle", post(q_api_server::deploy_admin_api::admin_update_toggle))
+        .route(
+            "/api/v1/admin/update/toggle",
+            post(q_api_server::deploy_admin_api::admin_update_toggle).layer(
+                axum::middleware::from_fn_with_state(
+                    app_state.aegis_auth_state.clone(),
+                    aegis_auth_middleware::verify_founder_signature,
+                ),
+            ),
+        )
         .route("/api/v1/admin/update/notification-email", get(q_api_server::deploy_admin_api::admin_get_notification_email))
-        .route("/api/v1/admin/update/notification-email", post(q_api_server::deploy_admin_api::admin_set_notification_email))
+        .route(
+            "/api/v1/admin/update/notification-email",
+            post(q_api_server::deploy_admin_api::admin_set_notification_email).layer(
+                axum::middleware::from_fn_with_state(
+                    app_state.aegis_auth_state.clone(),
+                    aegis_auth_middleware::verify_founder_signature,
+                ),
+            ),
+        )
         // v1.0.2: Mining capacity metrics (admin — aggregates all servers)
         .route("/api/v1/admin/mining/capacity", get(q_api_server::deploy_admin_api::mining_capacity))
         // v9.0.2: Decentralization Index (admin — composite network health metric)
