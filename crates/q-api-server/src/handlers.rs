@@ -6124,13 +6124,19 @@ pub async fn get_recent_transactions(
 
     // Load confirmed transactions from persistent storage
     // SECURITY: Filter to show ONLY transactions involving the authenticated wallet
-    let mut recent_txs: Vec<Transaction> = match state.storage_engine.load_all_transactions().await
+    // v10.11.54 LATENT-OOM FIX: was load_all_transactions() — a full CF_TRANSACTIONS
+    // scan materializing the ENTIRE chain tx history into a Vec on every request
+    // (same allocation-bomb class as the v10.11.53 LWMA 121-block fetch). Use the
+    // bounded CF_WALLET_TX_INDEX lookup instead: newest-first, capped at 100,
+    // already filtered to the authenticated wallet.
+    let mut recent_txs: Vec<Transaction> = match state
+        .storage_engine
+        .load_transactions_for_wallet(&wallet_address_bytes, 100)
+        .await
     {
-        Ok(mut txs) => {
-            // ALWAYS filter by authenticated wallet address (sender OR recipient)
-            txs.retain(|tx| tx.from == wallet_address_bytes || tx.to == wallet_address_bytes);
+        Ok(txs) => {
             info!(
-                "📜 Loaded {} transactions for authenticated wallet {}",
+                "📜 Loaded {} transactions for authenticated wallet {} (indexed)",
                 txs.len(),
                 q_log_privacy::mask_addr(&wallet_address_hex)
             );
@@ -11063,6 +11069,49 @@ pub async fn get_mining_challenge(
         } // if let Ok(guard) = try_read
     }
 
+    // v10.11.53 OOM ROOT-CAUSE FIX (Epsilon 2026-06-12): single-flight challenge regeneration.
+    // Under miner polling load every concurrent cache-miss request ran the full regeneration
+    // path simultaneously (journal: 5-10 identical regens within milliseconds, 155/min) — and
+    // each one fetched 121 FULL blocks below for LWMA. The resulting multi-GB transient
+    // allocations ratcheted jemalloc RSS to ~40GB and OOM-killed the node in an accelerating
+    // loop. Serialize regeneration: exactly one task generates per height, the rest queue here
+    // briefly and return the freshly cached challenge from the re-check below.
+    static CHALLENGE_REGEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _regen_guard = CHALLENGE_REGEN_LOCK.lock().await;
+
+    // Re-check the cache: another request may have regenerated while we waited on the lock.
+    if let Ok(guard) = state.current_challenge.try_read() {
+        if let Some(challenge) = guard.as_ref() {
+            if challenge.block_height == block_height
+                && (chrono::Utc::now() - challenge.issued_at).num_seconds() < 120
+            {
+                return Ok(Json(ApiResponse::success(MiningChallengeResponse {
+                    challenge_hash: challenge.challenge_hash.clone(),
+                    difficulty_target: challenge.difficulty_target.clone(),
+                    block_height: challenge.block_height,
+                    vdf_iterations: challenge.vdf_iterations,
+                    block_reward: challenge.block_reward,
+                    expires_at: challenge.expires_at,
+                    server_notice: MINING_SERVER_NOTICE.to_string(),
+                    server_version: VERSION.to_string(),
+                    min_miner_version: Some(MIN_MINER_VERSION.to_string()),
+                    forced_mining_mode: challenge_forced_mode.clone(),
+                    forced_pool_url: challenge_forced_pool_url.clone(),
+                    network_hashrate_hs: cp_hashrate,
+                    connected_miners: cp_miners,
+                    live_security_bits: cp_security,
+                    recommended_threads: ai_recommended_threads,
+                    backup_servers: Some(get_backup_servers()),
+                    vdf_lane_active: if genus2_active_early { Some(true) } else { None },
+                    vdf_curve_id: if genus2_active_early { Some("pq128".to_string()) } else { None },
+                    vdf_target_iterations: if genus2_active_early { Some(4300) } else { None },
+                    vdf_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                    blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                })));
+            }
+        }
+    }
+
     // No cached challenge or it's expired/wrong height - generate new one
     info!(
         "🎯 Generating fresh mining challenge for height {}",
@@ -11087,6 +11136,23 @@ pub async fn get_mining_challenge(
     let lwma_active = block_height >= lwma_activation;
 
     let difficulty_bits = if lwma_active {
+        // v10.11.53 OOM ROOT-CAUSE FIX: LWMA difficulty is a pure function of chain state
+        // at a given height — cache the computed bits per height instead of re-fetching
+        // 121 FULL blocks (decompress + deserialize ≈ multi-GB transient allocation) on
+        // every challenge regeneration. The 121-block fetch now runs at most once per
+        // height instead of 155×/min under miner polling load.
+        static LWMA_BITS_CACHE: std::sync::Mutex<Option<(u64, u32)>> = std::sync::Mutex::new(None);
+        let cached_bits = match LWMA_BITS_CACHE.lock() {
+            Ok(g) => match *g {
+                Some((h, bits)) if h == block_height => Some(bits),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+
+        if let Some(bits) = cached_bits {
+            bits
+        } else {
         // Fetch recent block timestamps from storage (last 120 blocks)
         let window_size: u64 = 121; // Need N+1 timestamps for N intervals
         let fetch_start = block_height.saturating_sub(window_size);
@@ -11115,13 +11181,18 @@ pub async fn get_mining_challenge(
             _ => 16u32, // Conservative default
         };
 
-        q_mining::difficulty::calculate_difficulty_for_next_block(
+        let bits = q_mining::difficulty::calculate_difficulty_for_next_block(
             prev_difficulty,
             &timestamps,
             lwma_activation,
             block_height,
             1, // target: 1 second per block (1 bps)
-        )
+        );
+        if let Ok(mut g) = LWMA_BITS_CACHE.lock() {
+            *g = Some((block_height, bits));
+        }
+        bits
+        }
     } else {
         16u32 // Legacy fixed difficulty
     };

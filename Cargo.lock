@@ -4308,7 +4308,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-api"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -4327,7 +4327,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-narrative"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "crown-ash-types",
  "serde",
@@ -4336,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-plugin"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "bincode 1.3.3",
  "crown-ash-sim",
@@ -4347,7 +4347,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-sim"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "bincode 1.3.3",
  "crown-ash-types",
@@ -4357,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "crown-ash-types"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "bincode 1.3.3",
  "serde",
@@ -11799,7 +11799,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "candle-core 0.9.2-alpha.2",
@@ -11822,7 +11822,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "apodize",
@@ -11832,7 +11832,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "accelerate-src",
  "ahash 0.8.12",
@@ -11934,7 +11934,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11955,7 +11955,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-paged-attn"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bindgen_cuda 0.1.7",
@@ -11970,7 +11970,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-quant"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "bindgen_cuda 0.1.7",
  "byteorder",
@@ -11998,7 +11998,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "candle-core 0.9.2-alpha.2",
  "image 0.25.8",
@@ -14776,7 +14776,7 @@ dependencies = [
 
 [[package]]
 name = "q-aegis-ql"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -14795,7 +14795,7 @@ dependencies = [
 
 [[package]]
 name = "q-ai-inference"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "aes-gcm",
  "ahash 0.8.12",
@@ -14844,7 +14844,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "argon2",
@@ -15087,7 +15087,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-protocol"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15118,7 +15118,7 @@ dependencies = [
 
 [[package]]
 name = "q-bounty-server"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -15147,7 +15147,7 @@ dependencies = [
 
 [[package]]
 name = "q-cache"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -15179,7 +15179,7 @@ dependencies = [
 
 [[package]]
 name = "q-chat-types"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15190,7 +15190,7 @@ dependencies = [
 
 [[package]]
 name = "q-compute"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "core_affinity",
  "crossbeam",
@@ -15255,7 +15255,7 @@ dependencies = [
 
 [[package]]
 name = "q-crypto-advanced"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "aegis",
  "anyhow",
@@ -15324,7 +15324,7 @@ dependencies = [
 
 [[package]]
 name = "q-dag-knight"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15352,7 +15352,7 @@ dependencies = [
 
 [[package]]
 name = "q-dandelion"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15380,7 +15380,7 @@ dependencies = [
 
 [[package]]
 name = "q-dex"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15415,7 +15415,7 @@ dependencies = [
 
 [[package]]
 name = "q-dune"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15431,7 +15431,7 @@ dependencies = [
 
 [[package]]
 name = "q-egress-audit"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "once_cell",
  "proptest",
@@ -15443,7 +15443,7 @@ dependencies = [
 
 [[package]]
 name = "q-eternal-cypher"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -15458,7 +15458,7 @@ dependencies = [
 
 [[package]]
 name = "q-fairqueue"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15487,7 +15487,7 @@ dependencies = [
 
 [[package]]
 name = "q-flux"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "brotli",
@@ -15630,7 +15630,7 @@ dependencies = [
 
 [[package]]
 name = "q-ipfs-storage"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15761,7 +15761,7 @@ dependencies = [
 
 [[package]]
 name = "q-lattice-vrf"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -15795,7 +15795,7 @@ dependencies = [
 
 [[package]]
 name = "q-log-privacy"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "hex",
  "once_cell",
@@ -15806,7 +15806,7 @@ dependencies = [
 
 [[package]]
 name = "q-miner"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -15967,7 +15967,7 @@ dependencies = [
 
 [[package]]
 name = "q-multisig"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "chrono",
@@ -15990,7 +15990,7 @@ dependencies = [
 
 [[package]]
 name = "q-narwhal-core"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16037,7 +16037,7 @@ dependencies = [
 
 [[package]]
 name = "q-network"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16126,7 +16126,7 @@ dependencies = [
 
 [[package]]
 name = "q-oracle"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16307,7 +16307,7 @@ dependencies = [
 
 [[package]]
 name = "q-quantum-rng"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16336,7 +16336,7 @@ dependencies = [
 
 [[package]]
 name = "q-queue"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "crc32fast",
  "criterion 0.5.1",
@@ -16347,7 +16347,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16382,7 +16382,7 @@ dependencies = [
 
 [[package]]
 name = "q-quillon-bank-cli"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -16453,7 +16453,7 @@ dependencies = [
 
 [[package]]
 name = "q-resonance"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16591,7 +16591,7 @@ dependencies = [
 
 [[package]]
 name = "q-sharding"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -16621,7 +16621,7 @@ dependencies = [
 
 [[package]]
 name = "q-sqisign"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "hex",
  "q-sqisign-sys",
@@ -16631,14 +16631,14 @@ dependencies = [
 
 [[package]]
 name = "q-sqisign-sys"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "cmake",
 ]
 
 [[package]]
 name = "q-stablecoin"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16666,7 +16666,7 @@ dependencies = [
 
 [[package]]
 name = "q-storage"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -16734,7 +16734,7 @@ dependencies = [
 
 [[package]]
 name = "q-sync-optimizers"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "rand 0.8.5",
@@ -16795,7 +16795,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-circuit"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16815,7 +16815,7 @@ dependencies = [
 
 [[package]]
 name = "q-tor-client"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "arti-client",
@@ -16852,7 +16852,7 @@ dependencies = [
 
 [[package]]
 name = "q-tps-benchmark"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bytes",
@@ -16879,7 +16879,7 @@ dependencies = [
 
 [[package]]
 name = "q-trading-bot"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -16938,7 +16938,7 @@ dependencies = [
 
 [[package]]
 name = "q-turn"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "bytes",
@@ -16964,7 +16964,7 @@ dependencies = [
 
 [[package]]
 name = "q-types"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -17001,7 +17001,7 @@ dependencies = [
 
 [[package]]
 name = "q-vdf"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -17037,7 +17037,7 @@ dependencies = [
 
 [[package]]
 name = "q-visualizer"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "anyhow",
  "crossterm 0.27.0",
@@ -17139,7 +17139,7 @@ dependencies = [
 
 [[package]]
 name = "q-wallet"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -17177,7 +17177,7 @@ dependencies = [
 
 [[package]]
 name = "q-wg-hybrid"
-version = "10.11.52"
+version = "10.11.54"
 dependencies = [
  "hex",
  "pqcrypto-kyber 0.8.1",

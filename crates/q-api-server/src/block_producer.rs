@@ -564,6 +564,17 @@ impl BlockProducer {
             hex::encode(&solution.miner_address[..8])
         );
 
+        // v10.11.54 OOM FIX: bound the queue at enqueue time. The old safety drain
+        // lived inside produce_block(), which never runs while memory backpressure
+        // has production paused — so solutions accumulated unbounded EXACTLY when
+        // memory was already tight (the backpressure spiral). Drop the oldest
+        // entries instead: solutions for stale heights are worthless anyway, the
+        // newest work is what produce_block() wants.
+        const MAX_PENDING_SOLUTIONS: usize = 5_000;
+        while self.pending_solutions.len() >= MAX_PENDING_SOLUTIONS {
+            let _ = self.pending_solutions.pop();
+        }
+
         // LOCK-FREE! SegQueue::push never blocks
         self.pending_solutions.push(solution);
 
