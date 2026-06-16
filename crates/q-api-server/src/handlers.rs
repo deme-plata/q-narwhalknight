@@ -8118,13 +8118,19 @@ pub async fn get_wallet_balance(
         }))));
     }
 
-    debug!("🔐 Privacy-enabled balance query for: {}", q_log_privacy::mask_addr(&wallet_address));
+    let normalized_wallet_address = if wallet_address.starts_with("qnk") {
+        format!("qnk{}", wallet_address.trim_start_matches("qnk"))
+    } else {
+        wallet_address.clone()
+    };
+
+    debug!("🔐 Privacy-enabled balance query for: {}", q_log_privacy::mask_addr(&normalized_wallet_address));
 
     // Parse requested wallet address first
-    let hex_part = if wallet_address.starts_with("qnk") {
-        &wallet_address[3..] // Remove 'qnk' prefix
+    let hex_part = if normalized_wallet_address.starts_with("qnk") {
+        &normalized_wallet_address[3..] // Remove canonical 'qnk' prefix
     } else {
-        &wallet_address
+        &normalized_wallet_address
     };
 
     let requested_address = if hex_part.len() == 64 {
@@ -8145,7 +8151,7 @@ pub async fn get_wallet_balance(
         // Handle short addresses - hash the string like faucet does
         use q_types::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        hasher.update(wallet_address.as_bytes());
+        hasher.update(normalized_wallet_address.as_bytes());
         hasher.finalize().into()
     };
 
@@ -8177,7 +8183,7 @@ pub async fn get_wallet_balance(
             // SECURITY: Reject unauthenticated balance queries
             warn!(
                 "🚫 Unauthorized balance query attempt for {}",
-                q_log_privacy::mask_addr(&wallet_address)
+                q_log_privacy::mask_addr(&normalized_wallet_address)
             );
             return Ok(Json(ApiResponse::error(
                 "🔒 Authentication Required: Balance queries require cryptographic signature proof. \
@@ -8281,7 +8287,7 @@ pub async fn get_wallet_balance(
     );
 
     let response = serde_json::json!({
-        "wallet_address": wallet_address,
+        "wallet_address": normalized_wallet_address,
         "balance": balance.to_string(),  // v3.0.2: Serialize u128 as string to avoid JSON overflow
         "balance_qnk": balance as f64 / QUG_DISPLAY_DIVISOR,
         "timestamp": chrono::Utc::now(),
@@ -10389,18 +10395,19 @@ pub async fn submit_mining_solution(
     let mut difficulty_target = [0u8; 32];
     difficulty_target.copy_from_slice(&target_bytes);
 
-    // Validate wallet address format (qnk + 64 hex chars = 67 total)
-    if !request.miner_address.starts_with("qnk") || request.miner_address.len() != 67 {
+    // Validate wallet address format (qnk + 64 hex chars = 67 total).
+    // Be defensive at the API edge: older cached clients have sent qnkqnk...
+    // after concatenating a prefixed address with a qnk prefix.
+    let miner_hex = request.miner_address.trim_start_matches("qnk");
+    if miner_hex == request.miner_address || miner_hex.len() != 64 {
         return Ok(Json(ApiResponse::error(
             "Invalid miner address format. Must start with 'qnk' and be 67 characters".to_string(),
         )));
     }
-
-    // Extract hex part after "qnk" prefix
-    let hex_part = &request.miner_address[3..];
+    let canonical_miner_address = format!("qnk{}", miner_hex.to_ascii_lowercase());
 
     // Decode miner address from hex string to [u8; 32]
-    let miner_address_bytes = match hex::decode(hex_part) {
+    let miner_address_bytes = match hex::decode(miner_hex) {
         Ok(bytes) => bytes,
         Err(_) => {
             return Ok(Json(ApiResponse::error(
@@ -10438,7 +10445,7 @@ pub async fn submit_mining_solution(
                 // Challenge older than 5 minutes — likely stale
                 warn!(
                     "🚨 [MINING v4.1.3] Expired challenge from miner {} (age: {}s)",
-                    q_log_privacy::mask_addr(&request.miner_address[..16.min(request.miner_address.len())]), challenge_age_secs
+                    q_log_privacy::mask_addr(&canonical_miner_address[..16.min(canonical_miner_address.len())]), challenge_age_secs
                 );
                 return Ok(Json(ApiResponse::error(
                     "Challenge expired. Please request a new mining challenge.".to_string(),
@@ -10521,7 +10528,7 @@ pub async fn submit_mining_solution(
         hash,
         difficulty_target,
         miner_address,
-        miner_address_str: request.miner_address.clone(),
+        miner_address_str: canonical_miner_address.clone(),
         hash_rate: request.hash_rate.unwrap_or(0.0),
         miner_id: request.miner_id.clone(),
         worker_name: request.worker_name.clone(),
@@ -10632,11 +10639,11 @@ pub async fn submit_mining_solution(
                 (Some(name), Some(id)) => format!("{}[{}]", name, &id[..8.min(id.len())]),
                 (Some(name), None) => name.clone(),
                 (None, Some(id)) => format!("id:{}", &id[..8.min(id.len())]),
-                (None, None) => format!("wallet:{}", &request.miner_address[..16]),
+                (None, None) => format!("wallet:{}", &canonical_miner_address[..16]),
             };
             info!(
                 "⚡ Mining submission queued: {} | Nonce: {} | Wallet: {}",
-                miner_display, nonce, q_log_privacy::mask_addr(&request.miner_address[..16.min(request.miner_address.len())])
+                miner_display, nonce, q_log_privacy::mask_addr(&canonical_miner_address[..16.min(canonical_miner_address.len())])
             );
         }
         // NOTE: mining_stats.write() REMOVED from HTTP thread (v1.0.2)
@@ -14108,10 +14115,11 @@ pub fn parse_wallet_address(address_str: &str) -> Result<[u8; 32], String> {
         }
         &address_str[2..]
     } else if address_str.starts_with("qnk") {
-        if address_str.len() != 43 && address_str.len() != 67 {
+        let stripped = address_str.trim_start_matches("qnk");
+        if stripped.len() != 40 && stripped.len() != 64 {
             return Err(format!("Invalid qnk address length: {}", address_str.len()));
         }
-        &address_str[3..]
+        stripped
     } else {
         return Err("Address must start with 0x or qnk".to_string());
     };
@@ -15117,7 +15125,7 @@ pub async fn get_wallet_mining_stats(
     // v8.2.9: Primary source = persistent blockchain-derived stats from RocksDB.
     // These are deterministic — same blocks produce the same stats on ANY node.
     // In-memory stats only used for real-time data (hashrate, workers, activity).
-    let wallet_hex = wallet.strip_prefix("qnk").unwrap_or(&wallet).to_lowercase();
+    let wallet_hex = wallet.trim_start_matches("qnk").to_lowercase();
 
     // Load persistent mining stats (blocks_found, rewards_earned) from RocksDB
     let (persistent_blocks, persistent_rewards) = state.storage_engine

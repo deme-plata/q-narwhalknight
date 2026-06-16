@@ -773,7 +773,7 @@ pub async fn sse_events(
     // and still apply the per-wallet event filter below.
     let wallet_filter: Option<String> = match (requested_filter.as_ref(), auth_wallet.as_ref()) {
         (Some(filter), Some(auth)) => {
-            let hex_part = filter.strip_prefix("qnk").unwrap_or(filter.as_str());
+            let hex_part = filter.trim_start_matches("qnk");
             let matches = hex_part.len() == 64
                 && hex::decode(hex_part)
                     .ok()
@@ -844,7 +844,7 @@ pub async fn sse_events(
 
         // Normalize wallet address (remove "qnk" prefix if present)
         let normalized_filter = if wallet_addr.starts_with("qnk") {
-            wallet_addr[3..].to_string()
+            wallet_addr.trim_start_matches("qnk").to_string()
         } else {
             wallet_addr.clone()
         };
@@ -866,7 +866,7 @@ pub async fn sse_events(
             // Balance updates - only send if it's for this wallet
             StreamEvent::BalanceUpdated { wallet_address, change_reason, old_balance, new_balance, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -885,7 +885,7 @@ pub async fn sse_events(
             // Mining rewards - only send if it's for this wallet
             StreamEvent::MiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -903,7 +903,7 @@ pub async fn sse_events(
             // Mining stats - only send if it's for this wallet
             StreamEvent::MiningStats { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -921,7 +921,7 @@ pub async fn sse_events(
             // v1.3.8-beta: Pending mining reward - only send if it's for this wallet
             StreamEvent::PendingMiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -937,7 +937,7 @@ pub async fn sse_events(
             // Swap events - only send if it's for this wallet
             StreamEvent::SwapExecuted { wallet_address, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -975,7 +975,7 @@ pub async fn sse_events(
             // v10.2.9: Token balance updates (QUGUSD, custom tokens) — filter by wallet address
             StreamEvent::TokenBalanceUpdated { ref wallet_address, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -1014,8 +1014,7 @@ pub async fn sse_events(
                 // to the real balance once the 15s sync ran — confusing users with balance spikes.
                 // RocksDB is always authoritative and available immediately on startup.
                 let wallet_hex = wallet_filter_value
-                    .strip_prefix("qnk")
-                    .unwrap_or(wallet_filter_value);
+                    .trim_start_matches("qnk");
 
                 // Always read from RocksDB for initial event (authoritative, available at startup)
                 // Fall back to in-memory cache only if RocksDB read fails
