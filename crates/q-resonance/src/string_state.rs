@@ -54,7 +54,16 @@ impl StringState {
     ) -> Self {
         let amplitude = stake_weight.sqrt();
         let frequency = 2.0 * PI * priority;
-        let phase = Complex::new(0.0, 0.0); // Start with zero phase
+        // Seed the phase on the UNIT CIRCLE with a deterministic per-vertex angle
+        // derived from the id. A zero phase (the old default) is fatal: every
+        // string starts identical → first gradient is 0 → update_phase divides
+        // 0/0 → NaN on iteration 1. A diverse unit phase gives the minimizer a
+        // real landscape to descend AND guarantees norm() == 1 (no div-by-zero).
+        let seed = u64::from_le_bytes([
+            id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+        ]);
+        let angle = (seed as f64 / u64::MAX as f64) * 2.0 * PI;
+        let phase = Complex::from_polar(1.0, angle);
         let velocity = vec![1.0; position.len()]; // Unit velocity initially
 
         Self {
@@ -136,13 +145,29 @@ impl StringState {
         coupling * frequency_match
     }
 
-    /// Update phase based on gradient of energy functional
+    /// Update phase based on gradient of energy functional.
+    ///
+    /// Phases live on the unit circle, which keeps |ψ_i - ψ_j|² ≤ 4 bounded and
+    /// makes the energy bounded below — so gradient descent cannot diverge to
+    /// ±∞ (the other historical NaN source). The normalization is guarded
+    /// against a zero / non-finite magnitude.
     pub fn update_phase(&mut self, gradient: Complex<f64>, learning_rate: f64) {
         let delta_phase = gradient * Complex::new(-learning_rate, 0.0);
+        // Skip non-finite gradient steps rather than poisoning the phase.
+        if !delta_phase.re.is_finite() || !delta_phase.im.is_finite() {
+            return;
+        }
         self.phase += delta_phase;
 
-        // Normalize to unit circle
-        self.phase /= self.phase.norm();
+        // Normalize back onto the unit circle, guarding against 0/0 and inf.
+        let norm = self.phase.norm();
+        if norm.is_finite() && norm > 1e-12 {
+            self.phase /= norm;
+        } else {
+            // Degenerate (collapsed to origin or blew up) → reset to a safe
+            // reference phase instead of producing NaN.
+            self.phase = Complex::new(1.0, 0.0);
+        }
     }
 
     /// Check if this string is in-phase with another (aligned for consensus)
