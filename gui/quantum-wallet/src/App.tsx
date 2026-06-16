@@ -307,6 +307,15 @@ function App() {
     return () => window.removeEventListener('qnk-navigate-to-email', navHandler);
   }, []);
 
+  // v10.11.45: "View in Block Explorer" link (from the send modal) switches to the
+  // explorer screen; ExplorerScreen itself listens for the same event to pre-fill +
+  // run the search for the tx hash.
+  useEffect(() => {
+    const openExplorerTx = () => setCurrentScreen('explorer');
+    window.addEventListener('open-explorer-tx', openExplorerTx as EventListener);
+    return () => window.removeEventListener('open-explorer-tx', openExplorerTx as EventListener);
+  }, []);
+
   // v2.3.11-beta: Track when DEX swap just happened to ignore stale SSE updates
   // SSE balance updates from server can be stale and overwrite correct DEX swap balance
   const dexSwapInProgressRef = useRef(false);
@@ -649,8 +658,8 @@ function App() {
     sseManager.start(currentWalletAddress);
 
     // Helper to normalize wallet addresses for comparison
-    const normalizeAddr = (addr: string) =>
-      (addr?.startsWith('qnk') ? addr.substring(3) : addr)?.toLowerCase();
+    const normalizeAddr = (addr: string = '') =>
+      addr.trim().toLowerCase().replace(/^(qnk)+/, '');
     const myHex = normalizeAddr(currentWalletAddress);
 
     // --- balance-updated ---
@@ -660,7 +669,7 @@ function App() {
       const eventHex = normalizeAddr(balanceData.wallet_address || '');
 
       if (myHex && eventHex === myHex) {
-        const changeReason = balanceData.change_reason || '';
+        const changeReason = String(balanceData.change_reason || '').toLowerCase();
         const confirmationStatus = balanceData.confirmation_status || '';
 
         // Incoming transaction with memo — show notification modal before any filters
@@ -687,7 +696,7 @@ function App() {
         // and previously sent balance=0 on SSE connect, overriding the valid cached balance.
         // Now handled at server (reads RocksDB instead), but keep this as frontend safety net.
         const newBalanceValue = balanceData.new_balance ?? 0;
-        if (newBalanceValue === 0 && changeReason === 'SSE connection established') return;
+        if (newBalanceValue === 0 && changeReason === 'sse connection established') return;
 
         const isP2PMiningReward = changeReason === 'p2p_mining_reward' || changeReason === 'pending_mining_reward';
 

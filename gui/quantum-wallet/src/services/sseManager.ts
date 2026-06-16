@@ -45,6 +45,7 @@ const state: SSEManagerState = {
 const SSE_EVENT_TYPES = [
   'mining_reward',
   'balance-updated',
+  'balance-snapshot',
   'node-status',
   'miner-stats',
   'mining_stats',
@@ -122,35 +123,45 @@ async function connect() {
     return;
   }
 
-  const walletAddress = state.walletAddress || localStorage.getItem('walletAddress') || '';
-  if (!walletAddress) {
-    console.log('[SSE Manager] No wallet address, deferring connection');
-    return;
-  }
+  const rawWalletAddress = state.walletAddress || localStorage.getItem('walletAddress') || '';
+  const walletAddress = rawWalletAddress.trim().toLowerCase().replace(/^(qnk)+/, 'qnk');
 
   state.status = state.reconnectAttempts > 0 ? 'reconnecting' : 'connecting';
   dispatchStatusEvent(state.status);
 
   const baseUrl = localStorage.getItem('nodeUrl') || '';
-  let authParam = '';
-  try {
-    const session = walletSession.getSession();
-    if (session?.privateKey && session?.address) {
-      const authHeader = await generateAuthHeader(
-        session.privateKey,
-        session.address,
-        '/api/v1/events',
-        'Ed25519',
-      );
-      authParam = `&auth=${encodeURIComponent(authHeader)}`;
+
+  // v10.11.56 (2026-06-15): PUBLIC stream when no wallet is connected.
+  // Previously connect() early-returned without a wallet, so public views (Explorer,
+  // logged-out TopBar) never opened any EventSource -> "SSE never loads" / blocks stuck
+  // at 0 even though /api/v1/blocks/recent returns data. The backend serves a public,
+  // unauthenticated event stream when no wallet_address is supplied (NodeStatusUpdate,
+  // NewBlock, BlockFinalized, MetricsUpdate, TokenPriceUpdate, LiquidityPoolUpdate,
+  // ServerVersion, StateSyncComplete -- see q-api-server streaming.rs). Consume that
+  // until a wallet logs in, then upgrade to the per-wallet (filtered + signed) stream.
+  let url: string;
+  if (!walletAddress) {
+    url = `${baseUrl}/api/v1/events`;
+    console.log(`[SSE Manager] Connecting to PUBLIC stream (no wallet) (attempt ${state.reconnectAttempts})...`);
+  } else {
+    let authParam = '';
+    try {
+      const session = walletSession.getSession();
+      if (session?.privateKey && session?.address) {
+        const authHeader = await generateAuthHeader(
+          session.privateKey,
+          session.address,
+          '/api/v1/events',
+          'Ed25519',
+        );
+        authParam = `&auth=${encodeURIComponent(authHeader)}`;
+      }
+    } catch (e) {
+      console.warn('[SSE Manager] auth signing failed, falling back to unauth stream', e);
     }
-  } catch (e) {
-    console.warn('[SSE Manager] auth signing failed, falling back to unauth stream', e);
+    url = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}${authParam}`;
+    console.log(`[SSE Manager] Connecting (attempt ${state.reconnectAttempts})...`);
   }
-
-  const url = `${baseUrl}/api/v1/events?wallet_address=${encodeURIComponent(walletAddress)}${authParam}`;
-
-  console.log(`[SSE Manager] Connecting (attempt ${state.reconnectAttempts})...`);
 
   const es = new EventSource(url);
   state.eventSource = es;

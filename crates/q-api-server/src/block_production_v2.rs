@@ -7,7 +7,7 @@
 use std::sync::{atomic::{AtomicU64, AtomicU8, Ordering}, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::{self, MissedTickBehavior};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use serde_json::json;
 use crate::AppState;
 
@@ -127,7 +127,7 @@ async fn production_loop(
         // This fixes the bug where node shows "Production DISABLED: N behind" even when synced
         if cur_h > 0 && net_h > 0 && cur_h >= net_h {
             // We've caught up or surpassed the network - update highest_network_height
-            app.highest_network_height.store(cur_h, Ordering::SeqCst);
+            app.highest_network_height.fetch_max(cur_h, Ordering::SeqCst);
         }
 
         // v7.1.4: MINING QUEUE DRAIN FIX
@@ -259,13 +259,22 @@ async fn production_loop(
 
                     // 3. Broadcast SSE balance update events
                     for (wallet_addr, old_balance, new_balance, mut change_reason) in balance_updates {
+                        if old_balance == new_balance {
+                            trace!(
+                                "[BLOCK_PROD_V2] Skipping unchanged balance SSE for {} at height {}",
+                                hex::encode(&wallet_addr[..8]),
+                                blk.header.height
+                            );
+                            continue;
+                        }
+
                         let wallet_addr_hex = hex::encode(wallet_addr);
 
                         // Dev fee wallet gets special label
                         const MASTER_ACCOUNT_HEX: &str =
                             "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
                         if wallet_addr_hex == MASTER_ACCOUNT_HEX && change_reason == "coinbase" {
-                            change_reason = "DevelopmentFee".to_string();
+                            change_reason = "development_fee".to_string();
                         } else if change_reason == "coinbase" {
                             change_reason = "mining_reward".to_string();
                         }

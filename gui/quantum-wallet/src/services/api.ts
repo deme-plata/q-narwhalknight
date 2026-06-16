@@ -254,11 +254,17 @@ class RequestRateLimiter {
     this.maxConcurrent = maxConcurrent;
   }
 
-  async acquire(maxWaitMs = 5000): Promise<void> {
+  // v10.11.43: degrade GRACEFULLY instead of throwing. Hard-throwing here made
+  // user actions (e.g. a Send) fail with "Rate limiter timeout after 5000ms"
+  // whenever background balance/SSE polls + a slow node filled all slots. The
+  // limiter should THROTTLE (wait while busy) but never hard-fail the request —
+  // each fetch already has its own 15s AbortController timeout downstream.
+  async acquire(maxWaitMs = 20000): Promise<void> {
     const deadline = Date.now() + maxWaitMs;
     while (this.activeRequests >= this.maxConcurrent) {
       if (Date.now() >= deadline) {
-        throw new Error(`Rate limiter timeout after ${maxWaitMs}ms — too many concurrent requests`);
+        console.warn(`⚠️ [RATE LIMITER] still busy after ${maxWaitMs}ms (${this.activeRequests}/${this.maxConcurrent}); proceeding anyway so the request is not dropped`);
+        break; // proceed instead of throwing — let the request's own fetch timeout govern
       }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -266,7 +272,7 @@ class RequestRateLimiter {
   }
 
   release(): void {
-    this.activeRequests--;
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
   }
 
   getActiveCount(): number {
@@ -274,7 +280,7 @@ class RequestRateLimiter {
   }
 }
 
-const rateLimiter = new RequestRateLimiter(20); // Max 20 concurrent requests
+const rateLimiter = new RequestRateLimiter(50); // v10.11.43: 20→50 concurrent — more headroom so user actions aren't starved by background polls
 
 // Global password prompt function - will be set by PasswordModalProvider
 let globalPasswordPrompt: (() => Promise<string>) | null = null;
@@ -376,12 +382,15 @@ export const NEW_MIN_FEE_QUG = 0.000021;     // Reduced fee after activation (10
 // pointing to the open issue. Set false ONLY after v10.11.13's
 // instrumentation pinpoints the bug and v10.11.14 ships a verified
 // fix.
-export const SEND_AND_SWAP_DISABLED = true;
+// v10.11.17 (2026-05-22): root-cause double-credit fix shipped — the
+// dag_knight cert callback no longer persists to RocksDB; balance_consensus.
+// process_block is the sole applier at block-apply time. Verified via
+// journal trace of tx 2e9f5bb8 (single PRODUCER-CONFIRM, single [TRANSFER]).
+// Send + Swap re-enabled. If a future apply-pipeline regression appears,
+// flip this back to `true` and ship a hotfix.
+export const SEND_AND_SWAP_DISABLED = false;
 export const SEND_AND_SWAP_DISABLED_MESSAGE =
-  'Send & Swap temporarily disabled: an apply-pipeline bug ' +
-  'in v10.11.x can silently mint outputs without debiting inputs. ' +
-  'Patch (v10.11.13 instrumentation, v10.11.14 fix) inbound. ' +
-  'Receives and balance queries continue to work normally.';
+  'Send & Swap temporarily disabled — see Discord for status.';
 
 export interface NodeStatus {
   node_id: string;
@@ -650,6 +659,13 @@ class QNarwhalKnightAPI {
   // v1.0.53: Get current base URL (for debugging)
   public getBaseURL(): string {
     return this.baseURL;
+  }
+
+  private normalizeWalletAddress(address?: string): string {
+    const value = (address || '').trim().toLowerCase();
+    if (!value) return '';
+    if (!value.startsWith('qnk')) return value;
+    return `qnk${value.replace(/^(qnk)+/, '')}`;
   }
 
   private async request<T>(endpoint: string, options?: RequestInit, retries = 3): Promise<ApiResponse<T>> {
@@ -1119,7 +1135,8 @@ class QNarwhalKnightAPI {
   // v3.5.0-beta: Get wallet-specific mining statistics (blocks found, hash rate)
   // This allows mining stats to survive page refresh
   async getMiningStats(walletAddress: string): Promise<ApiResponse<WalletMiningStats>> {
-    return this.request<WalletMiningStats>(`/v1/mining/stats/${encodeURIComponent(walletAddress)}`);
+    const address = this.normalizeWalletAddress(walletAddress);
+    return this.request<WalletMiningStats>(`/v1/mining/stats/${encodeURIComponent(address)}`);
   }
 
   // v10.3.0: Get hashrate history for Network Power Modal
@@ -1265,7 +1282,7 @@ class QNarwhalKnightAPI {
   // Get wallet balance by address (AUTHENTICATED - requires signature)
   async getWalletBalance(walletAddress?: string, skipPrompt?: boolean): Promise<ApiResponse<any>> {
     // Use stored wallet address if none provided
-    const address = walletAddress || localStorage.getItem('walletAddress') || '';
+    const address = this.normalizeWalletAddress(walletAddress || localStorage.getItem('walletAddress') || '');
     console.log('🔍 Fetching balance for wallet address:', address);
     return this.authenticatedRequest<any>(`/v1/wallets/${address}/balance`, undefined, undefined, skipPrompt);
   }
@@ -1443,42 +1460,45 @@ class QNarwhalKnightAPI {
         console.log('⚠️ Session created with Ed25519 only (no persistent Dilithium5 keys)');
       }
 
-      // Use Ed25519 authentication for transaction
-      // (AEGIS-QL support omitted to avoid asking for password again)
+      // v10.11.18 FIX: route GUI sends through /transactions/send_signed
+      // (the signed-tx path, same as MCP send_qug) instead of the broken
+      // OAuth-gated /transactions/send. The old route silently dropped
+      // every GUI send: f12431722d... (Viktor 2026-05-22), aeacff65c5...
+      // (Viktor 2026-05-22 retry). Server schema = SendTransactionSignedRequest
+      // (handlers.rs:5573): {from, to, amount:u128, memo?, token_type?}.
+      // CRITICAL: amount must be a RAW JSON INTEGER (u128 base units), not
+      // a Number or quoted string — per u128_in_json_gotcha memory.
       const authHeader = await generateAuthHeader(
         activeSession.privateKey,
         activeSession.address,
-        '/api/v1/transactions/send'
+        '/api/v1/transactions/send_signed'
       );
-      console.log('ℹ️ Using Ed25519 authentication for transaction');
+      console.log('ℹ️ Using Ed25519 authentication for /transactions/send_signed');
 
-      console.log('✅ Generated X-Wallet-Auth header for transaction');
-      console.log('🔍 X-Wallet-Auth header length:', authHeader.length);
-      console.log('🔍 X-Wallet-Auth header preview:', authHeader.substring(0, 100) + '...');
+      // Convert display amount (number) to u128 base units (×10^24).
+      // Split into u32 micros × u72 to stay safe with JS Number precision.
+      const microsAmount = BigInt(Math.round(fixedAmount * 1_000_000));
+      const amountBaseBigInt = microsAmount * 10n ** 18n; // micros × 10^18 = base24
+      const amountBaseStr = amountBaseBigInt.toString();
 
-      // Send transaction with authentication header
-      // Only include mnemonic if we just decrypted it (no session was active)
-      const requestBody: any = {
-        from: fromAddress,
-        to: to,
-        amount: fixedAmount,
-        memo: memo,
-        token_type: tokenType || 'QUG', // Default to QUG if not specified
-      };
+      // Hand-build body so amount lands as a RAW JSON integer.
+      // v10.11.19 FIX: JSON.stringify each STRING field (full RFC-8259 escaping
+      // incl. control chars + unicode). The old escMemo only handled \\ \" \n
+      // \r \t, so a memo with any other control char produced invalid JSON ->
+      // server 'expected `,` or `}` at line 1 column N'. amount stays raw int.
+      let rawBody = `{"from":${JSON.stringify(fromAddress)},"to":${JSON.stringify(to)},"amount":${amountBaseStr},"token_type":${JSON.stringify(tokenType || 'QUG')}`;
+      if (memo) rawBody += `,"memo":${JSON.stringify(memo)}`;
+      rawBody += `}`;
 
-      // Only include mnemonic if we had to decrypt it
-      if (mnemonic) {
-        requestBody.mnemonic = mnemonic;
-      }
+      console.log('📤 [v10.11.18 SEND-SIGNED] amount=', amountBaseStr, 'token=', tokenType || 'QUG');
 
-      console.log('📤 Sending transaction with token_type:', requestBody.token_type);
-
-      return this.request<any>('/v1/transactions/send', {
+      return this.request<any>('/v1/transactions/send_signed', {
         method: 'POST',
         headers: {
           'X-Wallet-Auth': authHeader,
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify(requestBody),
+        body: rawBody,
       });
     } catch (authError) {
       console.error('❌ Failed to generate authentication header:', authError);
@@ -2178,16 +2198,39 @@ class QNarwhalKnightAPI {
    * @param onMiningStats - Callback for mining statistics updates
    * @returns EventSource instance (call .close() to unsubscribe)
    */
-  subscribeToMiningRewards(
+  async subscribeToMiningRewards(
     walletAddress: string,
     onReward: (event: MiningRewardEvent) => void,
     onBalanceUpdate: (event: BalanceUpdateEvent) => void,
     onMiningStats?: (event: MiningStatsEvent) => void
-  ): EventSource {
-    // Connect to SSE endpoint with wallet_address parameter for filtered events
-    const url = `${this.baseURL}/v1/events?wallet_address=${encodeURIComponent(walletAddress)}`;
-    console.log('🔌 SSE: Connecting to', url);
-    console.log('🔌 SSE: Filtering for wallet:', walletAddress);
+  ): Promise<EventSource> {
+    // Connect to SSE endpoint with wallet_address parameter for filtered events.
+    // Browser EventSource cannot set X-Wallet-Auth headers, so the backend accepts
+    // the same signed JSON auth blob through the auth query parameter.
+    const canonicalWalletAddress = this.normalizeWalletAddress(walletAddress);
+    const params = new URLSearchParams({ wallet_address: canonicalWalletAddress });
+    const session = walletSession.getSession();
+    if (session?.privateKey && session?.address) {
+      try {
+        const authHeader = await generateAuthHeader(
+          session.privateKey,
+          session.address,
+          '/api/v1/events',
+          'Ed25519'
+        );
+        params.set('auth', authHeader);
+      } catch (error) {
+        console.warn('🔌 SSE: Failed to sign wallet auth for mining stream:', error);
+      }
+    } else {
+      console.warn('🔌 SSE: No wallet session available for authenticated mining stream');
+    }
+
+    const url = `${this.baseURL}/v1/events?${params.toString()}`;
+    const logParams = new URLSearchParams(params);
+    if (logParams.has('auth')) logParams.set('auth', '[signed]');
+    console.log('🔌 SSE: Connecting to', `${this.baseURL}/v1/events?${logParams.toString()}`);
+    console.log('🔌 SSE: Filtering for wallet:', canonicalWalletAddress);
 
     const eventSource = new EventSource(url);
 
@@ -2197,11 +2240,9 @@ class QNarwhalKnightAPI {
 
     // v3.3.10-beta: Helper to normalize addresses for comparison (handle qnk prefix and length differences)
     const normalizeAddress = (addr: string): string => {
-      // Remove qnk prefix if present, then take first 40 chars for comparison
-      const withoutPrefix = addr.startsWith('qnk') ? addr.slice(3) : addr;
-      return withoutPrefix.slice(0, 40).toLowerCase();
+      return this.normalizeWalletAddress(addr).replace(/^qnk/, '');
     };
-    const normalizedWallet = normalizeAddress(walletAddress);
+    const normalizedWallet = normalizeAddress(canonicalWalletAddress);
 
     eventSource.addEventListener('mining_reward', (e: MessageEvent) => {
       console.log('📨 SSE: Received mining_reward event');
@@ -2239,38 +2280,45 @@ class QNarwhalKnightAPI {
         console.log('🔍 [DEBUG] Address comparison:', {
           received: data.wallet_address,
           receivedLength: data.wallet_address?.length,
-          expected: walletAddress,
-          expectedLength: walletAddress?.length,
-          exactMatch: data.wallet_address === walletAddress,
+          expected: canonicalWalletAddress,
+          expectedLength: canonicalWalletAddress?.length,
+          exactMatch: normalizeAddress(data.wallet_address || '') === normalizedWallet,
           receivedFirst16: data.wallet_address?.substring(0, 16),
-          expectedFirst16: walletAddress?.substring(0, 16),
+          expectedFirst16: canonicalWalletAddress?.substring(0, 16),
         });
         console.log('🔍 [DEBUG] Change reason:', data.change_reason);
         console.log('🔍 [DEBUG] Balance values:', { old: data.old_balance, new: data.new_balance, diff: data.new_balance - data.old_balance });
 
-        // Backend now sends addresses WITH "qnk" prefix - compare directly
+        const normalizedReceived = normalizeAddress(data.wallet_address || '');
+        const addressMatch = normalizedReceived === normalizedWallet;
+        const normalizedReason = String(data.change_reason || '').toLowerCase();
         // Accept mining_reward, mining_reward_instant, mining_reward_batch_X, p2p_mining_reward, pending_mining_reward, development_fee,
         // and transaction_sent/transaction_received reasons (v6.0.9: fix balance not updating after send)
-        const isMiningReward = data.change_reason === 'mining_reward' ||
-                               data.change_reason === 'mining_reward_instant' ||
-                               data.change_reason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
-                               data.change_reason === 'pending_mining_reward' ||  // v2.7.6-beta: Pending rewards via P2P gossipsub
-                               (data.change_reason && data.change_reason.startsWith('mining_reward_batch_'));
-        const isDevFee = data.change_reason === 'development_fee';
+        const isMiningReward = normalizedReason === 'mining_reward' ||
+                               normalizedReason === 'mining_reward_instant' ||
+                               normalizedReason === 'p2p_mining_reward' ||  // v1.1.9-beta: P2P mining rewards from other nodes
+                               normalizedReason === 'pending_mining_reward' ||  // v2.7.6-beta: P2P mining rewards from other nodes
+                               normalizedReason.startsWith('mining_reward_batch_');
+        const isDevFee = normalizedReason === 'development_fee' || normalizedReason === 'developmentfee';
         // v6.0.9: Accept transaction balance updates so sender/receiver balances update via SSE
-        const isTransaction = data.change_reason === 'transaction_sent' ||
-                              data.change_reason === 'transaction_received';
+        const isTransaction = normalizedReason === 'transaction_sent' ||
+                              normalizedReason === 'transaction_received';
 
-        console.log('🔍 [DEBUG] Filter results:', { isMiningReward, isDevFee, isTransaction, addressMatch: data.wallet_address === walletAddress });
+        console.log('🔍 [DEBUG] Filter results:', { isMiningReward, isDevFee, isTransaction, addressMatch });
 
-        if (data.wallet_address === walletAddress && (isMiningReward || isDevFee || isTransaction)) {
+        if (addressMatch && (isMiningReward || isDevFee || isTransaction)) {
           console.log('✅ SSE: Address matches and reason is mining-related! Calling onBalanceUpdate callback');
-          console.log('✅ [DEBUG] CALLING onBalanceUpdate with:', data);
-          onBalanceUpdate(data);
+          const canonicalEvent = {
+            ...data,
+            wallet_address: this.normalizeWalletAddress(data.wallet_address || canonicalWalletAddress),
+            change_reason: normalizedReason === 'developmentfee' ? 'development_fee' : normalizedReason,
+          };
+          console.log('✅ [DEBUG] CALLING onBalanceUpdate with:', canonicalEvent);
+          onBalanceUpdate(canonicalEvent);
         } else {
           console.log('❌ SSE: Address mismatch or wrong reason, ignoring event');
           console.log('❌ [DEBUG] REJECTED because:', {
-            addressMatch: data.wallet_address === walletAddress,
+            addressMatch,
             isMiningReward,
             isDevFee,
             reason: data.change_reason
@@ -2297,7 +2345,7 @@ class QNarwhalKnightAPI {
 
         console.log('📨 SSE: Comparing addresses:', {
           received: statsData.miner_address,
-          expected: walletAddress,
+          expected: canonicalWalletAddress,
           normalizedReceived,
           normalizedWallet,
           match: addressMatch
@@ -2330,7 +2378,7 @@ class QNarwhalKnightAPI {
         // v3.3.10-beta: Use shared normalizeAddress helper for comparison
         const normalizedReceived = normalizeAddress(data.miner_address || '');
         const addressMatch = normalizedReceived === normalizedWallet;
-        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: walletAddress, normalizedReceived, normalizedWallet, match: addressMatch });
+        console.log('📨 SSE: Comparing addresses:', { received: data.miner_address, expected: canonicalWalletAddress, normalizedReceived, normalizedWallet, match: addressMatch });
 
         if (addressMatch) {
           console.log('✅ SSE: Address matches! Processing pending mining reward');

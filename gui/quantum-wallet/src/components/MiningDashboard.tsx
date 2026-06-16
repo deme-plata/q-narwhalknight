@@ -2,6 +2,7 @@ import { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trophy, TrendingUp, Zap, Clock, Award, Sparkles, DollarSign, HelpCircle, Shield } from 'lucide-react';
 import { qnkAPI, type MiningRewardEvent, type BalanceUpdateEvent, type MiningStatsEvent, type WalletMiningStats } from '../services/api';
+import sseManager from '../services/sseManager';
 import SecurityBitsVisualization from './SecurityBitsVisualization';
 import SecurityFrontierChart from './charts/SecurityFrontierChart';
 import NetworkPowerModal from './NetworkPowerModal';
@@ -40,7 +41,6 @@ export default function MiningDashboard() {
   });
   const [showRewardPopup, setShowRewardPopup] = useState(false);
   const [latestReward, setLatestReward] = useState<MiningRewardEvent | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
 
   // v3.3.4-beta: Track individual miners for hash rate breakdown tooltip
   const [miners, setMiners] = useState<Map<string, MinerInfo>>(new Map());
@@ -814,16 +814,36 @@ export default function MiningDashboard() {
     fetchEarningsData();
     const priceInterval = setInterval(fetchEarningsData, 60000);
 
-    // Subscribe to mining rewards via SSE
-    const eventSource = qnkAPI.subscribeToMiningRewards(
-      walletAddress,
-      handleMiningReward,
-      handleBalanceUpdate,
-      handleMiningStats
-    );
+    const normalizeAddress = (addr: string = '') =>
+      addr.trim().toLowerCase().replace(/^(qnk)+/, '');
+    const trackedWallet = normalizeAddress(walletAddress);
+    sseManager.setWallet(walletAddress);
 
-    console.log('✅ SSE EventSource created:', eventSource.url);
-    eventSourceRef.current = eventSource;
+    const unwrapSse = (payload: any) => payload?.data || payload;
+    const addressMatches = (addr: string = '') => normalizeAddress(addr) === trackedWallet;
+
+    const unsubscribers = [
+      sseManager.on('mining_reward', (payload: any) => {
+        const data = unwrapSse(payload);
+        if (addressMatches(data?.miner_address || '')) {
+          handleMiningReward(data as MiningRewardEvent);
+        }
+      }),
+      sseManager.on('balance-updated', (payload: any) => {
+        const data = unwrapSse(payload);
+        if (addressMatches(data?.wallet_address || '')) {
+          handleBalanceUpdate(data as BalanceUpdateEvent);
+        }
+      }),
+      sseManager.on('mining_stats', (payload: any) => {
+        const data = unwrapSse(payload);
+        if (addressMatches(data?.miner_address || '')) {
+          handleMiningStats(data as MiningStatsEvent);
+        }
+      }),
+    ];
+
+    console.log('✅ MiningDashboard subscribed to shared SSE manager');
 
     // Request notification permissions
     if ('Notification' in window && Notification.permission === 'default') {
@@ -832,9 +852,7 @@ export default function MiningDashboard() {
 
     // Cleanup on unmount
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      unsubscribers.forEach(unsubscribe => unsubscribe());
       clearInterval(networkHashrateInterval);
       clearInterval(balanceRefreshInterval);
       clearInterval(miningStatsInterval);

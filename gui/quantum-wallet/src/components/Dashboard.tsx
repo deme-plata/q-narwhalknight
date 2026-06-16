@@ -8,6 +8,7 @@ import TransactionDetailsModal from './TransactionDetailsModal';
 import { useRealtimeBlocks } from '../hooks/useRealtimeBlocks';
 import QRCodeModal from './QRCodeModal';
 const StripeCheckout = lazy(() => import('./StripeCheckout'));
+import { SmileyAvatar } from './SmileyAvatar';
 import DAGKnightVisualization from './DAGKnightVisualization';
 import QNOOracleVisualization from './QNOOracleVisualization';
 import LoanApplicationModal from './LoanApplicationModal';
@@ -16,7 +17,7 @@ import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
 import WalletCardWithGraph from './WalletCardWithGraph';
 import PhaseTransitionModal from './PhaseTransitionModal';
-import MobileSetupModal, { MOBILE_SETUP_STORAGE_KEY } from './MobileSetupModal';
+import StabilityHorizonModal, { STABILITY_HORIZON_STORAGE_KEY } from './StabilityHorizonModal';
 import StakingModal from './StakingModal';
 import CustomTokensCard from './CustomTokensCard';
 import FinanceModal from './FinanceModal';
@@ -830,7 +831,15 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNav
   // Phase transition modal state
   const [showPhaseModal, setShowPhaseModal] = useState(false); // Disabled - phase transition modal no longer needed
   const [showStakingModal, setShowStakingModal] = useState(false);
-  const [showMobileSetup, setShowMobileSetup] = useState(false);
+  const [showStabilityHorizon, setShowStabilityHorizon] = useState(false);
+
+  // v10.11.54-FE: Stability Horizon modal — replaces the old Mobile Setup welcome.
+  // Auto-opens once (per STABILITY_HORIZON_STORAGE_KEY) after a short beat.
+  useEffect(() => {
+    if (localStorage.getItem(STABILITY_HORIZON_STORAGE_KEY)) return;
+    const timer = setTimeout(() => setShowStabilityHorizon(true), 1800);
+    return () => clearTimeout(timer);
+  }, []);
   const [newsCollapsed, setNewsCollapsed] = useState(true);
   const [selectedArticle, setSelectedArticle] = useState<null | {
     tag: string; tagColor: string; tagBg: string; tagBorder: string;
@@ -1163,7 +1172,38 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               uptime_formatted: prev?.uptime_formatted || '0h 0m 0s',
             } as NodeStatus));
           } else {
-            setError('Failed to connect to Q-NarwhalKnight node');
+            // v10.11.56: Do NOT block a logged-in user behind the (lock-prone) /api/v1/node/status
+            // endpoint. That route is server-side labelled 'may wait for locks' and can hang ~15s
+            // under the node_status RwLock wedge; a brand-new account simply has cachedBalance=0 and
+            // must NOT be shown a full-screen 'Node Connection Error'. Fetch the wallet's OWN balance
+            // directly (fast, lock-free /wallets/{addr}/balance path) and render a degraded dashboard.
+            const currentWalletAddress = localStorage.getItem('walletAddress');
+            if (currentWalletAddress) {
+              let directBalance = 0;
+              try {
+                const balResp = await qnkAPI.getWalletBalance(currentWalletAddress, true);
+                if (balResp.success && balResp.data) {
+                  directBalance = balResp.data.balance_qnk || 0;
+                  if (directBalance > 0) safeCacheBalance(directBalance);
+                }
+              } catch (balErr) {
+                console.warn('⚠️ Direct balance fetch also failed (degraded render):', balErr);
+              }
+              setNodeStatus(prev => ({
+                ...(prev || {} as NodeStatus),
+                balance: directBalance,
+                network_health: 'unknown',
+                consensus_status: 'unknown',
+                current_height: prev?.current_height || 0,
+                tps_current: prev?.tps_current || 0,
+                tps_average: prev?.tps_average || 0,
+                uptime_formatted: prev?.uptime_formatted || '0h 0m 0s',
+              } as NodeStatus));
+              setError(null);
+            } else {
+              // No wallet identity loaded at all -> genuine connection/identity error.
+              setError('Failed to connect to Q-NarwhalKnight node');
+            }
           }
         }
       }
@@ -1790,8 +1830,10 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
     const unsubBalance = sseManager.on('balance-updated', (data: any) => {
       const payload = data?.data ?? data;
       const addr = payload?.wallet_address ?? '';
-      if (!addr || addr.includes(currentWalletAddr.replace(/^qnk/, '')) ||
-          currentWalletAddr.includes(addr.replace(/^qnk/, ''))) {
+      const normalizeAddr = (value: string = '') => value.trim().toLowerCase().replace(/^(qnk)+/, '');
+      const eventAddr = normalizeAddr(addr);
+      const currentAddr = normalizeAddr(currentWalletAddr);
+      if (!addr || eventAddr === currentAddr) {
         triggerTxRefresh();
       }
     });
@@ -3108,9 +3150,9 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         <QuantumLoader backgroundOnly />
       </div>
 
-      {/* Mobile Setup QR Modal */}
-      {showMobileSetup && (
-        <MobileSetupModal onClose={() => setShowMobileSetup(false)} />
+      {/* Stability Horizon welcome modal */}
+      {showStabilityHorizon && (
+        <StabilityHorizonModal onClose={() => setShowStabilityHorizon(false)} />
       )}
       {/* Phase Transition Modal (legacy) */}
       {showPhaseModal && (
@@ -3874,6 +3916,9 @@ We thank the community members who reported degraded sync speeds and helped us r
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {walletBalances.map((wallet, index) => {
                 // v10.2.0: DEX lock is handled by event handlers (qug-balance-changed, dex-cooldown-expired)
+            <div className="flex justify-center mb-6">
+              <SmileyAvatar balance={walletBalances.find(w => w.symbol === 'QUG')?.balance || 0} tier="agent" size={180} />
+            </div>
                 // which update walletBalances state directly. WalletCardWithGraph has its own
                 // debounced stable balance to prevent decimal flickering. No render-time override needed.
                 return (

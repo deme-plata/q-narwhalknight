@@ -18638,47 +18638,64 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                         }
 
-                        // 🚨 v0.9.95-beta: CRITICAL FIX - Verify producers are synced with database
-                        // v8.0.5: Add 10s timeout — sync_from_storage() can hang on RocksDB,
-                        // blocking the entire mining loop and causing "Mining queue full" backpressure.
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
-                        ).await {
-                            Ok(Err(e)) => {
-                                // v10.11.25: sync_from_storage() wraps get_highest_contiguous_block()
-                                // in its own 5s RocksDB timeout. Under compaction / explorer load this
-                                // can return a storage timeout even while current_height_atomic and
-                                // highest_network_height agree. Treating that timeout as a hard height
-                                // desync made every production cycle return before produce_blocks(),
-                                // so miners kept submitting but explorer height/balances never moved.
-                                //
-                                // If we are already at the observed network tip, proceed with the
-                                // in-memory producer height and let duplicate/monotonicity guards below
-                                // protect storage. Real sync/desync errors still abort this cycle.
-                                let msg = e.to_string();
-                                if msg.contains("RocksDB timeout: get_highest_contiguous_block")
-                                    && current_height > 0
-                                    && current_height >= network_height
-                                {
-                                    warn!(
-                                        "⚠️ [BLOCK-PROD] sync_from_storage storage-height timeout at tip (cur_h={}, net_h={}) — proceeding with production",
-                                        current_height, network_height
-                                    );
-                                } else {
-                                    error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
-                                    error!("   Forcing producer resync to prevent height drift");
-                                    return; // Skip this production cycle, retry after resync (v9.8.3: return from async block)
+                        // Full producer sync reads RocksDB and is too expensive for the
+                        // production hot path. At tip, producers are advanced by
+                        // notify_height_advanced() immediately after each saved block.
+                        static LAST_PRE_PROD_FULL_SYNC_MS: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let should_full_sync = if current_height == 0
+                            || network_height > current_height.saturating_add(1)
+                        {
+                            true
+                        } else {
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let prev = LAST_PRE_PROD_FULL_SYNC_MS.load(std::sync::atomic::Ordering::Relaxed);
+                            now_ms >= prev.saturating_add(30_000)
+                                && LAST_PRE_PROD_FULL_SYNC_MS
+                                    .compare_exchange(
+                                        prev,
+                                        now_ms,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                        };
+
+                        if should_full_sync {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
+                            ).await {
+                                Ok(Err(e)) => {
+                                    let msg = e.to_string();
+                                    if msg.contains("RocksDB timeout: get_highest_contiguous_block")
+                                        && current_height > 0
+                                        && current_height >= network_height
+                                    {
+                                        warn!(
+                                            "⚠️ [BLOCK-PROD] periodic sync_from_storage timeout at tip (cur_h={}, net_h={}) — proceeding",
+                                            current_height, network_height
+                                        );
+                                    } else {
+                                        error!("🚨 HEIGHT DESYNC DETECTED before block production: {}", e);
+                                        error!("   Forcing producer resync to prevent height drift");
+                                        return;
+                                    }
                                 }
+                                Err(_) => {
+                                    warn!("⏱️ [TIMEOUT] periodic sync_from_storage() timed out after 5s — proceeding");
+                                }
+                                Ok(Ok(())) => {}
                             }
-                            Err(_) => {
-                                warn!("⏱️ [TIMEOUT] sync_from_storage() timed out after 10s — skipping sync, proceeding with production");
-                                // Don't continue — proceed with potentially stale height.
-                                // A stale sync is better than a frozen mining loop.
-                            }
-                            Ok(Ok(())) => {
-                                // Sync succeeded normally
-                            }
+                        } else {
+                            trace!(
+                                "[BLOCK-PROD] Skipping full pre-production storage sync at tip (cur_h={}, net_h={})",
+                                current_height,
+                                network_height
+                            );
                         }
 
                         // 💰 v8.7.0: Distributed operator fee pre-computation
@@ -19234,36 +19251,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     }
                                 } // close if let Some(mining_stats_arc)
 
-                                // ✅ v1.0.14-beta CRITICAL FIX: Sync ALL producers after EVERY block save
-                                // Root cause: Only advancing single producer caused 7/8 producers stuck at stale heights
-                                // Symptoms: Producer #0 at height 94835, producers #1-7 stuck at 91630-92204 (2,600+ blocks behind)
-                                // Solution: Force all producers to reload height from database after EVERY successful save
-                                //
-                                // OLD BUG (v1.0.13-beta and earlier):
-                                //   app_state_mining.block_producer_pool.advance_producer_height(producer_id, block_hash);
-                                //   ^ Only updated the ONE producer that created the block!
-                                //
-                                // NEW FIX (v1.0.14-beta):
-                                //   Sync ALL producers from storage after EVERY successful block save
-                                info!("🔄 [v1.0.14-beta] Syncing ALL {} producers to latest height {} (bug fix)",
-                                      8, new_block.header.height);
-
-                                // v8.0.5: Add 10s timeout to post-save sync
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(10),
-                                    app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
-                                ).await {
-                                    Ok(Err(e)) => {
-                                        error!("❌ CRITICAL: Failed to sync producers after block save: {}", e);
-                                        error!("   This will cause height regression on next block!");
-                                    }
-                                    Err(_) => {
-                                        warn!("⏱️ [TIMEOUT] Post-save sync_from_storage() timed out after 10s");
-                                    }
-                                    Ok(Ok(())) => {
-                                        info!("✅ [v1.0.14-beta] ALL producers synchronized to height {} (prevents height regression)",
-                                              new_block.header.height);
-                                    }
+                                // Keep all producers hot without re-reading RocksDB on every block.
+                                // Full sync is still available on gap/sync paths; the fast production
+                                // path only needs to notify the just-saved height/hash.
+                                if let Err(e) = app_state_mining
+                                    .block_producer_pool
+                                    .notify_height_advanced(
+                                        new_block.header.height,
+                                        block_hash,
+                                        new_block.header.total_difficulty,
+                                    )
+                                    .await
+                                {
+                                    error!("❌ Failed to notify producers after block save: {}", e);
                                 }
 
                                 // v3.5.9-beta: Index all block transactions for wallet history
@@ -20242,29 +20242,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             }
                         }
 
-                        // 🚨 v0.9.13-beta CRITICAL FIX: Sync all producers after parallel block production
-                        // When 8 producers create blocks at the same height, we must sync them all to advance
-                        // to the next height. Without this, all producers stay stuck at the same height forever!
                         if blocks_produced > 0 {
-                            info!(
-                                "🔄 Syncing {} producers after creating {} blocks...",
-                                8, blocks_produced
+                            trace!(
+                                "[BLOCK-PROD] Skipping redundant post-production storage sync after {} block(s); producers were notified post-save",
+                                blocks_produced
                             );
-                            // v8.0.5: Add 10s timeout to post-production sync
-                            match tokio::time::timeout(
-                                std::time::Duration::from_secs(10),
-                                app_state_mining.block_producer_pool.sync_from_storage(&app_state_mining.storage_engine),
-                            ).await {
-                                Ok(Err(e)) => {
-                                    error!("❌ Failed to sync producers after block production: {}", e);
-                                }
-                                Err(_) => {
-                                    warn!("⏱️ [TIMEOUT] Post-production sync_from_storage() timed out after 10s");
-                                }
-                                Ok(Ok(())) => {
-                                    info!("✅ All producers synchronized - ready for next height");
-                                }
-                            }
                         }
                             } // Close async block inner scope
                         ).await;
@@ -20987,19 +20969,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 // External AI Review: Must mirror ALL state updates from solution-based loop
                                 let block_hash = new_block.calculate_hash();
 
-                                // ✅ v1.0.14-beta CRITICAL FIX: Sync ALL producers (same fix as solution-based loop)
-                                info!("🔄 [v1.0.14-beta TIME-BASED] Syncing ALL {} producers to latest height {} (bug fix)",
-                                      8, new_block.header.height);
-
                                 if let Err(e) = app_state_block_producer
                                     .block_producer_pool
-                                    .sync_from_storage(&app_state_block_producer.storage_engine)
+                                    .notify_height_advanced(
+                                        new_block.header.height,
+                                        block_hash,
+                                        new_block.header.total_difficulty,
+                                    )
                                     .await
                                 {
-                                    error!("❌ CRITICAL: Failed to sync producers after time-based block save: {}", e);
-                                } else {
-                                    info!("✅ [v1.0.14-beta TIME-BASED] ALL producers synchronized to height {}",
-                                          new_block.header.height);
+                                    error!("❌ Failed to notify producers after time-based block save: {}", e);
                                 }
 
                                 // v3.5.9-beta: Index all block transactions for wallet history
@@ -21298,18 +21277,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                         // 📡 v0.9.33-beta: Broadcast SSE events for real-time frontend balance updates
                         // v3.4.2-beta: Now includes transfer transactions, not just coinbase!
-                        // CRITICAL FIX: Deduplicate balance_updates to prevent sending duplicate SSE events
-                        // When a block contains multiple transactions, the same wallet can appear multiple times
-                        use std::collections::HashMap;
-                        // v3.4.2-beta: Store (old_balance, new_balance, change_reason) with address as key
-                        let mut deduped_updates: HashMap<[u8; 32], (u64, u64, String)> = HashMap::new();
-                        for (wallet_addr, old_balance, new_balance, _is_sender, change_reason) in balance_updates {
-                            // Keep the latest balance for each wallet (last one wins)
-                            // But preserve the change_reason to distinguish transfers from coinbase
-                            deduped_updates.insert(wallet_addr, (old_balance, new_balance, change_reason));
-                        }
+                        let block_hash_hex = hex::encode(block_hash);
+                        for (wallet_addr, old_balance, new_balance, _is_sender, mut change_reason) in balance_updates {
+                            if old_balance == new_balance {
+                                trace!(
+                                    "[SSE] Skipping unchanged production balance update for wallet {} at height {}",
+                                    hex::encode(&wallet_addr[..8]),
+                                    new_block.header.height
+                                );
+                                continue;
+                            }
 
-                        for (wallet_addr, (old_balance, new_balance, mut change_reason)) in deduped_updates {
                             let wallet_addr_hex = hex::encode(wallet_addr);
                             let old_balance_f64 = old_balance as f64 / QUG_DISPLAY_DIVISOR;
                             let new_balance_f64 = new_balance as f64 / QUG_DISPLAY_DIVISOR;
@@ -21317,9 +21295,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // v3.4.2-beta: Use the provided change_reason, with special handling for dev fee
                             const MASTER_ACCOUNT_HEX: &str =
                                 "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
-                            // Override to DevelopmentFee if this is the master account AND it's a coinbase
+                            // Label master-account coinbase as development_fee for frontend compatibility.
                             if wallet_addr_hex == MASTER_ACCOUNT_HEX && change_reason == "coinbase" {
-                                change_reason = "DevelopmentFee".to_string();
+                                change_reason = "development_fee".to_string();
                             } else if change_reason == "coinbase" {
                                 change_reason = "mining_reward".to_string();
                             }
@@ -21334,8 +21312,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     new_balance: new_balance_f64,
                                     change_reason,
                                     timestamp: chrono::Utc::now(),
-                                    block_hash: None, // Time-based update, no direct block
-                                    block_height: None,
+                                    block_hash: Some(block_hash_hex.clone()),
+                                    block_height: Some(new_block.header.height),
                                     confirmation_status: "confirmed".to_string(), // Mining rewards
                                     from_address: None,
                                     tx_hash: None,

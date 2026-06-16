@@ -553,9 +553,11 @@ pub enum PeerEventType {
 /// Event broadcaster for managing real-time streams
 pub struct EventBroadcaster {
     tx: broadcast::Sender<StreamEvent>,
-    // Deduplication cache: stores (wallet_address, balance) with timestamp to prevent duplicate broadcasts
+    // Deduplication cache: stores the last exact BalanceUpdated payload per wallet.
+    // It must not coalesce real balance deltas; it only suppresses duplicate sends
+    // of the same old/new/reason/height tuple inside a tiny retry window.
     recent_balance_broadcasts:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>>,
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, f64, Option<u64>, String, std::time::Instant)>>>,
 }
 
 impl EventBroadcaster {
@@ -583,31 +585,56 @@ impl EventBroadcaster {
         // v9.2.7: Reduced from 500ms to 100ms for faster SSE updates
         if let StreamEvent::BalanceUpdated {
             wallet_address,
+            old_balance,
             new_balance,
+            change_reason,
+            block_height,
             ..
         } = &event
         {
+            if old_balance == new_balance {
+                trace!(
+                    "[SSE] Skipping unchanged BalanceUpdated for {}...",
+                    &wallet_address[..16.min(wallet_address.len())]
+                );
+                return Ok(());
+            }
+
             let mut cache = self.recent_balance_broadcasts.lock().await;
             let now = std::time::Instant::now();
 
             // Check if we recently broadcast this exact balance
-            if let Some((last_balance, last_time)) = cache.get(wallet_address) {
-                if (*last_balance - new_balance).abs() < 0.00000001
+            if let Some((last_old, last_new, last_height, last_reason, last_time)) =
+                cache.get(wallet_address)
+            {
+                if *last_old == *old_balance
+                    && *last_new == *new_balance
+                    && last_height == block_height
+                    && last_reason == change_reason
                     && now.duration_since(*last_time).as_millis() < 100
                 {
                     trace!(
                         "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 100ms)",
-                        &wallet_address[..16]
+                        &wallet_address[..16.min(wallet_address.len())]
                     );
                     return Ok(());
                 }
             }
 
             // Update cache
-            cache.insert(wallet_address.clone(), (*new_balance, now));
+            cache.insert(
+                wallet_address.clone(),
+                (
+                    *old_balance,
+                    *new_balance,
+                    *block_height,
+                    change_reason.clone(),
+                    now,
+                ),
+            );
 
             // Clean old entries (older than 500ms)
-            cache.retain(|_, (_, time)| now.duration_since(*time).as_millis() < 500);
+            cache.retain(|_, (_, _, _, _, time)| now.duration_since(*time).as_millis() < 500);
         }
 
         // 🔒 PRIVACY: Log aggregate statistics only, no individual wallet data
@@ -738,11 +765,12 @@ pub async fn sse_events(
         }
     };
 
-    // v11.1.1 PRIVACY: REQUIRE X-Wallet-Auth for any ?wallet_address= filter.
-    // Earlier versions silently downgraded missing/mismatched auth to a public stream,
-    // which let browser clients silently lose wallet-specific events without knowing
-    // why. v11.1.1 returns 401 instead — explicit failure beats invisible degradation.
-    // Unfiltered public streams still work without auth.
+    // v10.11.24 COMPAT: restore 10.11.17 browser behavior for wallet-filtered SSE.
+    // Several shipped browser paths still use native EventSource with ?wallet_address=
+    // but no X-Wallet-Auth/query auth. Rejecting those with 401 makes the wallet look
+    // dead: balances load by HTTP, but live balance/miner events never arrive. Keep
+    // strict mismatch rejection when auth is supplied, but accept an unsigned filter
+    // and still apply the per-wallet event filter below.
     let wallet_filter: Option<String> = match (requested_filter.as_ref(), auth_wallet.as_ref()) {
         (Some(filter), Some(auth)) => {
             let hex_part = filter.strip_prefix("qnk").unwrap_or(filter.as_str());
@@ -763,12 +791,12 @@ pub async fn sse_events(
                 return Err((StatusCode::UNAUTHORIZED, "wallet_address does not match X-Wallet-Auth"));
             }
         }
-        (Some(_filter), None) => {
+        (Some(filter), None) => {
             warn!(
-                "🔒 SSE: wallet_filter requested without X-Wallet-Auth — rejecting with 401 \
-                 (v11.1.1 hardening; supply X-Wallet-Auth header to receive wallet-specific events)"
+                "SSE: accepting unsigned wallet_address filter for browser compatibility \
+                 (v10.11.24); events remain filtered to requested wallet"
             );
-            return Err((StatusCode::UNAUTHORIZED, "X-Wallet-Auth required for wallet_address filter"));
+            Some(filter.clone())
         }
         (None, _) => None,
     };
@@ -1010,23 +1038,23 @@ pub async fn sse_events(
                 // 🔒 PRIVACY: No logging of balances or addresses
                 debug!("💰 SSE: Initial balance fetched from RocksDB");
 
-                // Create initial balance event
+                // Create initial balance snapshot. BalanceUpdated is reserved for
+                // real deltas and must never carry old_balance == new_balance.
                 let initial_balance_event = serde_json::json!({
-                    "type": "BalanceUpdated",
+                    "type": "BalanceSnapshot",
                     "data": {
                         "wallet_address": wallet_filter_value.clone(),
-                        "old_balance": balance_qnk,
-                        "new_balance": balance_qnk,
-                        "change_reason": "SSE connection established",
+                        "balance": balance_qnk,
+                        "source": "sse_connect",
                         "timestamp": chrono::Utc::now().to_rfc3339()
                     }
                 });
 
                 if let Ok(json) = serde_json::to_string(&initial_balance_event) {
-                    // Return initial balance event, then continue with normal stream
+                    // Return initial balance snapshot, then continue with normal stream
                     // Set state_opt to None so we don't send initial balance again
                     return Some((
-                        Ok(Event::default().event("balance-updated").data(json)),
+                        Ok(Event::default().event("balance-snapshot").data(json)),
                         (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                     ));
                 }
