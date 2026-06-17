@@ -2508,6 +2508,94 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
   );
 };
 
+// === Latest 100 Blocks — dense, clickable table (opens the block DetailModal) ===
+function LatestBlocksTable({ onSelect }: { onSelect: (block: any) => void }) {
+  const [rows, setRows] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const res = await qnkAPI.getRecentBlocks(100);
+        if (alive && res.success && Array.isArray(res.data) && res.data.length) {
+          setRows(res.data);
+        }
+      } catch { /* keep last good data */ }
+      finally { if (alive) setLoading(false); }
+    };
+    load();
+    const t = setInterval(load, 8000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  const fmtAge = (ts: number) => {
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s ago`;
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ago`;
+  };
+  const shorten = (h?: string) => (h && h.length > 16 ? `${h.slice(0, 10)}…${h.slice(-6)}` : (h || '—'));
+
+  return (
+    <div className="bg-quantum-indigo/20 backdrop-blur-xl rounded-xl border border-quantum-purple/20 overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-4 border-b border-quantum-purple/20">
+        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+          🧱 Latest 100 Blocks
+          <span className="text-xs font-normal text-gray-400">live · click a row for full details</span>
+        </h3>
+        <span className="text-xs text-quantum-cyan font-mono">
+          {rows.length ? `tip #${rows[0].height?.toLocaleString?.() ?? rows[0].height}` : (loading ? 'loading…' : '—')}
+        </span>
+      </div>
+      <div className="max-h-[640px] overflow-y-auto overflow-x-auto">
+        <table className="w-full text-sm min-w-[640px]">
+          <thead className="sticky top-0 z-10 bg-quantum-dark/85 backdrop-blur">
+            <tr className="text-left text-[11px] uppercase tracking-wider text-gray-400">
+              <th className="px-4 py-2.5 font-medium">Height</th>
+              <th className="px-4 py-2.5 font-medium">Age</th>
+              <th className="px-4 py-2.5 font-medium text-right">Txs</th>
+              <th className="px-4 py-2.5 font-medium text-right">Solutions</th>
+              <th className="px-4 py-2.5 font-medium text-right">DAG Round</th>
+              <th className="px-4 py-2.5 font-medium">Proposer</th>
+              <th className="px-4 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((b, i) => (
+              <tr
+                key={b.height ?? i}
+                onClick={() => onSelect(b)}
+                className={`border-t border-quantum-purple/10 cursor-pointer transition-colors hover:bg-quantum-cyan/10 ${i === 0 ? 'bg-quantum-green/5' : ''}`}
+              >
+                <td className="px-4 py-2.5 font-mono font-semibold text-quantum-cyan whitespace-nowrap">
+                  {b.height?.toLocaleString?.() ?? b.height ?? '—'}
+                  {i === 0 && (
+                    <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded-full bg-quantum-green/20 text-quantum-green align-middle">TIP</span>
+                  )}
+                </td>
+                <td className="px-4 py-2.5 text-gray-300 whitespace-nowrap">{b.timestamp ? fmtAge(b.timestamp) : '—'}</td>
+                <td className="px-4 py-2.5 text-right text-white font-medium">{b.tx_count ?? 0}</td>
+                <td className="px-4 py-2.5 text-right text-quantum-purple">{b.mining_solutions ?? 0}</td>
+                <td className="px-4 py-2.5 text-right text-gray-400 font-mono">{b.dag_round?.toLocaleString?.() ?? b.dag_round ?? '—'}</td>
+                <td className="px-4 py-2.5 font-mono text-xs text-gray-300">{shorten(b.proposer)}</td>
+                <td className="px-4 py-2.5 text-right text-gray-500">›</td>
+              </tr>
+            ))}
+            {!rows.length && (
+              <tr>
+                <td colSpan={7} className="px-4 py-10 text-center text-gray-500">
+                  {loading ? 'Loading latest blocks…' : 'No blocks available'}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export default function ExplorerScreen({ isActive = false }: { isActive?: boolean }) {
   // v3.5.24: P2P-first data fetching
   const { fetchBlock, verifyTransaction, findTransaction, isOffline, stats: p2pStats, isP2PReady } = useP2PData();
@@ -2804,7 +2892,7 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
             currentRound: nodeStatus.data.current_round || Math.floor((nodeStatus.data.current_height || 0) / 100),
             currentTps: nodeStatus.data.tps_current || 0,
             totalTransactions: 0,
-            activePeers: nodeStatus.data.connected_peers || 0,
+            activePeers: nodeStatus.data?.connected_peers || 0,
             networkHealth: nodeStatus.data.is_validator ? 0.95 : 0.8,
             consensusParticipation: nodeStatus.data.is_validator ? 1.0 : 0.0,
             mempoolSize: nodeStatus.data.tx_pool_size || 0,
@@ -3004,9 +3092,12 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
     if (!isActive) return;
     const heightPoll = setInterval(async () => {
       try {
-        const result = await qnkAPI.getNodeStatus();
-        if (result?.success && result.data) {
-          const newHeight = result.data.current_height || 0;
+        // v10.11.56 (2026-06-15): /api/v1/node/status HANGS on lock contention
+        // (master diagnosis N-1b) -> getNodeStatus never resolved and the height
+        // stayed at 0. Use the fast, always-responsive /v1/blocks/recent tip instead.
+        const result = await qnkAPI.getRecentBlocks(1);
+        if (result?.success && Array.isArray(result.data) && result.data.length > 0) {
+          const newHeight = result.data[0].height || 0;
           if (newHeight > highestKnownHeightRef.current) {
             highestKnownHeightRef.current = newHeight;
             setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
@@ -3023,26 +3114,31 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
   // and trigger sseManager reconnect loops that starve the REST rate limiter.
   useEffect(() => {
     const unsubNodeStatus = sseManager.on('node-status', (data: any) => {
-      const newHeight = data.current_height || data.status?.current_height;
+      // v10.11.56 (2026-06-15): SSE payload is {type, data:{...}} — unwrap it.
+      // Was reading data.current_height directly (undefined) so the height never moved.
+      const p = data?.data ?? data;
+      const newHeight = p.current_height || p.status?.current_height;
       if (newHeight && newHeight > highestKnownHeightRef.current) {
         highestKnownHeightRef.current = newHeight;
         setNetworkStats(prev => ({ ...prev, currentHeight: newHeight }));
       }
-      const peers = data.connected_peers ?? data.status?.connected_peers;
+      const peers = p.connected_peers ?? p.status?.connected_peers;
       if (peers !== undefined) {
         setNetworkStats(prev => ({ ...prev, activePeers: peers }));
       }
     });
 
     const unsubMiningReward = sseManager.on('mining_reward', (data: any) => {
-      if (data.block_height && data.block_height > highestKnownHeightRef.current) {
-        highestKnownHeightRef.current = data.block_height;
-        setNetworkStats(prev => ({ ...prev, currentHeight: data.block_height }));
+      const p = data?.data ?? data;
+      if (p.block_height && p.block_height > highestKnownHeightRef.current) {
+        highestKnownHeightRef.current = p.block_height;
+        setNetworkStats(prev => ({ ...prev, currentHeight: p.block_height }));
       }
     });
 
     const unsubNewBlock = sseManager.on('new-block', (data: any) => {
-      const height = data.height || data.block?.height || data.header?.height;
+      const p = data?.data ?? data;
+      const height = p.height || p.block?.height || p.header?.height;
       if (height && height > highestKnownHeightRef.current) {
         highestKnownHeightRef.current = height;
         setNetworkStats(prev => ({ ...prev, currentHeight: height }));
@@ -3335,6 +3431,22 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
   };
 
   // handleStatClick removed - using modal interface now
+
+  // v10.11.45: open-explorer-tx event (from the send modal's "View in Block Explorer"
+  // link) — pre-fill the search box with the tx hash and run the search so the user
+  // immediately sees it confirmed.
+  useEffect(() => {
+    const onOpenTx = (e: Event) => {
+      const hash = (e as CustomEvent)?.detail?.hash;
+      if (typeof hash === 'string' && hash.trim()) {
+        const h = hash.replace(/^0x/i, '').trim();
+        setSearchQuery(h);
+        handleSearch(h);
+      }
+    };
+    window.addEventListener('open-explorer-tx', onOpenTx as EventListener);
+    return () => window.removeEventListener('open-explorer-tx', onOpenTx as EventListener);
+  }, []);
 
   return (
     <div className="space-y-8">
@@ -4984,7 +5096,8 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
         transition={{ delay: 0.6 }}
       >
         <h2 className="text-xl font-semibold text-white mb-6">🔥 Recent Network Activity</h2>
-        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-6">
+        {/* Empty Vertices / Smart-Contract cards removed — auto-shown only when the feed has data */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <ActivityCard
             title="💸 Recent Transactions"
             items={recentActivity.transactions}
@@ -4993,15 +5106,29 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
             title="🧱 Recent Blocks"
             items={recentActivity.blocks}
           />
-          <ActivityCard
-            title="⚛️ Recent Vertices"
-            items={recentActivity.vertices}
-          />
-          <ActivityCard
-            title="📜 Smart Contracts"
-            items={recentActivity.contracts}
-          />
+          {recentActivity.vertices.length > 0 && (
+            <ActivityCard
+              title="⚛️ Recent Vertices"
+              items={recentActivity.vertices}
+            />
+          )}
+          {recentActivity.contracts.length > 0 && (
+            <ActivityCard
+              title="📜 Smart Contracts"
+              items={recentActivity.contracts}
+            />
+          )}
         </div>
+      </motion.section>
+
+      {/* 🧱 Latest 100 Blocks — dense table, click a row for the full block modal */}
+      <motion.section
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.7 }}
+        className="mt-8"
+      >
+        <LatestBlocksTable onSelect={(b) => setSelectedDetail({ type: 'block', data: b })} />
       </motion.section>
 
       {/* ✨ Infinite Scroll Blockchain Explorer */}
