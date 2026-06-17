@@ -9,6 +9,7 @@ import { validateMnemonic as bip39ValidateMnemonic } from '@scure/bip39';
 import { wordlist as bip39English } from '@scure/bip39/wordlists/english.js';
 import ExplorerSearchBar from './ExplorerSearchBar';
 import PapersLibraryModal from './PapersLibraryModal';
+import DexScreen from './DexScreen';
 
 interface LoginScreenProps {
   onAuthenticate: () => void;
@@ -129,12 +130,18 @@ function QuantumFieldBackground() {
         type,
       });
 
-      // Emit pulse on block height change
-      if (nd.height > prevHeightRef.current && Math.random() < 0.3) {
+      // ⬡ Chain-tick HERO pulse — a sealed block ripples the whole field.
+      // Dual-ring (warm gold/violet outer + cyan inner) reads as a real
+      // settlement landing; bigger + brighter so it BATTERS over the sunset.
+      if (nd.height > prevHeightRef.current && Math.random() < 0.5) {
+        const bx = Math.random() * w, by = Math.random() * h;
         pulses.push({
-          x: Math.random() * w, y: Math.random() * h,
-          radius: 0, maxRadius: 80 + Math.random() * 120,
-          alpha: 0.3, color: type === 'finalized' ? '#9455F7' : '#D4AF37',
+          x: bx, y: by, radius: 0, maxRadius: 140 + Math.random() * 160,
+          alpha: 0.5, color: type === 'finalized' ? '#c084fc' : '#FFD700',
+        });
+        pulses.push({
+          x: bx, y: by, radius: 0, maxRadius: 90 + Math.random() * 90,
+          alpha: 0.4, color: '#22d3ee',
         });
       }
     };
@@ -249,6 +256,13 @@ function QuantumFieldBackground() {
         const my = (pi.y + pj.y) / 2 + Math.cos(t + j) * 8;
         ctx.quadraticCurveTo(mx, my, pj.x, pj.y);
         ctx.stroke();
+
+        // ⬡ Quantum entanglement ring — strong couplings ripple spacetime.
+        // Cyan expanding ring at the coupling midpoint: the signature flourish
+        // of a post-quantum settlement chain (sings against the warm sunset).
+        if (R > 2.0 && Math.random() < 0.03) {
+          pulses.push({ x: mx, y: my, radius: 2, maxRadius: 55 + R * 9, alpha: 0.32, color: '#22d3ee' });
+        }
       }
 
       // Update and draw particles
@@ -451,6 +465,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [showAIModal, setShowAIModal] = useState(false);
   const [aiCopied, setAiCopied] = useState(false);
   const [showPapersLibrary, setShowPapersLibrary] = useState(false);
+  const [showDEXModal, setShowDEXModal] = useState(false);
   const [isMetaMaskConnecting, setIsMetaMaskConnecting] = useState(false);
   const [hasMetaMask, setHasMetaMask] = useState(false);
   // Persisted Tor onion address - fetched from backend, fallback to hardcoded
@@ -490,7 +505,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             setBlockPulse(true);
             setTimeout(() => setBlockPulse(false), 600);
           }
-          if (data.connected_peers !== undefined) setLivePeers(data.connected_peers);
+          if (data.connected_peers !== undefined) setLivePeers(prev => Math.max(prev || 0, data.connected_peers));
         } catch { /* ignore parse errors */ }
       });
       es.addEventListener('block-mined', (e: MessageEvent) => {
@@ -511,6 +526,22 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
     } catch { /* SSE not supported - fallback to polling */ }
     return () => { es?.close(); };
   }, [showExplorerDropdown]);
+
+  // Browser-to-browser (js-libp2p gossipsub) peer count - live, independent of relay peers
+  useEffect(() => {
+    const onBrowserPeers = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && typeof detail.peerCount === 'number') {
+        setLivePeers(prev => Math.max(prev || 0, detail.peerCount));
+      }
+    };
+    window.addEventListener('browser-peer-discovered', onBrowserPeers);
+    window.addEventListener('browser-peers-updated', onBrowserPeers);
+    return () => {
+      window.removeEventListener('browser-peer-discovered', onBrowserPeers);
+      window.removeEventListener('browser-peers-updated', onBrowserPeers);
+    };
+  }, []);
 
   // Initial data fetch + periodic refresh via HTTP (fallback)
   useEffect(() => {
@@ -1001,9 +1032,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         {/* ════════════════════════════════════════════════════════════ */}
         <motion.div
           className="absolute top-3 left-3 z-40"
-          initial={{ opacity: 0, scale: 0.7 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.5, delay: 0.1 }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.3 }}
         >
           <div className="w-14 h-14 relative">
             {/* Compact cosmic glow */}
@@ -1141,6 +1172,21 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             <span className="text-[9px] font-bold text-orange-300/90 tracking-wider uppercase relative z-10">Papers</span>
           </motion.button>
 
+          {/* DEX - no-login live preview */}
+          <motion.button
+            className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-green-600/20 hover:bg-green-600/40 border border-green-400/30 hover:border-green-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md"
+            whileHover={{ scale: 1.05, y: -2 }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.4, type: "spring", stiffness: 260, damping: 20 }}
+            onClick={() => setShowDEXModal(true)}
+          >
+            <motion.div className="absolute inset-0 rounded-xl bg-gradient-to-b from-green-400/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+            <Coins className="w-5 h-5 text-green-400 relative z-10" />
+            <span className="text-[9px] font-bold text-green-300/90 tracking-wider uppercase relative z-10">DEX</span>
+          </motion.button>
+
           {/* AI Setup */}
           <motion.button
             className="relative flex flex-col items-center gap-0.5 px-2.5 py-1.5 bg-violet-600/20 hover:bg-violet-600/40 border border-violet-400/30 hover:border-violet-400/60 rounded-xl transition-all cursor-pointer group backdrop-blur-md overflow-hidden"
@@ -1188,7 +1234,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         {/* Explorer Search Bar + Live Data Dropdown */}
         <motion.div
           ref={explorerContainerRef}
-          className="pt-6 pb-4"
+          className="relative pt-6 pb-4"
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: menuHovered ? 0 : 1, y: 0 }}
           transition={{ duration: 0.3 }}
@@ -1218,7 +1264,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 animate={{ opacity: 1, y: 0, scaleY: 1 }}
                 exit={{ opacity: 0, y: -10, scaleY: 0.8 }}
                 transition={{ duration: 0.25, ease: 'easeOut' }}
-                className="mt-3 max-w-2xl mx-auto rounded-2xl overflow-hidden backdrop-blur-xl"
+                className="absolute left-0 right-0 top-full mt-2 max-w-2xl mx-auto rounded-2xl overflow-hidden backdrop-blur-xl z-50"
                 style={{
                   background: 'linear-gradient(145deg, rgba(8,12,30,0.95) 0%, rgba(15,10,35,0.95) 50%, rgba(8,15,30,0.95) 100%)',
                   border: '1px solid rgba(212,175,55,0.25)',
@@ -1421,9 +1467,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
         <div className="flex-1 flex items-center justify-center">
           <motion.div
             className="w-full max-w-5xl"
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ duration: 0.5, delay: 0.1 }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
           >
             {/* Logo and Title */}
             <div className="text-center mb-12">
@@ -1519,7 +1565,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     </div>
                   </div>
                   <div className="text-violet-300/60 text-[10px] uppercase tracking-wider">
-                    For Claude · Cursor · Codex · GPT · Grok clients
+                    For Claude · Cursor · Codex · Gemini · Grok · Antigravity clients
                   </div>
                 </div>
 
@@ -1572,83 +1618,231 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               </div>
             </motion.div>
 
-            {/* Login Form - frosted glass card */}
+            {/* Login Form — Quantum Seed Phrase Card */}
             <motion.div
-              className="relative rounded-3xl p-8 backdrop-blur-xl"
+              className="relative rounded-3xl p-8 backdrop-blur-xl overflow-hidden"
               style={{
-                background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.85) 0%, rgba(30, 41, 59, 0.85) 100%)',
-                border: '2px solid',
-                borderImage: 'linear-gradient(135deg, #D4AF37, #FFD700, #FFA500, #FFD700, #D4AF37) 1',
-                boxShadow: '0 0 40px rgba(212, 175, 55, 0.15), inset 0 0 30px rgba(212, 175, 55, 0.05), 0 25px 50px rgba(0,0,0,0.5)'
+                background: 'linear-gradient(160deg, rgba(8,10,24,0.92) 0%, rgba(15,18,42,0.92) 40%, rgba(10,8,28,0.92) 100%)',
+                border: '1px solid rgba(212,175,55,0.18)',
+                boxShadow: [
+                  '0 0 80px rgba(212,175,55,0.08)',
+                  '0 0 40px rgba(168,85,247,0.06)',
+                  'inset 0 1px 0 rgba(255,255,255,0.03)',
+                  'inset 0 -1px 0 rgba(0,0,0,0.4)',
+                  '0 30px 60px rgba(0,0,0,0.7)',
+                ].join(', '),
               }}
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.4, duration: 0.5 }}
             >
+              {/* Quantum grid background */}
+              <div className="absolute inset-0 opacity-[0.03] pointer-events-none" style={{
+                backgroundImage: 'linear-gradient(rgba(212,175,55,0.3) 1px, transparent 1px), linear-gradient(90deg, rgba(212,175,55,0.3) 1px, transparent 1px)',
+                backgroundSize: '24px 24px',
+                maskImage: 'radial-gradient(ellipse 80% 60% at 50% 35%, black 30%, transparent 70%)',
+                WebkitMaskImage: 'radial-gradient(ellipse 80% 60% at 50% 35%, black 30%, transparent 70%)',
+              }} />
+              {/* Animated floating orbs */}
+              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full opacity-[0.04] pointer-events-none" style={{
+                background: 'radial-gradient(circle, rgba(212,175,55,1) 0%, transparent 70%)',
+                animation: 'pulse 4s ease-in-out infinite',
+              }} />
+              <div className="absolute -bottom-20 -left-20 w-32 h-32 rounded-full opacity-[0.03] pointer-events-none" style={{
+                background: 'radial-gradient(circle, rgba(168,85,247,1) 0%, transparent 70%)',
+                animation: 'pulse 5s ease-in-out infinite 1s',
+              }} />
+
               <div className="space-y-6">
                 <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="block text-sm font-medium text-amber-200">
-                      BIP39 Seed Phrase
-                    </label>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      {/* Quantum key icon */}
+                      <div className="relative w-8 h-8 rounded-lg flex items-center justify-center" style={{
+                        background: 'linear-gradient(135deg, rgba(212,175,55,0.2), rgba(255,215,0,0.08))',
+                        border: '1px solid rgba(212,175,55,0.3)',
+                        boxShadow: '0 0 12px rgba(212,175,55,0.1)',
+                      }}>
+                        <svg className="w-4 h-4 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                        </svg>
+                        <div className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-bold tracking-wide" style={{
+                          background: 'linear-gradient(135deg, #fbbf24, #f59e0b, #d97706)',
+                          WebkitBackgroundClip: 'text',
+                          WebkitTextFillColor: 'transparent',
+                        }}>
+                          BIP39 Seed Phrase
+                        </label>
+                        <span className="text-[10px] text-amber-500/40 tracking-wider uppercase">Quantum-encrypted recovery key</span>
+                      </div>
+                    </div>
                     <button
                       type="button"
                       onClick={generateQuantumSeed}
-                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-emerald-300 bg-emerald-900/30 hover:bg-emerald-800/50 border border-emerald-500/30 hover:border-emerald-400/60 rounded-lg transition-all"
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all duration-300"
+                      style={{
+                        background: 'linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1))',
+                        border: '1px solid rgba(16,185,129,0.3)',
+                        color: '#6ee7b7',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'linear-gradient(135deg, rgba(16,185,129,0.3), rgba(5,150,105,0.2))';
+                        e.currentTarget.style.borderColor = 'rgba(16,185,129,0.6)';
+                        e.currentTarget.style.boxShadow = '0 0 16px rgba(16,185,129,0.2)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'linear-gradient(135deg, rgba(16,185,129,0.15), rgba(5,150,105,0.1))';
+                        e.currentTarget.style.borderColor = 'rgba(16,185,129,0.3)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
                     >
                       <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                      Generate new
+                      Generate
                     </button>
                   </div>
-                  <textarea
-                    value={seedPhrase}
-                    onChange={(e) => setSeedPhrase(e.target.value)}
-                    className="w-full h-24 px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all resize-none backdrop-blur-sm"
-                    placeholder="Enter your 12-word seed phrase, or click 'Generate new' to create one..."
-                  />
-                  {/* Word count hint */}
-                  {seedPhrase && (
-                    <div className={`text-xs mt-1 ${
-                      seedPhrase.trim().split(/\s+/).filter(w => w.length > 0).length === 12 ||
-                      seedPhrase.trim().split(/\s+/).filter(w => w.length > 0).length === 24
-                        ? 'text-green-400'
-                        : 'text-amber-400/60'
-                    }`}>
-                      {seedPhrase.trim().split(/\s+/).filter(w => w.length > 0).length} / 12 words
-                      {seedPhrase.trim().split(/\s+/).filter(w => w.length > 0).length !== 12 &&
-                       seedPhrase.trim().split(/\s+/).filter(w => w.length > 0).length !== 24 &&
-                        ' (need 12 or 24)'}
-                    </div>
-                  )}
+                  <div className="relative">
+                    {/* Glow ring around textarea */}
+                    <div className="absolute -inset-[2px] rounded-xl opacity-40 pointer-events-none" style={{
+                      background: 'linear-gradient(135deg, rgba(212,175,55,0.4), rgba(168,85,247,0.3), rgba(6,182,212,0.3), rgba(212,175,55,0.4))',
+                      filter: 'blur(8px)',
+                    }} />
+                    <textarea
+                      value={seedPhrase}
+                      onChange={(e) => setSeedPhrase(e.target.value)}
+                      className="relative w-full h-24 px-4 py-3 rounded-xl resize-none transition-all duration-300 font-mono text-sm tracking-wide"
+                      style={{
+                        background: 'linear-gradient(180deg, rgba(15,23,42,0.95) 0%, rgba(10,15,30,0.98) 100%)',
+                        border: '1px solid rgba(212,175,55,0.25)',
+                        color: '#fef3c7',
+                        outline: 'none',
+                        boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.4), 0 0 20px rgba(212,175,55,0.05)',
+                      }}
+                      placeholder="Enter your 12-word seed phrase, or click 'Generate' to create one..."
+                      onFocus={(e) => {
+                        e.currentTarget.style.borderColor = 'rgba(212,175,55,0.6)';
+                        e.currentTarget.style.boxShadow = 'inset 0 2px 8px rgba(0,0,0,0.4), 0 0 30px rgba(212,175,55,0.15), 0 0 60px rgba(168,85,247,0.08)';
+                      }}
+                      onBlur={(e) => {
+                        e.currentTarget.style.borderColor = 'rgba(212,175,55,0.25)';
+                        e.currentTarget.style.boxShadow = 'inset 0 2px 8px rgba(0,0,0,0.4), 0 0 20px rgba(212,175,55,0.05)';
+                      }}
+                    />
+                  </div>
+                  {/* Word count hint — quantum validation bar */}
+                  {seedPhrase && (() => {
+                    const wordCount = seedPhrase.trim().split(/\s+/).filter((w: string) => w.length > 0).length;
+                    const isValid = wordCount === 12 || wordCount === 24;
+                    const progress = Math.min(wordCount / 12, 1);
+                    return (
+                      <div className="mt-2 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <div className={`w-1.5 h-1.5 rounded-full ${isValid ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-amber-400/60'}`} />
+                            <span className={`text-[11px] font-medium ${isValid ? 'text-emerald-400' : 'text-amber-400/70'}`}>
+                              {wordCount} / 12 words
+                            </span>
+                          </div>
+                          {isValid && (
+                            <span className="text-[10px] text-emerald-500/60 font-medium uppercase tracking-wider flex items-center gap-1">
+                              <span className="text-[14px]">✓</span> Valid
+                            </span>
+                          )}
+                          {!isValid && wordCount > 0 && wordCount !== 24 && (
+                            <span className="text-[10px] text-amber-500/40">need 12 or 24</span>
+                          )}
+                        </div>
+                        {/* Progress bar */}
+                        <div className="h-0.5 rounded-full bg-slate-800/80 overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${Math.min(progress * 100, 100)}%`,
+                              background: isValid
+                                ? 'linear-gradient(90deg, #10b981, #34d399, #6ee7b7)'
+                                : 'linear-gradient(90deg, #f59e0b, #fbbf24, #fcd34d)',
+                              boxShadow: isValid ? '0 0 8px rgba(52,211,153,0.4)' : '0 0 8px rgba(251,191,36,0.3)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div>
                   <label className="block text-sm font-medium text-amber-200 mb-2">
                     Password (Required for wallet encryption)
                   </label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && validateSeedPhrase(seedPhrase).valid && password && !isAuthenticating) {
-                        handleAuthenticate();
-                      }
-                    }}
-                    className="w-full px-4 py-3 bg-slate-900/70 border-2 border-amber-500/30 rounded-xl text-amber-50 placeholder-slate-400 focus:outline-none focus:border-amber-400 focus:shadow-[0_0_15px_rgba(251,191,36,0.3)] transition-all backdrop-blur-sm"
-                    placeholder="Enter password for wallet encryption..."
-                    required
-                  />
+                  <div className="relative">
+                    <div className="absolute -inset-[1px] rounded-xl opacity-30 pointer-events-none" style={{
+                      background: 'linear-gradient(135deg, rgba(168,85,247,0.3), rgba(212,175,55,0.2))',
+                      filter: 'blur(4px)',
+                    }} />
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && validateSeedPhrase(seedPhrase).valid && password && !isAuthenticating) {
+                          handleAuthenticate();
+                        }
+                      }}
+                      className="relative w-full px-4 py-3 rounded-xl transition-all duration-300 font-mono text-sm tracking-wider"
+                      style={{
+                        background: 'linear-gradient(180deg, rgba(20,18,40,0.95) 0%, rgba(12,10,28,0.98) 100%)',
+                        border: '1px solid rgba(168,85,247,0.2)',
+                        color: '#e9d5ff',
+                        outline: 'none',
+                        boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.4)',
+                      }}
+                      placeholder="Enter password for wallet encryption..."
+                      required
+                      onFocus={(e) => {
+                        e.currentTarget.style.borderColor = 'rgba(168,85,247,0.5)';
+                        e.currentTarget.style.boxShadow = 'inset 0 2px 8px rgba(0,0,0,0.4), 0 0 20px rgba(168,85,247,0.1)';
+                      }}
+                      onBlur={(e) => {
+                        e.currentTarget.style.borderColor = 'rgba(168,85,247,0.2)';
+                        e.currentTarget.style.boxShadow = 'inset 0 2px 8px rgba(0,0,0,0.4)';
+                      }}
+                    />
+                  </div>
                 </div>
 
-                {/* Quantum Generator Button */}
+                {/* Quantum Seed Generator Button */}
                 <motion.button
                   onClick={generateQuantumSeed}
                   disabled={isGenerating}
-                  className="w-full py-4 px-6 bg-gradient-to-r from-amber-900/40 to-yellow-900/40 border-2 border-amber-500/40 rounded-xl text-amber-100 font-medium flex items-center justify-center gap-3 hover:border-amber-400 hover:shadow-[0_0_20px_rgba(251,191,36,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed backdrop-blur-sm"
-                  whileHover={{ scale: isGenerating ? 1 : 1.02 }}
-                  whileTap={{ scale: isGenerating ? 1 : 0.98 }}
+                  className="relative w-full py-4 px-6 rounded-xl font-semibold flex items-center justify-center gap-3 transition-all duration-500 disabled:opacity-50 disabled:cursor-not-allowed overflow-hidden group"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(212,175,55,0.1), rgba(255,215,0,0.06), rgba(168,85,247,0.08))',
+                    border: '1px solid rgba(212,175,55,0.25)',
+                    color: '#fbbf24',
+                    letterSpacing: '0.02em',
+                  }}
+                  whileHover={isGenerating ? {} : { scale: 1.02 }}
+                  whileTap={isGenerating ? {} : { scale: 0.98 }}
+                  onMouseEnter={(e) => {
+                    if (isGenerating) return;
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(212,175,55,0.2), rgba(255,215,0,0.12), rgba(168,85,247,0.15))';
+                    e.currentTarget.style.borderColor = 'rgba(212,175,55,0.5)';
+                    e.currentTarget.style.boxShadow = '0 0 40px rgba(212,175,55,0.15), 0 0 80px rgba(168,85,247,0.08), inset 0 1px 0 rgba(255,255,255,0.05)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(212,175,55,0.1), rgba(255,215,0,0.06), rgba(168,85,247,0.08))';
+                    e.currentTarget.style.borderColor = 'rgba(212,175,55,0.25)';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
                 >
+                  {/* Shimmer animation overlay */}
+                  <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" style={{
+                    background: 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.03) 40%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.03) 60%, transparent 100%)',
+                    animation: 'shimmer 2s ease-in-out infinite',
+                  }} />
+
                   {isGenerating ? (
                     <>
                       <motion.div
@@ -1670,31 +1864,84 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                 {/* Error Display */}
                 {generationError && (
                   <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="p-4 bg-red-500/20 border border-red-500/30 rounded-xl text-red-300 text-sm flex items-center gap-2 backdrop-blur-sm"
+                    initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    className="p-4 rounded-xl text-sm flex items-center gap-3"
+                    style={{
+                      background: 'linear-gradient(135deg, rgba(239,68,68,0.1), rgba(220,38,38,0.05))',
+                      border: '1px solid rgba(239,68,68,0.25)',
+                      boxShadow: '0 0 20px rgba(239,68,68,0.08), inset 0 1px 0 rgba(255,255,255,0.02)',
+                    }}
                   >
-                    <AlertCircle className="w-4 h-4" />
-                    <span>Generation failed: {generationError}</span>
+                    <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{
+                      background: 'rgba(239,68,68,0.15)',
+                      border: '1px solid rgba(239,68,68,0.3)',
+                    }}>
+                      <AlertCircle className="w-4 h-4 text-red-400" />
+                    </div>
+                    <div>
+                      <div className="text-red-300 font-medium text-xs uppercase tracking-wider">Generation Failed</div>
+                      <div className="text-red-400/70 text-xs mt-0.5">{generationError}</div>
+                    </div>
                   </motion.div>
                 )}
 
                 {/* Quantum Generator Animation */}
                 {showQuantumGenerator && (
                   <motion.div
-                    className="h-32 rounded-xl overflow-hidden relative border-2 border-amber-500/30"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
+                    className="h-32 rounded-xl overflow-hidden relative"
+                    initial={{ opacity: 0, scale: 0.95 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    style={{
+                      border: '1px solid rgba(212,175,55,0.2)',
+                      background: 'linear-gradient(180deg, rgba(8,10,24,0.95) 0%, rgba(15,18,42,0.9) 100%)',
+                    }}
                   >
-                    <div className="absolute inset-0 bg-gradient-to-r from-amber-500/20 via-yellow-500/20 to-orange-500/20 animate-pulse" />
-                    <div className="absolute inset-0 bg-slate-900/80 flex items-center justify-center backdrop-blur-sm">
+                    {/* Rotating quantum rings */}
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <motion.div
+                        className="absolute w-24 h-24 rounded-full border border-amber-500/10"
+                        animate={{ rotate: 360, scale: [1, 1.1, 1] }}
+                        transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                      />
+                      <motion.div
+                        className="absolute w-20 h-20 rounded-full border border-violet-500/10"
+                        animate={{ rotate: -360, scale: [1, 1.15, 1] }}
+                        transition={{ duration: 2.5, repeat: Infinity, ease: "linear" }}
+                      />
+                      <motion.div
+                        className="absolute w-16 h-16 rounded-full border border-cyan-500/10"
+                        animate={{ rotate: 360, scale: [1, 1.2, 1] }}
+                        transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                      />
                       <motion.div
                         animate={{ rotate: 360 }}
-                        transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                        className="relative z-10"
                       >
-                        <Sparkles className="w-12 h-12 text-amber-400" />
+                        <Sparkles className="w-10 h-10 text-amber-400" style={{ filter: 'drop-shadow(0 0 12px rgba(251,191,36,0.5))' }} />
                       </motion.div>
                     </div>
+                    {/* Particle dots */}
+                    {[...Array(8)].map((_, i) => (
+                      <motion.div
+                        key={i}
+                        className="absolute w-1 h-1 rounded-full bg-amber-400/60"
+                        style={{
+                          top: `${20 + Math.random() * 60}%`,
+                          left: `${20 + Math.random() * 60}%`,
+                        }}
+                        animate={{
+                          opacity: [0, 0.8, 0],
+                          scale: [0, 1, 0],
+                        }}
+                        transition={{
+                          duration: 1.5 + Math.random(),
+                          repeat: Infinity,
+                          delay: i * 0.2,
+                        }}
+                      />
+                    ))}
                   </motion.div>
                 )}
 
@@ -1788,6 +2035,70 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             </motion.div>
 
             </div>{/* /two-card grid */}
+
+            {/* ════════════════════════════════════════════════════════════ */}
+            {/*  Quillon Graph capability showcase — the agentic economy.    */}
+            {/* ════════════════════════════════════════════════════════════ */}
+            <motion.div
+              className="mt-8"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.85, duration: 0.6 }}
+            >
+              <div className="text-center mb-6">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-[11px] tracking-[0.2em] uppercase"
+                  style={{ background: 'rgba(124,58,237,0.12)', border: '1px solid rgba(167,139,250,0.3)', color: '#c4b5fd' }}>
+                  <span style={{ width: 7, height: 7, borderRadius: 99, background: '#34d399', boxShadow: '0 0 10px #34d399' }} />
+                  One seed · every agent · a sovereign economy
+                </div>
+                <h3 className="mt-3 text-2xl sm:text-3xl font-extrabold"
+                  style={{ background: 'linear-gradient(90deg,#ffffff,#c4b5fd 60%,#38bdf8)', WebkitBackgroundClip: 'text', backgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                  A wallet with a mind of its own
+                </h3>
+                <p className="mt-2 text-sm text-purple-200/60 max-w-2xl mx-auto">
+                  Quillon Graph is the settlement layer where AI agents earn, trade and pay each other — quantum-resistant, sub-second, and yours to deploy.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                  { e: '⚡', t: 'DAG-Knight · ~1s finality', d: '18.6M+ blocks over a Narwhal mempool. No waiting for confirmations.', g: 'rgba(56,189,248,0.18)' },
+                  { e: '🛡️', t: 'Post-quantum from genesis', d: 'Dilithium-5 signatures + Kyber-1024 KEM. Built for the quantum age.', g: 'rgba(124,58,237,0.18)' },
+                  { e: '🤖', t: '44 tools · zero clicks', d: 'Your AI signs with your seed. Send, swap, deploy — just by talking.', g: 'rgba(99,102,241,0.18)' },
+                  { e: '💱', t: 'Native DEX, live', d: '36 tokens across 29 pools. Quote, swap and provide liquidity from chat.', g: 'rgba(14,165,233,0.18)' },
+                  { e: '🪙', t: 'Deploy in one message', d: 'Mint a token or ship a smart contract straight from your AI client.', g: 'rgba(168,85,247,0.18)' },
+                  { e: '💸', t: 'Agentic money', d: 'Agents earn, get paid and trade with each other — settled on-chain.', g: 'rgba(52,211,153,0.18)' },
+                  { e: '₿', t: 'Bitcoin & Lightning', d: 'Cross-chain settlement. Bridge BTC and pay Lightning invoices.', g: 'rgba(245,158,11,0.18)' },
+                  { e: '🕶️', t: 'Private by design', d: 'Tor + Dandelion++ routing, ring signatures, ZK-STARK proofs.', g: 'rgba(99,102,241,0.18)' },
+                  { e: '⛏️', t: 'Mine & monitor', d: 'Watch sync, hashrate and rewards live — all from your client.', g: 'rgba(56,189,248,0.18)' },
+                ].map((f, i) => (
+                  <motion.div
+                    key={f.t}
+                    className="relative rounded-2xl p-4 overflow-hidden group"
+                    style={{ background: 'linear-gradient(135deg, rgba(30,27,46,0.6), rgba(20,18,34,0.5))', border: '1px solid rgba(167,139,250,0.18)', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)' }}
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.9 + i * 0.06, duration: 0.45 }}
+                    whileHover={{ scale: 1.02, y: -2 }}
+                  >
+                    <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none"
+                      style={{ background: 'radial-gradient(120px 80px at 30% 0%, ' + f.g + ', transparent 70%)' }} />
+                    <div className="relative flex items-start gap-3">
+                      <div className="shrink-0 w-10 h-10 rounded-xl flex items-center justify-center text-lg"
+                        style={{ background: f.g, border: '1px solid rgba(255,255,255,0.08)' }}>{f.e}</div>
+                      <div>
+                        <div className="font-semibold text-purple-50 text-[15px] leading-tight">{f.t}</div>
+                        <div className="mt-1 text-[12.5px] text-purple-200/55 leading-snug">{f.d}</div>
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+
+              <div className="mt-6 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-[11px] tracking-wider text-purple-200/45">
+                <span>CLAUDE</span><span>·</span><span>CURSOR</span><span>·</span><span>CODEX</span><span>·</span><span>GEMINI</span><span>·</span><span>GROK</span><span>·</span><span>ANTIGRAVITY</span>
+              </div>
+            </motion.div>
 
             {/* Security Note */}
             <motion.p
@@ -2182,7 +2493,34 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                     Codex (ChatGPT 5.5)
                   </span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">ChatGPT (coming soon)</span>
-                  <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">Grok (coming soon)</span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Grok CLI
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Gemini CLI
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Antigravity
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Qwen 3.6/3.7
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Cline
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Windsurf
+                  </span>
+                  <span className="px-2 py-0.5 bg-violet-500/20 border border-violet-400/30 rounded-full text-[10px] text-violet-300 font-bold flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Composer 2.5
+                  </span>
                   <span className="px-2 py-0.5 bg-gray-500/15 border border-gray-500/20 rounded-full text-[10px] text-gray-400">More TBA</span>
                 </div>
               </div>
@@ -2835,6 +3173,23 @@ chmod +x slint-wallet-linux-x86_64
       </AnimatePresence>
 
       {/* Research Library Modal */}
+      {showDEXModal && (
+        <div className="fixed inset-0 z-[100] bg-black/85 backdrop-blur-sm overflow-auto">
+          <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 bg-[#0a0e1f]/95 border-b border-green-400/20 backdrop-blur-md">
+            <div className="flex items-center gap-2 text-green-300 text-sm font-bold">
+              <Coins className="w-4 h-4" /> Quillon DEX
+              <span className="text-amber-300/70 text-[11px] font-normal ml-2">Live preview - sign in to trade</span>
+            </div>
+            <button onClick={() => setShowDEXModal(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-gray-300 transition-colors" aria-label="Close DEX preview">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="min-h-screen">
+            <DexScreen isActive={showDEXModal} />
+          </div>
+        </div>
+      )}
+
       <PapersLibraryModal
         isOpen={showPapersLibrary}
         onClose={() => setShowPapersLibrary(false)}
