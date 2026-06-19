@@ -447,6 +447,17 @@ impl VertexCreator {
         let mut store = self.vertex_store.write().await;
         let before = store.len();
         store.retain(|_, v| v.round >= cutoff);
+        // v10.11.62: HARD memory ceiling. The round-based retain is the normal path, but if
+        // current_round stalls (node backpressured/unresponsive) the cutoff stops advancing and
+        // this store can balloon to tens of GB of anon heap (the Epsilon OOM). Cap absolute size:
+        // if still over MAX_VERTICES, drop the lowest-round vertices until under the cap.
+        const MAX_VERTICES: usize = 200_000;
+        if store.len() > MAX_VERTICES {
+            let mut rounds: Vec<u64> = store.values().map(|v| v.round).collect();
+            rounds.sort_unstable();
+            let cap_cutoff = rounds[store.len() - MAX_VERTICES];
+            store.retain(|_, v| v.round >= cap_cutoff);
+        }
         let removed = before - store.len();
         if removed > 0 {
             debug!("🧹 VertexCreator: cleaned {} old vertices (keeping rounds >= {})", removed, cutoff);
