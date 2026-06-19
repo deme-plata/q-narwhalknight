@@ -89,6 +89,20 @@ pub trait KVStore: Send + Sync {
     /// Scan all keys in column family (use with caution)
     async fn scan_all(&self, cf: &str) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
 
+    /// v10.11.63: stream a CF and return the FIRST value whose key ends with `suffix`, WITHOUT
+    /// collecting the whole CF into memory. Fixes the Epsilon 50GB OOM: scan_for_vertex used
+    /// scan_all(CF_DAG_VERTICES) which loaded all ~18M vertices into one Vec. Default falls back
+    /// to scan_all (fine for small CFs / sled / mock); the RocksDB impl overrides with a true
+    /// streaming scan that returns on first match.
+    async fn find_value_by_key_suffix(&self, cf: &str, suffix: &[u8]) -> Result<Option<Vec<u8>>> {
+        for (k, v) in self.scan_all(cf).await? {
+            if k.ends_with(suffix) {
+                return Ok(Some(v));
+            }
+        }
+        Ok(None)
+    }
+
     /// v10.3.7: Forward iterate DAG blocks from start_height using lazy iterator.
     /// Returns (height, key_bytes, value_bytes) tuples sorted by numeric height.
     /// Default: returns empty (sled/Windows). RocksDB impl uses raw iterator.
@@ -1957,6 +1971,29 @@ impl KVStore for RocksDBKV {
         })
         .await
         .map_err(|e| anyhow::anyhow!("scan_all blocking task failed: {}", e))?
+    }
+
+    // v10.11.63: streaming override — returns on first key-suffix match, NEVER builds a full Vec.
+    // This is the fix for the ~50GB anon-heap OOM (scan_for_vertex on the 18M-vertex CF).
+    async fn find_value_by_key_suffix(&self, cf: &str, suffix: &[u8]) -> Result<Option<Vec<u8>>> {
+        let db = self.db.clone();
+        let cf = cf.to_string();
+        let suffix = suffix.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let cf_handle = db
+                .cf_handle(&cf)
+                .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf))?;
+            let iter = db.iterator_cf(&cf_handle, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, value) = item.context("Iterator error")?;
+                if key.ends_with(&suffix) {
+                    return Ok::<_, anyhow::Error>(Some(value.to_vec()));
+                }
+            }
+            Ok(None)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("find_value_by_key_suffix blocking task failed: {}", e))?
     }
 
     async fn flush(&self) -> Result<()> {

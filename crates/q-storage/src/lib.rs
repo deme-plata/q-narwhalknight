@@ -2128,15 +2128,20 @@ impl QStorage {
     pub async fn advance_contiguous_tip(&self, from_height: u64) -> Result<u64> {
         const MAX_ADVANCE_PROBES: u64 = 100_000;
 
-        // Storage tip — never advance past it.
-        let storage_tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await? {
+        // Storage tip — never advance past it. `qblock:tip_height` is the
+        // preferred persisted upper bound, but older production paths can leave
+        // it stale while height_cache tracks newly saved blocks. Use the cache
+        // as an optimistic upper bound only; every height is still verified
+        // through is_height_present before the durable pointer advances.
+        let persisted_tip = match self.hot_db.get(CF_BLOCKS, b"qblock:tip_height").await? {
             Some(b) if b.len() == 8 => {
                 let mut arr = [0u8; 8];
                 arr.copy_from_slice(&b);
                 u64::from_be_bytes(arr)
             }
-            _ => return Ok(from_height), // no persisted tip → nothing to advance through
+            _ => 0,
         };
+        let storage_tip = persisted_tip.max(self.height_cache.cached());
 
         if from_height >= storage_tip {
             return Ok(from_height);
@@ -2163,17 +2168,20 @@ impl QStorage {
     ///
     /// Returns `(from, to)` — `to > from` means progress was made.
     pub async fn tick_contiguity_advance(&self) -> Result<(u64, u64)> {
-        let from = self.height_cache.cached();
+        let cached_from = self.height_cache.cached();
+        let from = self.get_latest_qblock_height().await?.unwrap_or(0);
         let to = self.advance_contiguous_tip(from).await?;
         if to > from {
             let to_bytes = to.to_be_bytes();
             self.hot_db
-                .put(CF_BLOCKS, b"qblock:latest", &to_bytes)
+                .put_sync(CF_BLOCKS, b"qblock:latest", &to_bytes)
                 .await?;
             self.hot_db
-                .put(CF_BLOCKS, b"qblock:contiguous_verified", &to_bytes)
+                .put_sync(CF_BLOCKS, b"qblock:contiguous_verified", &to_bytes)
                 .await?;
-            self.height_cache.update(to).await;
+            if to > cached_from {
+                self.height_cache.update(to).await;
+            }
         }
         Ok((from, to))
     }
@@ -2370,7 +2378,7 @@ impl QStorage {
         let latest_height = contiguous_height.max(tip_height).max(cached_height);
 
         if capped_limit >= 100 {
-            info!("🔍 [BLOCK-RANGE-DEBUG] contiguous_height={}, tip_height={}, cached_height={}, latest_height={}, requested_start={}, requested_limit={}",
+            debug!("🔍 [BLOCK-RANGE-DEBUG] contiguous_height={}, tip_height={}, cached_height={}, latest_height={}, requested_start={}, requested_limit={}",
                   contiguous_height, tip_height, cached_height, latest_height, start_height, capped_limit);
         }
 
@@ -2384,7 +2392,7 @@ impl QStorage {
 
         if start_height > end_height {
             if capped_limit >= 100 {
-                info!("🔍 [BLOCK-RANGE-DEBUG] EMPTY RETURN: start_height={} > end_height={} (latest_height={})",
+                debug!("🔍 [BLOCK-RANGE-DEBUG] EMPTY RETURN: start_height={} > end_height={} (latest_height={})",
                       start_height, end_height, latest_height);
             }
             return Ok(Vec::new());
@@ -2405,7 +2413,7 @@ impl QStorage {
             let total_keys = keys.len();
             // v10.3.7: Always log (was >= 100), needed for checkpoint probe debugging
             if found_count == 0 || capped_limit <= 5 || capped_limit >= 100 {
-                info!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={} (cached_height={})",
+                debug!("🔍 [BLOCK-RANGE-DEBUG] multi_get: {}/{} keys found for heights {}..={} (cached_height={})",
                       found_count, total_keys, start_height, end_height,
                       self.height_cache.cached());
             }
@@ -2605,7 +2613,7 @@ impl QStorage {
             blocks.len() as u128 * 1000
         };
 
-        info!("✅ [BATCH FETCH] Got {}/{} blocks in {:?} ({} blocks/sec, {} missing, {} from DAG)",
+        debug!("✅ [BATCH FETCH] Got {}/{} blocks in {:?} ({} blocks/sec, {} missing, {} from DAG)",
               blocks.len(), keys.len(), elapsed, rate, missing_count, dag_found);
 
         Ok(blocks)
@@ -4469,9 +4477,15 @@ impl QStorage {
             hex::encode(vertex_id)
         );
 
-        let all_vertices = self.hot_db.scan_all(CF_DAG_VERTICES).await?;
-
-        for (_, vertex_data) in all_vertices {
+        // v10.11.63 OOM FIX: stream-match by key suffix (vertex_key = round||author||vertex_id)
+        // instead of scan_all() which loaded the ENTIRE ~18M-vertex CF into a single ~50GB Vec
+        // (the Epsilon anon-heap OOM, perf-confirmed: spawn_blocking -> Vec<(Vec<u8>,Vec<u8>)> ->
+        // raw_vec::grow_one). This returns on first match and never builds a full Vec.
+        if let Some(vertex_data) = self
+            .hot_db
+            .find_value_by_key_suffix(CF_DAG_VERTICES, vertex_id)
+            .await?
+        {
             if let Ok(vertex) = bincode::deserialize::<Vertex>(&vertex_data) {
                 if vertex.id == vertex_id {
                     return Ok(Some(vertex));
@@ -5222,7 +5236,7 @@ impl QStorage {
                         // New u128 format (big-endian for state sync consistency)
                         let amount = u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
                         if amount > 0 {
-                            info!(
+                            debug!(
                                 "🪙 Found token balance in state sync storage (u128): wallet={}, token={}, amount={}",
                                 hex::encode(&wallet_address[..8]),
                                 hex::encode(&token_address[..8]),
@@ -5234,7 +5248,7 @@ impl QStorage {
                         // Legacy u64 format (big-endian)
                         let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
                         if amount > 0 {
-                            info!(
+                            debug!(
                                 "🪙 Found token balance in state sync storage (legacy u64): wallet={}, token={}, amount={}",
                                 hex::encode(&wallet_address[..8]),
                                 hex::encode(&token_address[..8]),
