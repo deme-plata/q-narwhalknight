@@ -7,7 +7,7 @@
 //! the validator set reaches 4+ nodes is done by bumping `f` without a hard fork.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -18,6 +18,7 @@ use q_types::{
     balance_finality::{
         BalanceFinalityRecord, BrachaBalanceMsg, BrachaInstance, BrachaPhase,
         ValidatorBitmask, ANCHOR_FLUSH_SECS, BRACHA_PROPOSAL_TIMEOUT_ROUNDS, MAX_ANCHOR_BATCH,
+        PENDING_ANCHOR_CAP,
     },
     balance_update::P2PBalanceUpdate,
 };
@@ -64,7 +65,9 @@ pub struct BalanceFinalityEngine {
     our_signing_key: Option<Arc<ed25519_dalek::SigningKey>>,
 
     /// Finalized-but-not-yet-anchored records. Drained into a DAG vertex every ANCHOR_FLUSH_SECS.
-    pub pending_anchor: Arc<Mutex<Vec<BalanceFinalityRecord>>>,
+    /// v10.11.52: bounded (was unbounded Vec). Drop-oldest at PENDING_ANCHOR_CAP.
+    /// Records are already persisted to RocksDB before being parked here.
+    pub pending_anchor: Arc<Mutex<VecDeque<BalanceFinalityRecord>>>,
 
     /// Storage engine for writing finality proofs.
     storage: Arc<StorageEngine>,
@@ -91,7 +94,7 @@ impl BalanceFinalityEngine {
             validator_index: Arc::new(RwLock::new(HashMap::new())),
             our_index: Arc::new(std::sync::atomic::AtomicU8::new(255)),
             our_signing_key,
-            pending_anchor: Arc::new(Mutex::new(Vec::new())),
+            pending_anchor: Arc::new(Mutex::new(VecDeque::new())),
             storage,
             gossip_tx,
             rb_topic,
@@ -448,9 +451,29 @@ impl BalanceFinalityEngine {
             }
 
             // Park in pending_anchor for DAG vertex inclusion.
+            // v10.11.52: bounded queue. The record is ALREADY persisted to RocksDB
+            // (write_finality_record + save_wallet_balance_authoritative above), so if
+            // the queue is full we drop the OLDEST un-anchored record rather than grow
+            // without bound. This was the ~14.9 GB anon-RSS leak: an unbounded Vec drained
+            // only by the 200/s stub flush loop, overrun by finality deliveries under load.
             {
                 let mut pa = self.pending_anchor.lock().await;
-                pa.push(record);
+                if pa.len() >= PENDING_ANCHOR_CAP {
+                    let overflow = pa.len() + 1 - PENDING_ANCHOR_CAP;
+                    for _ in 0..overflow {
+                        pa.pop_front();
+                    }
+                    // Rate-limited: only warn when we cross the cap from below.
+                    if overflow == 1 {
+                        warn!(
+                            "BalanceFinalityEngine: pending_anchor at cap {} — dropping oldest \
+                             un-anchored record (balance already durable in RocksDB; DAG anchor \
+                             stamp skipped). DAG-Knight drain is not keeping up.",
+                            PENDING_ANCHOR_CAP
+                        );
+                    }
+                }
+                pa.push_back(record);
             }
 
             info!(
@@ -542,12 +565,43 @@ impl BalanceFinalityEngine {
 
             let mut instances = self.instances.lock().await;
             let before = instances.len();
+            // Drop stalled (non-delivered) proposals that have timed out.
             instances.retain(|_, inst| {
                 !inst.is_timed_out(approx_round) || inst.delivered
             });
             let dropped = before.saturating_sub(instances.len());
             if dropped > 0 {
                 debug!("BalanceFinalityEngine: timed out {} stalled proposals", dropped);
+            }
+
+            // v10.11.61 LEAK FIX: delivered instances were retained FOREVER (the `|| inst.delivered`
+            // above), so every delivered balance update leaked a BrachaInstance — unbounded anon-heap
+            // growth to OOM under live reward/tx load. Delivered instances are kept only for
+            // duplicate-suppression of late Bracha messages; that only needs a short, bounded window
+            // (Bracha completes in BRACHA_PROPOSAL_TIMEOUT_ROUNDS=50 rounds ≈ 5s). We keep the most
+            // recent MAX_DELIVERED_RETAINED by created_round and evict the OLDEST delivered beyond
+            // that. Evicting ANCIENT deliveries is safe: no honest duplicate arrives that long after
+            // delivery, so this cannot cause re-delivery / double-credit (Balance Integrity Rule 1).
+            const MAX_DELIVERED_RETAINED: usize = 20_000;
+            let delivered_count = instances.values().filter(|i| i.delivered).count();
+            if delivered_count > MAX_DELIVERED_RETAINED {
+                let mut delivered_rounds: Vec<u64> = instances
+                    .values()
+                    .filter(|i| i.delivered)
+                    .map(|i| i.created_round)
+                    .collect();
+                delivered_rounds.sort_unstable();
+                // Keep the newest MAX_DELIVERED_RETAINED; cutoff = oldest kept created_round.
+                let cutoff = delivered_rounds[delivered_count - MAX_DELIVERED_RETAINED];
+                let before_evict = instances.len();
+                instances.retain(|_, inst| !inst.delivered || inst.created_round >= cutoff);
+                let evicted = before_evict.saturating_sub(instances.len());
+                if evicted > 0 {
+                    info!(
+                        "BalanceFinalityEngine: evicted {} old delivered Bracha instances (cap {}), {} retained",
+                        evicted, MAX_DELIVERED_RETAINED, instances.len()
+                    );
+                }
             }
         }
     }
@@ -562,6 +616,7 @@ impl BalanceFinalityEngine {
         if n == 0 {
             return Vec::new();
         }
+        // VecDeque::drain(..n) removes the oldest n (front) — same FIFO order as before.
         pa.drain(..n).collect()
     }
 
@@ -603,7 +658,9 @@ impl BalanceFinalityEngine {
 
     /// Returns records delivered but not yet anchored into a DAG vertex.
     pub async fn pending_anchor_snapshot(&self) -> Vec<BalanceFinalityRecord> {
-        self.pending_anchor.lock().await.clone()
+        // v10.11.52: bounded by PENDING_ANCHOR_CAP, so this clone can no longer balloon
+        // to multi-GB inside get_full_state (the state-sync serve-side leak).
+        self.pending_anchor.lock().await.iter().cloned().collect()
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
