@@ -72,7 +72,7 @@ export function createCircuitRelayTransport() {
   logTor('info', 'Creating Circuit Relay transport (via Tor)')
   // Circuit relay v2 discovers relays automatically
   // Our Tor-connected bootstrap node acts as the relay
-  return circuitRelayTransport()
+  return circuitRelayTransport()  // v4: relay discovery is automatic once we listen on /p2p-circuit
 }
 
 /**

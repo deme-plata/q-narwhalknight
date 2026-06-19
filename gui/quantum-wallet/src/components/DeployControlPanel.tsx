@@ -4010,7 +4010,7 @@ export default function DeployControlPanel() {
                                   bankAction(
                                     `APPROVE LOAN ${loan.loan_id?.slice(0, 8)}`,
                                     'POST',
-                                    '/api/v1/quillon-bank/lending/approve',
+                                    '/api/v1/quillon-bank/lending/approve-web',
                                     { loan_id: loan.loan_id },
                                   );
                                 }}

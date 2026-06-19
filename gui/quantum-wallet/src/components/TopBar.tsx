@@ -12,6 +12,7 @@ import MinerLinkModal from './MinerLinkModal';
 import NetworkPowerModal from './NetworkPowerModal';
 import WebGpuMinerModal from './WebGpuMinerModal';
 import AgentTerminalModal from './AgentTerminalModal';
+import DownloadMenu from './DownloadMenu'; // v10.11.59: topbar download dropdown
 import PapersLibraryModal from './PapersLibraryModal';
 import QFluxStatsPill from './QFluxStatsPill';
 import AgentDetailModal, { CLAUDE_OPUS_DIARY } from './AgentDetailModal';
@@ -1653,6 +1654,9 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
           <div className="h-8 w-px bg-gradient-to-b from-transparent via-amber-500/30 to-transparent" />
 
           <div className="flex items-center gap-3">
+            {/* v10.11.59: Downloads — node / miner / wallet MCP */}
+            <DownloadMenu />
+
             {/* v10.10.0: WebGPU browser-mining quick-launch */}
             <motion.button
               className="flex items-center gap-1.5 px-2 py-1 bg-purple-500/10 border border-purple-500/30 rounded-lg cursor-pointer hover:bg-purple-500/20 transition-colors"

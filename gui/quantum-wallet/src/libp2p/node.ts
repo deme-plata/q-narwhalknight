@@ -273,7 +273,7 @@ export async function createBrowserNode(): Promise<Libp2p> {
         // v10.3.0: Listen addresses empty initially — circuit relay is added
         // AFTER connecting to bootstrap. Setting it here before connection
         // causes a fatal "failed to listen" error.
-        listen: [],
+        listen: ['/p2p-circuit'], // v10.4.0: reserve a relay slot so other browsers can dial us (b2b mesh, privacy-preserving via Tor-bridged relay)
         announce: [],
       },
 

@@ -77,7 +77,7 @@ export const TOR_SECURITY = {
  */
 export const TOR_BOOTSTRAP = {
   // Primary bootstrap endpoint (WSS proxy to libp2p)
-  primary: '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH',
+  primary: '/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM',
 
   // Fallback Tor bridges (TODO: add community bridges)
   fallbacks: [] as string[],

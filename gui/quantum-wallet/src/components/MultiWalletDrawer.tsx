@@ -228,7 +228,15 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
         // for the "switched-to" wallet. Better to refuse + tell the
         // operator they need to import.
         console.error(`[MultiWalletDrawer] No seed found for ${addr.slice(0,16)}... Cannot switch safely.`);
-        alert(`Cannot switch to wallet ${addr.slice(0, 12)}…\nNo seed stored for this address.\nIf this is a recovered wallet, import it first.`);
+        alert(
+          `Cannot switch to wallet ${addr.slice(0, 12)}…\n\n` +
+          `Its seed isn't stored locally — most likely because this wallet existed BEFORE you created a second wallet (a v10.11.16 → v10.11.17 bug overwrote the canonical seed on wallet creation without snapshotting the old one).\n\n` +
+          `To recover:\n` +
+          `1. Log out of the wallet UI.\n` +
+          `2. Log back in using the BIP39 mnemonic for ${addr.slice(0, 12)}….\n` +
+          `3. The login will re-derive the seed and write quillon:seed:${addr.slice(0, 8)}… correctly.\n` +
+          `Then switching will work.`
+        );
         return; // abort — don't reload to a half-broken state
       }
     } catch {}
@@ -260,6 +268,23 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
       setWallets(next);
       saveWallets(next);
       setShowTemplates(false);
+
+      // v10.11.17 UI FIX: before overwriting canonical `walletSeed` with
+      // the newly created wallet's seed, snapshot the OLD wallet's seed to
+      // its per-address slot. Without this, the original main wallet's seed
+      // is destroyed the moment a new wallet is created — the user can never
+      // switch back (onSwitch's seed guard refuses on missing per-address
+      // entry; pre-guard, they'd silently sign with the wrong key).
+      try {
+        const oldAddr = (localStorage.getItem('walletAddress') || '').trim();
+        const oldSeed = localStorage.getItem('walletSeed');
+        if (oldAddr && oldSeed && oldAddr !== address) {
+          const existingPerAddr = localStorage.getItem(`quillon:seed:${oldAddr}`);
+          if (!existingPerAddr) {
+            localStorage.setItem(`quillon:seed:${oldAddr}`, oldSeed);
+          }
+        }
+      } catch {}
 
       // FIX (2026-05-21): auto-switch to the newly created wallet. Without
       // this, the user picked a template, saw no UI change, and reported
@@ -327,6 +352,24 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
                 <span className="text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-300 border border-violet-500/30">
                   {wallets.length}
                 </span>
+                {/* v10.11.17 UI: prominent green + button right in the title row.
+                    User feedback: the original "+ Wallet" pill at the bottom of
+                    the drawer wasn't intuitive enough — this is the obvious
+                    target the moment the drawer opens. */}
+                <motion.button
+                  whileHover={{ scale: 1.15, boxShadow: '0 0 20px rgba(34,197,94,0.65)' }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setShowTemplates(true)}
+                  title="Create new wallet"
+                  className="ml-2 inline-flex items-center justify-center w-9 h-9 rounded-full text-white font-bold text-lg shadow-lg"
+                  style={{
+                    background: 'linear-gradient(135deg, #22c55e 0%, #15803d 100%)',
+                    boxShadow: '0 0 14px rgba(34,197,94,0.5), inset 0 -2px 4px rgba(0,0,0,0.2)',
+                    border: '1px solid rgba(74,222,128,0.6)',
+                  }}
+                >
+                  +
+                </motion.button>
               </div>
               <motion.button whileHover={{ rotate: 90, scale: 1.1 }} onClick={onClose} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />

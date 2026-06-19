@@ -38,7 +38,8 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
   useEffect(() => {
     if (!walletAddress || !authenticated) return;
 
-    const eventSource = qnkAPI.subscribeToMiningRewards(
+    let cancelled = false;
+    qnkAPI.subscribeToMiningRewards(
       walletAddress,
       (reward: MiningRewardEvent) => {
         if (reward.hash_rate > 0) {
@@ -47,11 +48,18 @@ export default function GlobalTopBar({ authenticated = false }: GlobalTopBarProp
         }
       },
       () => {}
-    );
-
-    eventSourceRef.current = eventSource;
+    ).then((eventSource) => {
+      if (cancelled) {
+        eventSource.close();
+        return;
+      }
+      eventSourceRef.current = eventSource;
+    }).catch((error) => {
+      console.error('Failed to create mining SSE EventSource:', error);
+    });
 
     return () => {
+      cancelled = true;
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }

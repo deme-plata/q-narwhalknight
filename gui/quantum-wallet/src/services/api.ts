@@ -932,8 +932,23 @@ class QNarwhalKnightAPI {
         if (!session) {
           console.log('🔐 [AUTH DEBUG] Will prompt for password:', !!globalPasswordPrompt);
 
-          // Try using the provided passwordPrompt
-          if (passwordPrompt) {
+          // v10.11.61: MetaMask-imported wallets carry a silent auto-password in
+          // sessionStorage (the user never set one). Adopt it so sends stop failing
+          // with "Password not provided". We do NOT call loadWallet() here — the
+          // existing `loadWallet(password)` below performs the single unlock. On-chain
+          // signing stays SQIsign/Dilithium5 + Ed25519; this only supplies the local
+          // unlock secret so those keys regenerate deterministically.
+          if (!password) {
+            const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+            if (metamaskPw) {
+              password = metamaskPw;
+              console.log('[AUTH DEBUG] Using MetaMask auto-password for silent unlock');
+            }
+          }
+
+          // Try using the provided passwordPrompt (skipped if MetaMask auto-password set it)
+          if (password) { /* v10.11.61: already have it */ }
+          else if (passwordPrompt) {
             try {
               password = await passwordPrompt();
             } catch (error) {
@@ -3508,10 +3523,28 @@ export interface QCreditPositionResponse {
   total_pending_yield: string;
 }
 
+// v10.11.61: robust JSON read for QCredit endpoints — an empty/non-OK body
+// (e.g. node on fork, transient 5xx, proxy hiccup) was throwing
+// "Unexpected end of JSON input" and surfacing as "Unable to load vault status".
+async function readQCreditJson(resp: Response, what: string): Promise<any> {
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`${what} unavailable (HTTP ${resp.status})`);
+  }
+  if (!text || !text.trim()) {
+    throw new Error(`${what} returned an empty response`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${what} returned a non-JSON response`);
+  }
+}
+
 export async function getQCreditStatus(baseUrl?: string): Promise<QCreditStatus> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const resp = await fetch(`${url}/api/v1/qcredit/status`);
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT status');
   if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT status');
   return data.data;
 }
@@ -3519,7 +3552,7 @@ export async function getQCreditStatus(baseUrl?: string): Promise<QCreditStatus>
 export async function getQCreditTiers(baseUrl?: string): Promise<QCreditTier[]> {
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const resp = await fetch(`${url}/api/v1/qcredit/tiers`);
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT tiers');
   if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT tiers');
   return data.data;
 }
@@ -3528,7 +3561,7 @@ export async function getQCreditPosition(authHeaders: Record<string, string>, ba
   const url = baseUrl || getConnectionInfo().apiBaseUrl;
   const wallet = localStorage.getItem('walletAddress') || '';
   const resp = await fetch(`${url}/api/v1/qcredit/position?wallet=${encodeURIComponent(wallet)}`);
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT position');
   if (!data.success) throw new Error(data.error || 'Failed to get QCREDIT position');
   return data.data;
 }
@@ -3540,7 +3573,7 @@ export async function lockQCredit(wallet: string, amount: string, tier: string, 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, amount, tier }),
   });
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT lock');
   if (!data.success) throw new Error(data.error || 'Failed to lock QUG');
   return data.data;
 }
@@ -3552,7 +3585,7 @@ export async function unlockQCredit(wallet: string, position_index: number, auth
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT unlock');
   if (!data.success) throw new Error(data.error || 'Failed to unlock position');
   return data.data;
 }
@@ -3564,7 +3597,7 @@ export async function claimQCreditYield(wallet: string, position_index: number, 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
-  const data = await resp.json();
+  const data = await readQCreditJson(resp, 'QCREDIT claim');
   if (!data.success) throw new Error(data.error || 'Failed to claim yield');
   return data.data;
 }

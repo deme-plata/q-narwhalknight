@@ -1325,6 +1325,20 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
     let mounted = true;
     let sseEventSource: EventSource | null = null;
 
+    // Rocky 2026-06-14: instant DEX - paint cached tokens + drop the spinner immediately,
+    // then fetchTokens() refreshes in the background. Balances were zeroed in the cache,
+    // so no stale balance leaks into the no-login preview.
+    try {
+      const cachedDex = localStorage.getItem('cachedDexTokens');
+      if (cachedDex) {
+        const parsedDex = JSON.parse(cachedDex);
+        if (Array.isArray(parsedDex) && parsedDex.length > 0) {
+          setTokens(parsedDex);
+          setLoading(false);
+        }
+      }
+    } catch { /* ignore bad cache */ }
+
     const fetchTokens = async () => {
       try {
         // Get wallet address for balance fetching
@@ -2230,6 +2244,7 @@ export default function DexScreen({ isActive }: { isActive?: boolean }) {
 
         if (mounted) {
           setTokens(enrichedTokens);
+          try { localStorage.setItem('cachedDexTokens', JSON.stringify(enrichedTokens.map(t => ({ ...t, balance: 0 })))); } catch { /* quota/serialize */ }
         }
       } catch (error) {
         console.error('Failed to fetch tokens:', error);

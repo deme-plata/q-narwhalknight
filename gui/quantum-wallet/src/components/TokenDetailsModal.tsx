@@ -6,6 +6,19 @@ import TokenIcon from './TokenIcon';
 import { qnkAPI, getQCreditStatus, getQCreditPosition, getQCreditTiers, lockQCredit, unlockQCredit, claimQCreditYield } from '../services/api';
 import type { QCreditStatus, QCreditPosition, QCreditPositionResponse, QCreditTier } from '../services/api';
 
+// Rocky 2026-06-14: accurate, token-specific descriptions (override generic API text).
+// Verified mechanics: QCREDIT=L2 yield-credit, QSHARE=L3 NAV treasury-share, QDUAL=liquidation-free P/N.
+const TOKEN_DESCRIPTIONS: Record<string, string> = {
+  QUG: "Quillon's native asset - proof-of-work mined and secured by DAG-Knight BFT consensus with post-quantum signatures (Ed25519 + Dilithium5).",
+  QUGUSD: "CDP-collateralized stablecoin tracking USD. Mint by locking QUG collateral; the peg holds while collateral value exceeds the minted liability.",
+  QUSD: "CDP-collateralized stablecoin tracking USD. Mint by locking QUG collateral; the peg holds while collateral value exceeds the minted liability.",
+  QCREDIT: "L2 digital-credit token in Quillon's capital stack (QUG -> QCREDIT -> QSHARE). Lock QUG 1:1 to mint QCREDIT, then redeem after a tier-lock period to claim yield - the chain's yield-bearing credit layer, akin to a convertible bond.",
+  QSHARE: "L3 treasury-share token: an autonomous smart-contract equity-accumulation strategy (Strategy/Saylor-style). NAV-backed and observable on-chain; mints and buys back against accumulated QUG and trades at a premium to NAV.",
+  QDUALP: "Liquidation-free paired-option token (Vitalik P/N model), P leg. Deposit 1 underlying to mint a P+N pair that always sums to the underlying; P gains as the index rises. No debt, no liquidation - you rebalance P<->N on the DEX instead of facing a margin call.",
+  QDUALN: "Liquidation-free paired-option token (Vitalik P/N model), N leg. Pairs with QDUALP; P+N always equals the underlying, and N gains as the index falls. No debt, no liquidation - rebalance on the DEX instead of being liquidated.",
+};
+
+
 // v3.1.1: Helper to safely parse u128 values that may come as strings from the API
 // v3.6.14: Also handles base unit conversion - if value is absurdly large, divide by 1e8
 const parseU128 = (value: string | number | undefined): number => {
@@ -1156,7 +1169,7 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                   <StatCard
                     icon={<Users className="w-5 h-5" />}
                     label="Holders"
-                    value={(realMarketStats?.holders ?? token.holders).toLocaleString()}
+                    value={(() => { const h = realMarketStats?.holders ?? token.holders; return (typeof h === 'number' && h > 0) ? h.toLocaleString() : '\u2014'; })()}
                     color="from-orange-500 to-red-500"
                   />
                   <StatCard
@@ -1232,7 +1245,32 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
               {/* Description */}
               <div>
                 <h3 className="text-xl font-bold text-white mb-4">About {token.name}</h3>
-                <p className="text-gray-300 leading-relaxed text-sm">{token.description}</p>
+                <p className="text-gray-300 leading-relaxed text-sm">{TOKEN_DESCRIPTIONS[(token.symbol || '').toUpperCase()] ?? token.description}</p>
+                {['QDUALP','QDUALN'].includes((token.symbol || '').toUpperCase()) && (
+                <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
+                  <div className="text-cyan-300 text-xs font-bold uppercase tracking-wider mb-2">How qdual works · liquidation-free P / N</div>
+                  <svg viewBox="0 0 400 222" className="w-full" style={{ maxHeight: 250 }}>
+                    <defs>
+                      <linearGradient id="qd-p" x1="0" x2="1"><stop offset="0" stopColor="#34d399" /><stop offset="1" stopColor="#6ee7b7" /></linearGradient>
+                      <linearGradient id="qd-n" x1="0" x2="1"><stop offset="0" stopColor="#fb7185" /><stop offset="1" stopColor="#f87171" /></linearGradient>
+                    </defs>
+                    <text x="20" y="22" fill="#a5f3fc" fontSize="12" fontWeight="700">P + N = 1 underlying — always conserved</text>
+                    <rect x="20" y="32" width="360" height="30" rx="6" fill="#0e1628" stroke="rgba(148,163,184,.25)" />
+                    <rect x="22" y="34" width="206" height="26" rx="5" fill="url(#qd-p)" />
+                    <rect x="230" y="34" width="148" height="26" rx="5" fill="url(#qd-n)" />
+                    <text x="125" y="51" fill="#052e1a" fontSize="12.5" fontWeight="800" textAnchor="middle">P · upside</text>
+                    <text x="304" y="51" fill="#3a0a0a" fontSize="12.5" fontWeight="800" textAnchor="middle">N · downside</text>
+                    <text x="200" y="80" fill="#94a3b8" fontSize="10.5" textAnchor="middle">no debt · no collateral ratio · nothing can be force-sold</text>
+                    <text x="20" y="112" fill="#34d399" fontSize="11" fontWeight="700">qdual — gradual drift</text>
+                    <path d="M20,152 C56,142 86,164 116,152 C146,140 172,162 200,152" fill="none" stroke="#34d399" strokeWidth="2.5" />
+                    <text x="222" y="112" fill="#f87171" fontSize="11" fontWeight="700">CDP — sudden wipeout</text>
+                    <path d="M222,152 L300,152 L302,202 L390,202" fill="none" stroke="#f87171" strokeWidth="2.5" strokeDasharray="5 4" />
+                    <text x="312" y="192" fill="#f87171" fontSize="15" fontWeight="800" textAnchor="middle">✕</text>
+                    <text x="200" y="218" fill="#94a3b8" fontSize="10.5" textAnchor="middle">you pay a small drift-tax instead of risking a liquidation cascade</text>
+                  </svg>
+                  <div className="text-[11px] text-gray-500 mt-2 leading-relaxed">Deposit 1 underlying → mint P + N. Redeem the pair back, or rebalance P↔N on the DEX — the vault never sells your underlying. Design law: hold drift ≈ one stdev to keep the tax ~1–4%/yr.</div>
+                </div>
+                )}
               </div>
 
               {/* v2.7.7-beta: Social Media & Links */}

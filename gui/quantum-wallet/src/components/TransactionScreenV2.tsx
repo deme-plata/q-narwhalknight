@@ -176,6 +176,39 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   // This prevents the bug where balance jumps from 65 to 0.75 on refresh
   const highestKnownBalancesRef = useRef<Record<string, number>>({});
 
+  // v10.11.18-FE2 (2026-05-22): pending outbound tx grace window.
+  // After a successful send, the chain takes 1-3s to apply the block; during
+  // that window the server's /balance endpoint returns the OLD higher value,
+  // which would otherwise OVERRIDE our optimistic deduct and cause the
+  // documented "balance shows old for 30-60s, then drops again" UX bug.
+  // The grace map records per-coin "we just sent X, expected balance is Y";
+  // fetchBalances ignores server reads that contradict this until the chain
+  // catches up OR 90 seconds pass.
+  const pendingSendsRef = useRef<Map<string, { expectedBalance: number; sentAt: number }>>(new Map());
+  const PENDING_GRACE_MS = 90_000;
+
+  // Apply pending-tx grace to a server-reported balance. Returns optimistic
+  // value if the server is still showing the pre-debit (higher) value within
+  // grace window; returns server value otherwise (either grace expired OR
+  // server has caught up).
+  const applyPendingGrace = (coin: string, serverBalance: number): number => {
+    const pending = pendingSendsRef.current.get(coin);
+    if (!pending) return serverBalance;
+    const age = Date.now() - pending.sentAt;
+    if (age > PENDING_GRACE_MS) {
+      pendingSendsRef.current.delete(coin); // grace expired
+      return serverBalance;
+    }
+    // Server caught up (returned value <= expected) — accept it + clear pending
+    if (serverBalance <= pending.expectedBalance + 0.0001) {
+      pendingSendsRef.current.delete(coin);
+      return serverBalance;
+    }
+    // Server still showing pre-debit; keep optimistic
+    console.log(`⏳ [PENDING-GRACE] ${coin}: server says ${serverBalance}, but we sent recently; showing ${pending.expectedBalance} (age ${Math.round(age/1000)}s)`);
+    return pending.expectedBalance;
+  };
+
   // v3.6.9-beta: STABLE balance display - same mechanism as TopBar to prevent flickering
   const [stableBalance, setStableBalance] = useState<number>(() => {
     // Initialize from localStorage cache like TopBar does
@@ -256,6 +289,11 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordVerifying, setPasswordVerifying] = useState(false);
+  // v10.11.43: in-modal send result — after the password is confirmed the modal
+  // stays open and transitions to show the tx hash + balance before/after.
+  // The separate success panel below is ALSO kept, so the hash is visible in two
+  // places (modal + panel) in case the user dismisses the modal.
+  const [sendResult, setSendResult] = useState<{ txHash: string; balanceBefore: number; balanceAfter: number; symbol: string } | null>(null);
 
   // Dynamic fee states (v3.4.0: height-gated 10x fee reduction)
   const [currentFee, setCurrentFee] = useState(CURRENT_MIN_FEE_QUG);
@@ -734,8 +772,17 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         return a.symbol.localeCompare(b.symbol);
       });
 
-      console.log('💾 TransactionScreenV2: Setting validated walletBalances:', sortedBalances);
-      setWalletBalances(sortedBalances);
+      // v10.11.18-FE2: apply pending-tx grace to every coin. If a recent send
+      // hasn't yet been reflected on-chain, keep showing the optimistic
+      // (already-deducted) value instead of letting the stale server value
+      // override our instant-deduct UX.
+      const gracedBalances = sortedBalances.map(b => ({
+        ...b,
+        balance: applyPendingGrace(b.symbol, b.balance),
+      }));
+
+      console.log('💾 TransactionScreenV2: Setting validated walletBalances:', gracedBalances);
+      setWalletBalances(gracedBalances);
     };
 
     fetchBalances();
@@ -743,7 +790,9 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     // Subscribe to SSE balance updates for real-time updates
     // v3.6.1-beta: Added sanity checks to reject corrupted values
     console.log('📡 TransactionScreenV2: Setting up SSE subscription for:', currentWalletAddress);
-    const eventSource = qnkAPI.subscribeToMiningRewards(
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+    qnkAPI.subscribeToMiningRewards(
       currentWalletAddress,
       () => {}, // No mining rewards needed here
       (update) => {
@@ -779,7 +828,15 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
           return updated;
         });
       }
-    );
+    ).then((source) => {
+      if (cancelled) {
+        source.close();
+        return;
+      }
+      eventSource = source;
+    }).catch((error) => {
+      console.error('📡 TransactionScreenV2: Failed to create SSE subscription:', error);
+    });
 
     // v1.4.10-beta: Listen for custom token balance updates via SSE
     // v2.9.17-beta: Added cooldown check to prevent stale data
@@ -884,7 +941,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     console.log('👂 [TransactionScreen] Listening for wallet-balance-updated events');
 
     return () => {
-      eventSource.close();
+      cancelled = true;
+      eventSource?.close();
       window.removeEventListener('token-balance-updated', handleTokenBalanceUpdate as EventListener);
       window.removeEventListener('wallet-balance-updated', handleWalletBalanceUpdate);
       clearTimeout(protectedTimeout);
@@ -977,10 +1035,12 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         setPasswordVerifying(false);
         return;
       }
-      // Password verified — close modal and proceed with send
-      setShowPasswordModal(false);
+      // v10.11.43: Password verified — KEEP the modal open so it can transition
+      // to the in-modal result (hash + before/after balance). Clear the password
+      // input + any stale result; executeSend() sets sendResult on success.
       setConfirmPassword('');
       setPasswordVerifying(false);
+      setSendResult(null);
       await executeSend();
     } catch (err) {
       setPasswordError('Password verification failed. Please try again.');
@@ -1053,7 +1113,10 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             setTransaction(prev => ({
               ...prev,
               success: true,
-              txHash: result.data.transaction_hash || 'fallback_complete',
+              // v10.11.18: /transactions/send_signed returns `transaction_id` (per
+              // memory first_agentic_loop_closed); legacy /transactions/send returned
+              // `transaction_hash`. Check both + the other variants used by DEX swap.
+              txHash: result.data.transaction_id || result.data.transaction_hash || result.data.tx_hash || result.data.tx_id || 'fallback_complete',
               starkProof: result.data.stark_proof
             }));
 
@@ -1062,6 +1125,14 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
             const fallbackFee = selectedCoin === 'QUG' ? 0.000021 : 0;
             const fallbackCurrentBalance = walletBalances.find(c => c.symbol === selectedCoin)?.balance || 0;
             const fallbackOptimisticBalance = Math.max(0, fallbackCurrentBalance - fallbackSentAmount - fallbackFee);
+
+            // v10.11.43: in-modal result for the fallback path too
+            setSendResult({
+              txHash: (result.data.transaction_id || result.data.transaction_hash || result.data.tx_hash || result.data.tx_id || 'pending').replace(/^0x/i, ''),
+              balanceBefore: fallbackCurrentBalance,
+              balanceAfter: fallbackOptimisticBalance,
+              symbol: selectedCoin,
+            });
 
             setWalletBalances(prev => prev.map(w =>
               w.symbol === selectedCoin ? { ...w, balance: fallbackOptimisticBalance } : w
@@ -1225,6 +1296,19 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
       if (result.success && result.data) {
         console.log('✅ Transaction successful! Hash:', result.data.transaction_hash);
         console.log('✅ Full transaction data:', JSON.stringify(result.data, null, 2));
+        // v10.11.60-FE: GHOST-SEND guard. send_signed (handlers.rs:5734) returns
+        // broadcast_success=false when the tx was accepted into the local mempool
+        // but the libp2p gossip broadcast was dropped (try_lock contention / mesh
+        // isolation — see broadcast_success_false_root_cause memory). Reporting
+        // unconditional success here is the documented "ghost send": funds look
+        // sent but the tx can stay local-only/forked and never reach the canonical
+        // chain. Route the explicit-false case into the existing error path so the
+        // user is told to verify + retry instead of seeing a false confirmation.
+        // Strict === false only: undefined (P2P / mixer / DEX results) keeps prior behavior.
+        if (result.data.broadcast_success === false) {
+          throw new Error('Transaction was accepted locally but NOT broadcast to the network (no peers / broadcast dropped). It may not reach the chain — verify on the explorer before trusting it, then retry.');
+        }
+
 
         // Flash border red to indicate transaction sent
         flashBorderRed();
@@ -1254,7 +1338,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         setTransaction(prev => ({
           ...prev,
           success: true, // Always show success for completed transactions
-          txHash: result.data.transaction_hash || result.data.mixing_session_id || result.data.tx_hash || 'pending',
+          // v10.11.45: strip leading 0x so the explorer (raw-hex) lookup works
+          txHash: (result.data.transaction_id || result.data.transaction_hash || result.data.mixing_session_id || result.data.tx_hash || result.data.tx_id || 'pending').replace(/^0x/i, ''),
           starkProof: result.data.stark_proof,
           validatorCount: validatorCount,
           confirmations: confirmations,
@@ -1263,7 +1348,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         }));
 
         // v3.5.24: Start P2P verification in background (non-blocking)
-        const txHash = result.data.transaction_hash || result.data.tx_hash;
+        const txHash = result.data.transaction_id || result.data.transaction_hash || result.data.tx_hash;
         if (p2pDataReady && txHash) {
           console.log(`🔍 [TX] Starting multi-peer verification for ${txHash}...`);
           // Run verification in background without blocking UI
@@ -1289,6 +1374,17 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         const fee = selectedCoin === 'QUG' ? 0.000021 : 0;
         const currentCoinBalance = walletBalances.find(c => c.symbol === selectedCoin)?.balance || 0;
         const optimisticBalance = Math.max(0, currentCoinBalance - sentAmount - fee);
+
+        // v10.11.43: populate the in-modal result (hash + balance before/after).
+        // Reads transaction_id (the field /transactions/send_signed returns) first.
+        // v10.11.45: strip any leading 0x — the backend returns 0x-prefixed but the
+        // block explorer expects raw hex, so users couldn't look the tx up.
+        setSendResult({
+          txHash: (result.data.transaction_id || result.data.transaction_hash || result.data.tx_hash || result.data.tx_id || 'pending').replace(/^0x/i, ''),
+          balanceBefore: currentCoinBalance,
+          balanceAfter: optimisticBalance,
+          symbol: selectedCoin,
+        });
 
         // Update local wallet balances state
         setWalletBalances(prev => prev.map(w =>
@@ -1322,15 +1418,45 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
         window.dispatchEvent(new CustomEvent('balance-update', {
           detail: { refresh: true }
         }));
+
+        // v10.11.18-FE2: register pending-tx grace + kick aggressive poll cadence.
+        // The grace map prevents the next periodic balance poll from overriding
+        // the optimistic deduct with the still-stale server value during the
+        // 1-3s block-apply window. The aggressive poll cadence catches the
+        // moment the chain catches up, replacing the optimistic value with
+        // server-truth as fast as possible.
+        pendingSendsRef.current.set(selectedCoin, {
+          expectedBalance: optimisticBalance,
+          sentAt: Date.now(),
+        });
+        // Auto-clear after grace window even if no poll fires
+        setTimeout(() => {
+          const stale = pendingSendsRef.current.get(selectedCoin);
+          if (stale && Date.now() - stale.sentAt >= PENDING_GRACE_MS) {
+            pendingSendsRef.current.delete(selectedCoin);
+          }
+        }, PENDING_GRACE_MS + 1000);
+        // Aggressive poll cadence: 2s, 5s, 10s, 20s, 40s
+        for (const delay of [2000, 5000, 10000, 20000, 40000]) {
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('balance-update', { detail: { refresh: true, source: 'post-send-aggressive-poll' } }));
+          }, delay);
+        }
       } else {
         console.error('❌ Transaction failed:', result.error);
         throw new Error(result.error || 'Transaction failed - no error message provided');
       }
     } catch (error) {
       console.error('❌ Transaction error:', error);
-      setTransaction(prev => ({ 
-        ...prev, 
-        error: error instanceof Error ? error.message : 'Transaction failed' 
+      // v10.11.43: on failure, close the password modal (it no longer auto-closes on
+      // confirm) so it doesn't look stuck on the password form; the error renders in
+      // the normal error UI below.
+      setShowPasswordModal(false);
+      setSendResult(null);
+      setConfirmPassword('');
+      setTransaction(prev => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Transaction failed'
       }));
     } finally {
       setTransaction(prev => ({ ...prev, isProcessing: false }));
@@ -1338,6 +1464,7 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
   };
 
   const resetTransaction = () => {
+    setSendResult(null);
     setTransaction(prev => ({
       ...prev,
       toAddress: '',
@@ -1775,6 +1902,68 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
               }}
               onClick={(e) => e.stopPropagation()}
             >
+              {sendResult ? (
+                /* v10.11.43: in-modal RESULT view — hash + balance before/after.
+                   The success panel below ALSO shows the hash (two places). */
+                <>
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-10 h-10 rounded-xl bg-green-500/20 flex items-center justify-center">
+                      <Check className="w-5 h-5 text-green-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-bold text-white">Transaction Sent</h3>
+                      <p className="text-xs text-gray-400">Your signed transaction was submitted</p>
+                    </div>
+                    <button
+                      onClick={() => { setShowPasswordModal(false); setSendResult(null); }}
+                      className="ml-auto text-gray-400 hover:text-white transition-colors"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="mb-4 p-3 rounded-xl bg-white/5 border border-white/10">
+                    <div className="text-xs text-gray-400 mb-1">Transaction Hash <span className="text-gray-500">(tap to copy)</span></div>
+                    <div
+                      className="font-mono text-xs text-cyan-300 break-all cursor-pointer hover:text-cyan-200"
+                      onClick={() => { try { navigator.clipboard.writeText(sendResult.txHash); } catch {} }}
+                    >
+                      {sendResult.txHash}
+                    </div>
+                    {/* v10.11.45: open the block explorer pre-searched for this tx so the user can see it confirmed */}
+                    <button
+                      onClick={() => {
+                        try { window.dispatchEvent(new CustomEvent('open-explorer-tx', { detail: { hash: sendResult.txHash } })); } catch {}
+                        setShowPasswordModal(false);
+                        setSendResult(null);
+                      }}
+                      className="mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-cyan-400 hover:text-cyan-200 transition-colors"
+                    >
+                      <Globe className="w-3.5 h-3.5" /> View in Block Explorer →
+                    </button>
+                  </div>
+
+                  <div className="mb-4 p-3 rounded-xl bg-white/5 border border-white/10 space-y-1">
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-400">Balance before</span>
+                      <span className="text-white font-mono">{formatBalanceDisplay(sendResult.balanceBefore)} {sendResult.symbol}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-gray-400">Balance after</span>
+                      <span className="text-green-300 font-mono">{formatBalanceDisplay(sendResult.balanceAfter)} {sendResult.symbol}</span>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => { setShowPasswordModal(false); setSendResult(null); }}
+                    className="w-full py-3 rounded-xl text-sm font-bold text-white transition-all"
+                    style={{ background: 'linear-gradient(135deg, #16a34a, #22c55e)' }}
+                  >
+                    Done
+                  </button>
+                </>
+              ) : (
+                <>
               <div className="flex items-center gap-3 mb-4">
                 <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
                   <Shield className="w-5 h-5 text-amber-400" />
@@ -1840,6 +2029,8 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
                   {passwordVerifying ? 'Verifying...' : 'Confirm & Send'}
                 </button>
               </div>
+                </>
+              )}
             </motion.div>
           </motion.div>
         )}

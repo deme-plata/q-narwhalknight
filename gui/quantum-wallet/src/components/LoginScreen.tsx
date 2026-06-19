@@ -2735,7 +2735,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   </div>
                   <div className="text-left flex-1">
                     <div className="font-bold text-cyan-100">Linux x86_64</div>
-                    <div className="text-xs text-cyan-300/50">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</div>
+                    <div className="text-xs text-cyan-300/50">Ubuntu 22.04+ / Debian 12+ / RHEL 9+</div>
                   </div>
                   <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
                 </a>
@@ -3030,7 +3030,7 @@ chmod +x q-miner-linux-x64
                         animate={{ opacity: [0.7, 1, 0.7] }}
                         transition={{ duration: 1.5, repeat: Infinity }}
                       >
-                        NEW
+                        v10.3.12
                       </motion.span>
                     </div>
                     <p className="text-emerald-300/60 text-sm">Native desktop wallet — pure Rust, no browser</p>
@@ -3112,8 +3112,8 @@ chmod +x q-miner-linux-x64
               {/* Download Buttons */}
               <div className="relative space-y-3">
                 <motion.a
-                  href="https://quillon.xyz/downloads/slint-wallet-linux-x86_64"
-                  download="slint-wallet-linux-x86_64"
+                  href="https://quillon.xyz/downloads/slint-wallet-v10.3.12"
+                  download="slint-wallet-v10.3.12"
                   className="w-full p-4 bg-gradient-to-r from-emerald-600/80 to-teal-600/80 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
                   whileTap={{ scale: 0.98 }}
@@ -3123,14 +3123,14 @@ chmod +x q-miner-linux-x64
                   </div>
                   <div className="text-left flex-1">
                     <div className="font-bold text-white">Linux x86_64</div>
-                    <div className="text-xs text-emerald-200/60">Ubuntu 20.04+ / Debian 11+ / RHEL 8+</div>
+                    <div className="text-xs text-emerald-200/60">Ubuntu 22.04+ / Debian 12+ / RHEL 9+</div>
                   </div>
                   <Download className="w-5 h-5 text-emerald-300/60 group-hover:text-white transition-colors" />
                 </motion.a>
 
                 <motion.a
-                  href="https://quillon.xyz/downloads/slint-wallet-windows-x64.exe"
-                  download="slint-wallet-windows-x64.exe"
+                  href="https://quillon.xyz/downloads/slint-wallet-v10.3.12.exe"
+                  download="slint-wallet-v10.3.12.exe"
                   className="w-full p-4 bg-gradient-to-r from-teal-600/80 to-cyan-600/80 hover:from-teal-500 hover:to-cyan-500 border border-teal-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
                   whileTap={{ scale: 0.98 }}
@@ -3150,9 +3150,9 @@ chmod +x q-miner-linux-x64
               <div className="relative mt-4 p-3 bg-slate-800/50 rounded-xl border border-emerald-500/15">
                 <h3 className="text-sm font-bold text-emerald-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-emerald-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
-chmod +x slint-wallet-linux-x86_64
-./slint-wallet-linux-x86_64`}
+{`wget https://quillon.xyz/downloads/slint-wallet-v10.3.12
+chmod +x slint-wallet-v10.3.12
+./slint-wallet-v10.3.12`}
                 </code>
               </div>
 

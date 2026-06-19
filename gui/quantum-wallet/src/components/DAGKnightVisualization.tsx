@@ -77,6 +77,10 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
   // v6.0.3: Use ref for particles to avoid infinite re-render loop in animation useEffect
   // Previously particles was state AND in the animation effect's deps, causing Error #185
   const particlesRef = useRef<Particle[]>([]);
+  // v10.11.59: drag-to-rotate state (tilts the whole DAG scene with easing)
+  const rotRef = useRef(0);
+  const targetRotRef = useRef(0);
+  const dragRef = useRef<{ active: boolean; startX: number; startRot: number }>({ active: false, startX: 0, startRot: 0 });
 
   // Configuration - 4 lanes for better visual density
   const BLOCK_SIZE = 48; // Square blocks
@@ -336,6 +340,15 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+      // v10.11.59: drag-to-rotate — ease toward target, tilt scene around center.
+      // scale-overfill (1.22) hides the corners the rotation would otherwise expose.
+      rotRef.current += (targetRotRef.current - rotRef.current) * 0.08;
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(rotRef.current);
+      ctx.scale(1.22, 1.22);
+      ctx.translate(-canvas.width / 2, -canvas.height / 2);
+
       // Draw animated background grid
       ctx.strokeStyle = 'rgba(139, 92, 246, 0.05)';
       ctx.lineWidth = 1;
@@ -351,6 +364,53 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         ctx.moveTo(0, y);
         ctx.lineTo(canvas.width, y);
         ctx.stroke();
+      }
+
+      // ✨ v10.11.59 (DeepSeek+Qwen): string-resonance made visible — standing
+      // resonance waves + quantum dust as a living backdrop behind the DAG.
+      // Additive, GC-free (deterministic from time+index), restores ctx state.
+      {
+        const __t = now / 1000;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const __wc = ['rgba(34,211,238,', 'rgba(139,92,246,', 'rgba(251,191,36,'];
+        for (let w = 0; w < 3; w++) {
+          const amp = 16 + w * 9;
+          const k = 0.011 + w * 0.0035;
+          const omega = 0.55 + w * 0.32;
+          const phase = w * 2.1;
+          const yBase = canvas.height * (0.30 + w * 0.22);
+          ctx.beginPath();
+          for (let x = 0; x <= canvas.width; x += 6) {
+            const y = yBase
+              + Math.sin(k * x - omega * __t + phase) * amp
+              + Math.sin(k * 2.3 * x - omega * 1.7 * __t) * amp * 0.32;
+            if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = __wc[w] + (0.05 + 0.03 * Math.sin(__t * 1.3 + w)).toFixed(3) + ')';
+          ctx.lineWidth = 1.4;
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = __wc[w] + '0.5)';
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+        for (let d = 0; d < 80; d++) {
+          const seed = d * 47.13;
+          const dx = (Math.sin(seed) * 0.5 + 0.5) * canvas.width
+            + Math.sin(__t * (0.15 + (d % 7) * 0.02) + seed) * 38;
+          const dy = ((Math.cos(seed * 1.7) * 0.5 + 0.5) * canvas.height
+            + __t * (6 + (d % 5) * 4)) % canvas.height;
+          const tw = 0.30 + 0.35 * Math.sin(__t * 2 + seed);
+          const r = 0.6 + (d % 3 === 0 ? 1.2 : 0.5);
+          ctx.beginPath();
+          ctx.arc(dx, dy, r, 0, Math.PI * 2);
+          ctx.fillStyle = (d % 3 === 0 ? 'rgba(34,211,238,' : 'rgba(251,191,36,') + (tw * 0.5).toFixed(3) + ')';
+          ctx.shadowBlur = 6;
+          ctx.shadowColor = ctx.fillStyle;
+          ctx.fill();
+        }
+        ctx.shadowBlur = 0;
+        ctx.restore();
       }
 
       // Draw lane guides with glow
@@ -650,6 +710,22 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         }
       });
 
+      ctx.restore(); // v10.11.59: end drag-rotate scene transform
+
+      // v10.11.59: STRONGER bloom — blur the bright frame and add it back additively
+      // (two passes: tight 7px core glow + wide 14px halo).
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.55;
+      ctx.filter = 'blur(7px)';
+      ctx.drawImage(canvas, 0, 0);
+      ctx.globalAlpha = 0.32;
+      ctx.filter = 'blur(15px)';
+      ctx.drawImage(canvas, 0, 0);
+      ctx.filter = 'none';
+      ctx.globalAlpha = 1;
+      ctx.restore();
+
       animationFrameId.current = requestAnimationFrame(animate);
     };
 
@@ -721,8 +797,12 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         ref={canvasRef}
         width={1200}
         height={CANVAS_HEIGHT}
-        className="w-full h-auto bg-slate-900 rounded-xl border border-purple-500/20 cursor-pointer shadow-xl shadow-purple-500/5"
+        className="w-full h-auto bg-slate-900 rounded-xl border border-purple-500/20 cursor-grab active:cursor-grabbing shadow-xl shadow-purple-500/5"
         onClick={handleCanvasClick}
+        onMouseDown={(e) => { dragRef.current = { active: true, startX: e.clientX, startRot: targetRotRef.current }; }}
+        onMouseMove={(e) => { if (dragRef.current.active) { const dx = e.clientX - dragRef.current.startX; targetRotRef.current = Math.max(-0.45, Math.min(0.45, dragRef.current.startRot + dx * 0.0038)); } }}
+        onMouseUp={() => { dragRef.current.active = false; }}
+        onMouseLeave={() => { dragRef.current.active = false; }}
       />
 
       {/* Selected Block Details */}
