@@ -2524,8 +2524,19 @@ fn start_sse_listener(
     rt_handle.spawn(async move {
         // v8.2.7: Use connect_timeout but no overall timeout (SSE is long-lived)
         // v10.1.1: Disable auto-decompression — gzip/brotli breaks chunked SSE streams
+        // v10.11.40: The server recycles every SSE connection after MAX_SSE_LIFETIME_SECS
+        // (600s). Over a 1-2h session that means ~6-12 reconnects. Without these two settings,
+        // reqwest could reuse a pooled keep-alive socket the server/q-flux had already closed,
+        // and the reconnecting req.send() would hang indefinitely (connect_timeout does NOT
+        // apply to reused connections) — the balance then froze after 1-2h.
+        //   pool_max_idle_per_host(0): never reuse a pooled socket → every reconnect is a
+        //     fresh connection, so connect_timeout(15s) actually applies and a dead-socket
+        //     reuse-hang is impossible.
+        //   tcp_keepalive(15s): the OS reaps a silently-dead peer.
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
+            .tcp_keepalive(std::time::Duration::from_secs(15))
             .no_gzip()
             .no_brotli()
             .no_deflate()
@@ -2567,13 +2578,29 @@ fn start_sse_listener(
                 }
             };
 
-            let resp = match req.send().await {
-                Ok(r) => {
+            // v10.11.40: bound the reconnect handshake itself. With pool_max_idle_per_host(0)
+            // a reused-dead-socket hang should already be impossible, but this guarantees the
+            // loop can NEVER wedge: a handshake taking >20s is treated as a failure and retried
+            // via the existing backoff path instead of blocking forever (the old root cause of
+            // the 1-2h balance freeze).
+            let resp = match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                req.send(),
+            )
+            .await
+            {
+                Ok(Ok(r)) => {
                     backoff_secs = 3; // Reset backoff on successful connection
                     r
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     eprintln!("[SSE] Connection failed: {}, retrying in {}s...", e, backoff_secs);
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("[SSE] Connect handshake timed out (>20s), retrying in {}s...", backoff_secs);
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                     backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
                     continue;

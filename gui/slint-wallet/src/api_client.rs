@@ -330,14 +330,33 @@ impl ApiClient {
         };
 
         // v10.2.3: Pass actual selected token type instead of hardcoding QUG.
-        let body = serde_json::json!({
-            "from": self.address(),
-            "to": to,
-            "amount": amount_f64,
-            "memo": memo,
-            "token_type": token_type,
-            "mnemonic": send_mnemonic,
-        });
+        // v10.11.40: the quantum-mixer endpoint deserializes PrivacyMixTransactionRequest,
+        // which REQUIRES a `privacy_level` field (and accepts mixing params). Without it the
+        // request failed Axum JSON deserialization with HTTP 422 before the handler ran.
+        let body = if via_mixer {
+            serde_json::json!({
+                "from": self.address(),
+                "to": to,
+                "amount": amount_f64,
+                "privacy_level": "high",
+                "enable_quantum_mixing": true,
+                "decoy_multiplier": 15.0,
+                "memo": memo,
+                // token_type/mnemonic are ignored by PrivacyMixTransactionRequest but kept
+                // for parity with the direct send body and forward-compat.
+                "token_type": token_type,
+                "mnemonic": send_mnemonic,
+            })
+        } else {
+            serde_json::json!({
+                "from": self.address(),
+                "to": to,
+                "amount": amount_f64,
+                "memo": memo,
+                "token_type": token_type,
+                "mnemonic": send_mnemonic,
+            })
+        };
 
         let endpoint = if via_mixer {
             "/api/v1/mixer/send"
