@@ -329,6 +329,16 @@ pub struct HealthStatus {
 }
 
 /// Cached balance state hash (recomputed max every 30s to avoid performance impact)
+// 🔒 SECURITY (DEX double-spend hardening): per-wallet serialization for swaps.
+// Concurrent same-wallet swaps raced balance-check -> debit -> output-mint (TOCTOU):
+// both read the same balance, both minted output while input debited once -> UNBACKED
+// output. This per-wallet lock serializes them so the 2nd swap is rejected by the
+// existing insufficient-balance check. DEX swaps are NOT processed by balance_consensus
+// (process_swap is test-only); the handler is the sole balance mutator, so this lock --
+// not consensus -- is the integrity boundary. Removing it re-creates the v10.11.5 money-printer.
+static SWAP_WALLET_LOCKS: std::sync::LazyLock<dashmap::DashMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
 static BALANCE_HASH_CACHE: std::sync::LazyLock<tokio::sync::Mutex<(std::time::Instant, String, usize, u128)>> =
     std::sync::LazyLock::new(|| {
         tokio::sync::Mutex::new((
@@ -10960,13 +10970,55 @@ pub async fn get_mining_challenge(
                         blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
                     })));
                 } else {
-                    // Challenge is too old (>150s) - force regeneration
+                    // v10.11.24 HOTFIX: Challenge is too old, but the height has not
+                    // advanced. The challenge hash is deterministic for a given height,
+                    // difficulty and VDF iteration count, so regenerating the same-height
+                    // challenge through the LWMA/storage path is unnecessary. On Epsilon
+                    // that path hung before logging "Generated consensus-bound challenge",
+                    // leaving miners stuck submitting expired work for height 18262706.
+                    //
+                    // Refresh the cached challenge timestamps and return it immediately.
+                    // This makes /mining/challenge lock-free in the common stalled-height
+                    // case and lets miners resume submitting fresh work.
                     warn!(
-                        "🔄 Mining challenge for height {} is {} seconds old - forcing regeneration",
+                        "🔄 Mining challenge for height {} is {} seconds old - refreshing cached same-height challenge",
                         block_height, age_seconds
                     );
-                    // Drop the cached reference and fall through to regeneration
+                    let now = chrono::Utc::now();
+                    let challenge_expiry_secs = state
+                        .k_parameter_state
+                        .tuned_challenge_expiry_secs
+                        .load(std::sync::atomic::Ordering::Relaxed) as i64;
+                    let mut refreshed = challenge.clone();
+                    refreshed.issued_at = now;
+                    refreshed.expires_at = now + chrono::Duration::seconds(challenge_expiry_secs);
                     drop(cached);
+                    if let Ok(mut write_guard) = state.current_challenge.try_write() {
+                        *write_guard = Some(refreshed.clone());
+                    }
+                    return Ok(Json(ApiResponse::success(MiningChallengeResponse {
+                        challenge_hash: refreshed.challenge_hash,
+                        difficulty_target: refreshed.difficulty_target,
+                        block_height: refreshed.block_height,
+                        vdf_iterations: refreshed.vdf_iterations,
+                        block_reward: refreshed.block_reward,
+                        expires_at: refreshed.expires_at,
+                        server_notice: MINING_SERVER_NOTICE.to_string(),
+                        server_version: VERSION.to_string(),
+                        min_miner_version: Some(MIN_MINER_VERSION.to_string()),
+                        forced_mining_mode: challenge_forced_mode.clone(),
+                        forced_pool_url: challenge_forced_pool_url.clone(),
+                        network_hashrate_hs: cp_hashrate,
+                        connected_miners: cp_miners,
+                        live_security_bits: cp_security,
+                        recommended_threads: ai_recommended_threads,
+                        backup_servers: Some(get_backup_servers()),
+                        vdf_lane_active: if genus2_active_early { Some(true) } else { None },
+                        vdf_curve_id: if genus2_active_early { Some("pq128".to_string()) } else { None },
+                        vdf_target_iterations: if genus2_active_early { Some(4300) } else { None },
+                        vdf_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                        blake3_reward_share_bps: if genus2_active_early { Some(5000) } else { None },
+                    })));
                 }
             }
         }
@@ -11851,6 +11903,15 @@ pub async fn execute_swap(
             balance_count
         );
     }
+
+    // 🔒 SECURITY: serialize concurrent swaps from the SAME wallet (TOCTOU -> unbacked mint).
+    let _swap_guard = {
+        let wlock = SWAP_WALLET_LOCKS
+            .entry(wallet_addr)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        wlock.lock_owned().await
+    };
 
     // Check user balance for from_token
     {
