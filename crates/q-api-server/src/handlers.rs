@@ -329,6 +329,18 @@ pub struct HealthStatus {
 }
 
 /// Cached balance state hash (recomputed max every 30s to avoid performance impact)
+// 🔒 SECURITY (DEX double-spend hardening): per-wallet serialization for swaps.
+// Concurrent same-wallet swaps raced the balance-check -> debit -> output-mint window
+// (TOCTOU): both read the same balance, both minted output while the input debited once,
+// yielding UNBACKED output. Holding this per-wallet lock across a swap serializes them so
+// the 2nd swap's existing insufficient-balance check sees the 1st's committed debit and is
+// rejected. NOTE: DEX swaps are NOT processed by balance_consensus (process_swap is test-only;
+// the handler is the sole balance mutator), so this lock — not consensus — is the integrity
+// boundary for swaps. Do NOT "let consensus be source of truth" here: it would re-create the
+// v10.11.5 money-printer (QUG never debited).
+static SWAP_WALLET_LOCKS: std::sync::LazyLock<dashmap::DashMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
 static BALANCE_HASH_CACHE: std::sync::LazyLock<tokio::sync::Mutex<(std::time::Instant, String, usize, u128)>> =
     std::sync::LazyLock::new(|| {
         tokio::sync::Mutex::new((
@@ -12024,6 +12036,16 @@ pub async fn execute_swap(
             balance_count
         );
     }
+
+    // 🔒 SECURITY: serialize concurrent swaps from the SAME wallet to close the
+    // balance-check -> debit -> mint TOCTOU (unbacked mint). Held until end of execute_swap.
+    let _swap_guard = {
+        let wlock = SWAP_WALLET_LOCKS
+            .entry(wallet_addr)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        wlock.lock_owned().await
+    };
 
     // Check user balance for from_token
     {
