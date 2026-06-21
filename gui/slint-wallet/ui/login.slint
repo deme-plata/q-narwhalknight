@@ -1,39 +1,61 @@
 import { Theme, QButton, QInput, Card, GradientCard, Icon } from "theme.slint";
 
-// Action card: large clickable tile with icon, title, description, and accent stripe.
+// Action card: frosted-glass clickable tile with icon, title, description,
+// a glowing accent stripe, and a frosted top-edge highlight (Cyan Flux glass).
 component ActionCard inherits Rectangle {
     in property <string> title;
     in property <string> description;
     in property <image> icon-source;
     in property <color> accent;
     in property <bool> selected: false;
+    in property <bool> featured: false;   // recommended card → extra cyan glow at rest
     callback clicked;
 
     height: 132px;
     border-radius: Theme.radius-lg;
+    // Translucent cool glass fill; brightens on hover / when selected.
     background: selected
-        ? root.accent.with-alpha(0.10)
-        : (touch.has-hover ? Theme.bg-hover : Theme.bg-card);
+        ? root.accent.with-alpha(0.16)
+        : (touch.has-hover ? #16243f.with-alpha(0.80)
+           : (root.featured ? #13283f.with-alpha(0.68) : #101c31.with-alpha(0.56)));
     border-width: 1px;
-    border-color: selected ? root.accent.with-alpha(0.5) : Theme.border;
-    drop-shadow-blur: touch.has-hover ? Theme.shadow-md-blur : Theme.shadow-sm-blur;
-    drop-shadow-offset-y: touch.has-hover ? 4px : 1px;
-    drop-shadow-color: #000000.with-alpha(0.35);
-    animate background, border-color, drop-shadow-blur, drop-shadow-offset-y { duration: 150ms; }
+    border-color: (selected || touch.has-hover)
+        ? root.accent.with-alpha(0.70)
+        : root.accent.with-alpha(root.featured ? 0.42 : 0.22);
+    drop-shadow-blur: (selected || touch.has-hover) ? 24px : (root.featured ? 18px : 9px);
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: (selected || touch.has-hover)
+        ? root.accent.with-alpha(0.32)
+        : root.accent.with-alpha(root.featured ? 0.20 : 0.10);
+    animate background, border-color, drop-shadow-blur, drop-shadow-color { duration: 160ms; }
 
     touch := TouchArea {
         clicked => { root.clicked(); }
     }
 
-    // Accent stripe on left
+    // Frosted top-edge highlight (the "glass" sheen)
+    Rectangle {
+        x: 8px;
+        y: 0px;
+        width: parent.width - 16px;
+        height: 1px;
+        background: @linear-gradient(90deg,
+            transparent 0%,
+            #ffffff.with-alpha(0.22) 50%,
+            transparent 100%);
+    }
+
+    // Glowing accent stripe on the left
     Rectangle {
         x: 0;
         y: 0;
         width: 4px;
         height: parent.height;
-        background: root.accent;
+        background: @linear-gradient(180deg, root.accent, root.accent.with-alpha(0.45));
         border-top-left-radius: Theme.radius-lg;
         border-bottom-left-radius: Theme.radius-lg;
+        drop-shadow-blur: 8px;
+        drop-shadow-color: root.accent.with-alpha(0.55);
     }
 
     HorizontalLayout {
@@ -43,13 +65,17 @@ component ActionCard inherits Rectangle {
         padding-bottom: Theme.spacing-md;
         spacing: Theme.spacing-md;
 
-        // Icon tile
+        // Icon tile (glass + accent ring + glow)
         Rectangle {
             width: 56px;
             height: 56px;
             border-radius: Theme.radius-md;
-            background: root.accent.with-alpha(0.12);
+            background: root.accent.with-alpha(0.14);
+            border-width: 1px;
+            border-color: root.accent.with-alpha(0.45);
             y: (parent.height - 56px) / 2;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: root.accent.with-alpha(0.30);
 
             Icon {
                 source: root.icon-source;
@@ -83,7 +109,7 @@ component ActionCard inherits Rectangle {
             alignment: center;
             Icon {
                 source: @image-url("icons/arrow-right.svg");
-                icon-color: root.accent.with-alpha(0.7);
+                icon-color: root.accent.with-alpha(0.8);
                 width: Theme.icon-md;
                 height: Theme.icon-md;
             }
@@ -109,24 +135,53 @@ export component LoginScreen inherits Rectangle {
     callback confirm-created();
     callback open-oauth-browser();
 
-    background: Theme.bg-primary;
+    background: #070b16;
 
-    // Subtle radial-gradient corner accents
+    // Depth gradient: a touch of teal-navy at the top fading to near-black.
     Rectangle {
-        x: -120px;
-        y: -120px;
-        width: 360px;
-        height: 360px;
-        border-radius: 180px;
-        background: Theme.accent-cyan.with-alpha(0.06);
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: @linear-gradient(180deg, #0a1322 0%, #080e1a 55%, #060912 100%);
     }
+
+    // Cyan glow behind the logo (top-center)
+    Rectangle {
+        x: (parent.width - 540px) / 2;
+        y: -200px;
+        width: 540px;
+        height: 440px;
+        border-radius: 270px;
+        background: @radial-gradient(circle,
+            #22d3ee.with-alpha(0.16) 0%,
+            #22d3ee.with-alpha(0.05) 55%,
+            transparent 100%);
+    }
+
+    // Cyan corner glow (top-left)
+    Rectangle {
+        x: -160px;
+        y: -120px;
+        width: 380px;
+        height: 380px;
+        border-radius: 190px;
+        background: @radial-gradient(circle,
+            #06b6d4.with-alpha(0.13) 0%,
+            transparent 70%);
+    }
+
+    // Teal/violet corner glow (bottom-right)
     Rectangle {
         x: parent.width - 240px;
-        y: parent.height - 240px;
-        width: 360px;
-        height: 360px;
-        border-radius: 180px;
-        background: Theme.accent-purple.with-alpha(0.05);
+        y: parent.height - 300px;
+        width: 440px;
+        height: 440px;
+        border-radius: 220px;
+        background: @radial-gradient(circle,
+            #8b5cf6.with-alpha(0.10) 0%,
+            #22d3ee.with-alpha(0.04) 55%,
+            transparent 100%);
     }
 
     Flickable {
@@ -150,26 +205,28 @@ export component LoginScreen inherits Rectangle {
                 HorizontalLayout {
                     alignment: center;
 
-                    // Logo halo
+                    // Logo halo (bright cyan glow + thin ring)
                     Rectangle {
-                        width: 128px;
-                        height: 128px;
-                        border-radius: 64px;
+                        width: 132px;
+                        height: 132px;
+                        border-radius: 66px;
                         background: @radial-gradient(circle,
-                            Theme.accent-cyan.with-alpha(0.18) 0%,
-                            Theme.accent-purple.with-alpha(0.10) 60%,
+                            #22d3ee.with-alpha(0.22) 0%,
+                            #06b6d4.with-alpha(0.10) 55%,
                             transparent 100%);
-                        drop-shadow-blur: 32px;
-                        drop-shadow-color: Theme.accent-cyan.with-alpha(0.25);
+                        border-width: 1px;
+                        border-color: #22d3ee.with-alpha(0.28);
+                        drop-shadow-blur: 38px;
+                        drop-shadow-color: #22d3ee.with-alpha(0.35);
 
-                        // Quillon Graph logo (white-on-transparent shield, tinted cyan)
+                        // Quillon Graph logo (white-on-transparent shield, tinted bright cyan)
                         Image {
                             source: @image-url("icons/quillon-logo.png");
-                            colorize: Theme.accent-cyan;
-                            width: 96px;
-                            height: 96px;
-                            x: (parent.width - 96px) / 2;
-                            y: (parent.height - 96px) / 2;
+                            colorize: #22d3ee;
+                            width: 94px;
+                            height: 94px;
+                            x: (parent.width - 94px) / 2;
+                            y: (parent.height - 94px) / 2;
                             image-fit: contain;
                         }
                     }
@@ -261,7 +318,8 @@ export component LoginScreen inherits Rectangle {
                         ? "OAuth2 — opens your browser to authorize this wallet (recommended)"
                         : "OAuth2 server unavailable on port " + root.oauth-port;
                     icon-source: @image-url("icons/scan-line.svg");
-                    accent: Theme.accent-blue;
+                    accent: #22d3ee;
+                    featured: true;
                     selected: root.active-action == 2;
                     clicked => {
                         root.active-action = root.active-action == 2 ? 0 : 2;
@@ -296,7 +354,7 @@ export component LoginScreen inherits Rectangle {
 
                         QButton {
                             label: "Open browser to authorize";
-                            button-color: Theme.accent-blue;
+                            button-color: #22d3ee;
                             clicked => { root.open-oauth-browser(); }
                         }
 
@@ -324,7 +382,7 @@ export component LoginScreen inherits Rectangle {
                     title: "Create a new wallet";
                     description: "Generate a fresh 12-word recovery phrase and start fresh";
                     icon-source: @image-url("icons/sparkles.svg");
-                    accent: Theme.accent-green;
+                    accent: #2dd4bf;
                     clicked => { root.create-wallet(); }
                 }
 
@@ -333,7 +391,7 @@ export component LoginScreen inherits Rectangle {
                     title: "Import existing wallet";
                     description: "Restore from a 12 or 24 word recovery phrase";
                     icon-source: @image-url("icons/wallet.svg");
-                    accent: Theme.accent-purple;
+                    accent: #8b5cf6;
                     selected: root.active-action == 1;
                     clicked => {
                         root.active-action = root.active-action == 1 ? 0 : 1;
@@ -370,9 +428,9 @@ export component LoginScreen inherits Rectangle {
             Rectangle {
                 height: 64px;
                 border-radius: Theme.radius-md;
-                background: Theme.bg-card.with-alpha(0.5);
+                background: #101c31.with-alpha(0.55);
                 border-width: 1px;
-                border-color: Theme.border;
+                border-color: #22d3ee.with-alpha(0.18);
 
                 HorizontalLayout {
                     padding-left: Theme.spacing-md;
@@ -383,7 +441,7 @@ export component LoginScreen inherits Rectangle {
                         alignment: center;
                         Icon {
                             source: @image-url("icons/circle-dot.svg");
-                            icon-color: Theme.accent-cyan;
+                            icon-color: #22d3ee;
                             width: Theme.icon-md;
                             height: Theme.icon-md;
                         }
