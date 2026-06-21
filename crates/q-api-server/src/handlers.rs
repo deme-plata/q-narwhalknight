@@ -18404,7 +18404,8 @@ pub async fn get_node_config(
     };
 
     let network_id = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
-    let bootstrap_ip = "185.182.185.227";
+    // FIX: was beta 185 (abandoned fork); default epsilon 89 (live chain), env-overridable.
+    let bootstrap_ip = std::env::var("Q_BOOTSTRAP_ADVERTISE_IP").unwrap_or_else(|_| "89.149.241.126".to_string());
     let p2p_port: u16 = 9001;
 
     let mut bootstrap_peers = vec![];
@@ -18420,7 +18421,7 @@ pub async fn get_node_config(
         "recommended": {
             "Q_PREFLIGHT_CHECK": "1",
             "Q_TURBO_SYNC": "1",
-            "Q_TURBO_CHUNK_SIZE": "500",
+            "Q_TURBO_CHUNK_SIZE": "200",
             "Q_GOSSIPSUB_HEARTBEAT_MS": "300",
             "Q_BATCHED_WRITES": "1",
             "Q_STATE_SYNC": "1"
