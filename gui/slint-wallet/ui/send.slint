@@ -1,4 +1,5 @@
 import { Theme, QButton, QInput, Card, GradientCard, Icon } from "theme.slint";
+import { MixingAnimation } from "mixing.slint";
 
 export struct AddressEntry {
     label: string,
@@ -830,6 +831,25 @@ export component SendScreen inherits Rectangle {
                 btn-icon: @image-url("icons/send.svg");
                 clicked => { root.send-transaction(); }
             }
+        }
+    }
+
+    // ═══ Quantum mixing animation (full-screen while a mixer send is in flight) ═══
+    if root.sending && root.use-mixer : Rectangle {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        TouchArea {}   // swallow interaction underneath while mixing
+
+        MixingAnimation {
+            width: 100%;
+            height: 100%;
+            amount: (root.confirm-amount != "" ? root.confirm-amount : root.amount) + " " + root.selected-token;
+            recipient: root.confirm-recipient != "" ? root.confirm-recipient : root.recipient;
+            privacy-level: "HIGH";
+            decoys: 15;
         }
     }
 
