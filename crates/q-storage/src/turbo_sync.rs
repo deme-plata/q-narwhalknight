@@ -3560,7 +3560,7 @@ impl TurboSyncManager {
         let bootstrap_urls = [
             "http://89.149.241.126:8080",   // Epsilon  — 10Gbit supernode, PRIMARY (deepest history)
             "http://5.79.79.158:8080",      // Delta    — 1Gbit, secondary
-            "http://109.205.176.60:8080",   // Gamma    — 1Gbit, tertiary
+            "http://109.205.176.60:8808",   // Gamma    — 1Gbit, tertiary (API port 8808)
             "http://185.182.185.227:8080",  // Beta     — 100Mbit, fallback
         ];
 
@@ -3753,7 +3753,44 @@ impl TurboSyncManager {
                 .collect()
         };
         if peers.is_empty() {
-            warn!("🔧 [GAP-FILL P2P] No eligible peer at height ≥ {} — aborting gap fill for now", last_gap);
+            warn!("🔧 [GAP-FILL P2P] No eligible peer at height ≥ {} — trying HTTP fallback", last_gap);
+            // HTTP gap-fill fallback: thin-link nodes that cannot hold a libp2p connection fetch
+            // blocks over HTTP from Q_BOOTSTRAP_URL (e.g. https://quillon.xyz :443 public gateway)
+            // and apply them via the normal apply_blocks_vec path. Raw peer :8080 is often DC-blocked.
+            if let Ok(base) = std::env::var("Q_BOOTSTRAP_URL") {
+                let base = base.trim_end_matches('/').to_string();
+                let mut h = first_gap;
+                let mut http_filled: u64 = 0;
+                while h <= last_gap {
+                    let limit = (last_gap - h + 1).min(500);
+                    let sync_url = format!("{}/api/v1/sync/blocks?from_height={}&limit={}", base, h, limit);
+                    match ureq::get(&sync_url).timeout(std::time::Duration::from_secs(30)).call() {
+                        Ok(resp) => match resp.into_string() {
+                            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                                Ok(v) => {
+                                    let blocks: Vec<QBlock> = v.get("data").and_then(|d| d.get("blocks"))
+                                        .and_then(|b| serde_json::from_value(b.clone()).ok()).unwrap_or_default();
+                                    if blocks.is_empty() { warn!("🌐 [GAP-FILL HTTP] no blocks at {} — stop", h); break; }
+                                    let n = blocks.len() as u64;
+                                    let range_end = (h + n - 1).min(last_gap);
+                                    if let Err(e) = self.apply_blocks_vec(blocks, None, h, range_end).await {
+                                        warn!("🌐 [GAP-FILL HTTP] apply failed at {}: {}", h, e); break;
+                                    }
+                                    http_filled += n;
+                                    info!("🌐 [GAP-FILL HTTP] applied {} blocks {}-{} from {}", n, h, range_end, base);
+                                    h = range_end + 1;
+                                }
+                                Err(e) => { warn!("🌐 [GAP-FILL HTTP] json err: {}", e); break; }
+                            },
+                            Err(e) => { warn!("🌐 [GAP-FILL HTTP] body err: {}", e); break; }
+                        },
+                        Err(e) => { warn!("🌐 [GAP-FILL HTTP] fetch err: {}", e); break; }
+                    }
+                }
+                info!("🌐 [GAP-FILL HTTP] done: {} blocks via HTTP from {}", http_filled, base);
+            } else {
+                warn!("🔧 [GAP-FILL] No Q_BOOTSTRAP_URL for HTTP fallback");
+            }
             return Ok(());
         }
         info!("🔧 [GAP-FILL P2P] {} eligible peers at height ≥ {}", peers.len(), last_gap);
