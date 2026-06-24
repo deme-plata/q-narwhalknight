@@ -17,7 +17,7 @@ import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDisc
 // they actually opted into; ECDSA personal_sign is deterministic so the same account
 // yields the same password), re-caches it, and returns it. Returns null for non-MetaMask
 // wallets or if the user dismisses the prompt, so the normal password path is untouched.
-async function recoverMetaMaskAutoPassword(): Promise<string | null> {
+export async function recoverMetaMaskAutoPassword(): Promise<string | null> {
   // Fast path: already cached for this session.
   const cached = sessionStorage.getItem('metamaskAutoPassword');
   if (cached) return cached;

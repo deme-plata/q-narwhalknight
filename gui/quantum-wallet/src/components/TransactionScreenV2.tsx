@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, QrCode, Sparkles, Check, AlertTriangle, X, Shield, Eye, EyeOff, Camera, Wallet, TrendingDown, Radio, Globe } from 'lucide-react';
-import { qnkAPI, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG, SEND_AND_SWAP_DISABLED, SEND_AND_SWAP_DISABLED_MESSAGE } from '../services/api';
+import { qnkAPI, recoverMetaMaskAutoPassword, FEE_REDUCTION_ACTIVATION_HEIGHT, CURRENT_MIN_FEE_QUG, NEW_MIN_FEE_QUG, SEND_AND_SWAP_DISABLED, SEND_AND_SWAP_DISABLED_MESSAGE } from '../services/api';
 import { signTransactionForP2P, verifyPasswordHash } from '../services/walletAuth';
 import QRScanner from './QRScanner';
 import QRDisplay from './QRDisplay';
@@ -1010,6 +1010,21 @@ export default function TransactionScreenV2({ currentBalance }: TransactionScree
     // Check if password hash exists (user has a wallet password set)
     const hasPasswordHash = !!localStorage.getItem('walletPasswordHash');
     if (hasPasswordHash) {
+      // v10.11.66: MetaMask-linked wallets have an auto-password the user NEVER set
+      // (it's derived from a MetaMask signature at login and stored as the wallet
+      // password hash). Prompting them for it is a dead end — they have nothing to
+      // type. Instead silently (re-)derive it via MetaMask: a cache hit returns
+      // instantly (no popup), a cache miss triggers one deterministic personal_sign.
+      // Only fall back to the password modal if that genuinely fails.
+      if (localStorage.getItem('metamaskLinked')) {
+        try {
+          const mmPw = await recoverMetaMaskAutoPassword();
+          if (mmPw) {
+            await executeSend();
+            return;
+          }
+        } catch { /* fall through to the password modal */ }
+      }
       // Show password confirmation modal
       setConfirmPassword('');
       setPasswordError(null);
