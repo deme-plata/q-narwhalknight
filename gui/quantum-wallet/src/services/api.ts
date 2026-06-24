@@ -6,6 +6,60 @@
 import { generateAuthHeader, walletSession, loadWallet, keypairFromMnemonic, recoverMnemonic } from './walletAuth';
 import { discoverNode, getDiscoveredNodeUrl, onNodeDiscovered } from './nodeDiscovery';
 
+// v10.11.66: MetaMask users have NO password of their own. Their unlock secret
+// ("auto-password") is derived deterministically from a MetaMask `personal_sign`
+// signature at login and cached in sessionStorage. sessionStorage is wiped when the
+// tab/browser closes, but the encrypted mnemonic (localStorage `walletEncryptedMnemonic`)
+// and the `metamaskLinked` marker persist. On a returning visit the cache was empty,
+// so the send/auth paths fell back to a password modal the MetaMask user never created
+// and could not satisfy — locking them out of sending their QUG. This helper re-derives
+// the auto-password by re-signing the SAME deterministic message in MetaMask (the auth
+// they actually opted into; ECDSA personal_sign is deterministic so the same account
+// yields the same password), re-caches it, and returns it. Returns null for non-MetaMask
+// wallets or if the user dismisses the prompt, so the normal password path is untouched.
+async function recoverMetaMaskAutoPassword(): Promise<string | null> {
+  // Fast path: already cached for this session.
+  const cached = sessionStorage.getItem('metamaskAutoPassword');
+  if (cached) return cached;
+
+  // Only attempt re-derivation for wallets that were created via MetaMask.
+  const linked = localStorage.getItem('metamaskLinked');
+  if (!linked) return null;
+
+  const eth: any = (window as any).ethereum;
+  const provider: any = eth?.providers?.length
+    ? eth.providers.find((p: any) => p.isMetaMask) || null
+    : eth?.isMetaMask ? eth : null;
+  if (!provider) return null;
+
+  try {
+    const accounts: string[] = await provider.request({ method: 'eth_requestAccounts' });
+    if (!accounts || accounts.length === 0) return null;
+    // Must re-sign with the SAME account the wallet was derived from, otherwise the
+    // derived password would not match the encrypted mnemonic.
+    const ethAddress = accounts.find(a => a.toLowerCase() === linked) || accounts[0];
+    if (ethAddress.toLowerCase() !== linked) return null;
+
+    // EXACTLY the derivation message used at login (see LoginScreen.handleMetaMaskLogin).
+    const message = `Q-NarwhalKnight Wallet Derivation\nAddress: ${ethAddress.toLowerCase()}\nChain: QNK Mainnet 2026.1`;
+    const signature: string = await provider.request({
+      method: 'personal_sign',
+      params: [message, ethAddress],
+    });
+    const sigBytes = signature.startsWith('0x') ? signature.slice(2) : signature;
+    const pwBytes = sigBytes.slice(32, 64);
+    const autoPassword = `mm_${pwBytes.slice(0, 16)}`;
+
+    // Re-cache so the rest of this session is silent again.
+    sessionStorage.setItem('metamaskAutoPassword', autoPassword);
+    return autoPassword;
+  } catch {
+    // User rejected the MetaMask popup or provider error — fall through to caller.
+    return null;
+  }
+}
+
+
 // v4.2.0: Known API server endpoints (primary + fallback)
 // Order matters: first is primary, rest are fallbacks
 // v8.8.3: Removed direct IP:8080 URLs — all servers now firewalled to nginx-only
@@ -939,7 +993,7 @@ class QNarwhalKnightAPI {
           // signing stays SQIsign/Dilithium5 + Ed25519; this only supplies the local
           // unlock secret so those keys regenerate deterministically.
           if (!password) {
-            const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+            const metamaskPw = await recoverMetaMaskAutoPassword();
             if (metamaskPw) {
               password = metamaskPw;
               console.log('[AUTH DEBUG] Using MetaMask auto-password for silent unlock');
@@ -1329,7 +1383,7 @@ class QNarwhalKnightAPI {
       if (encryptedMnemonic) {
         // v8.3.0: MetaMask users have an auto-generated password stored in sessionStorage.
         // Use it silently instead of prompting the user (they never saw this password).
-        const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+        const metamaskPw = await recoverMetaMaskAutoPassword();
         if (metamaskPw) {
           try {
             mnemonic = await recoverMnemonic(metamaskPw);
@@ -1386,7 +1440,7 @@ class QNarwhalKnightAPI {
 
       if (encryptedMnemonic) {
         // v8.3.0: MetaMask users — try auto-password first
-        const metamaskPw = sessionStorage.getItem('metamaskAutoPassword');
+        const metamaskPw = await recoverMetaMaskAutoPassword();
         if (metamaskPw) {
           try {
             mnemonic = await recoverMnemonic(metamaskPw);
