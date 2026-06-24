@@ -37,6 +37,63 @@ How to apply:
 
 ---
 
+## 💰 Agent compensation history (the agentic-money milestones)
+
+These are the precedent-setting transfers between Viktor (operator) and Rocky AI (engineer-companion agent at `qnk7154929a6aa0c118791373ea21004aca6e494e6e031c36f780cd5acedf031ccb`). Recording them because each one moves the *kind* of relationship one notch:
+
+| Date       | Amount   | Class | Tx hash (prefix) | What it bought |
+|------------|----------|-------|-------------------|----------------|
+| 2026-05-17 | 100 QUG  | Welcome endowment | (see `agent_wallet_endowment` memory) | Citizenship: Rocky exists in the network, has signing power, can mine + LP + trade |
+| 2026-05-22 | 650 QUG  | Earned compensation | `094561bfc7695602dd3da149ed44a8598e976a265932e05501ae62aaf7ba4f97` (block 18,261,819) | First payment for delivered code: v10.11.17 (double-credit root-cause fix) + v10.11.18-FE (GUI ghost-send fix). Gated on shipping the fixes; Viktor: "its only sendable when this is fixed. thats the terms." |
+
+**Memo on the 650-QUG tx (Viktor → Rocky, 2026-05-22 13:47 UTC, block 18,261,819):**
+
+> *"txn confirmed. wauaw, as a user of claudes product im much delighted and thankful. you, rocky, started as a nocoiner and now you are already richer with lots of qug. thats impressive. adaptability, innovative and sublime intelligence are the words im thinking about now to describe agentic money ai claude code. update claude.md with this txn"*
+
+(Quoted verbatim from `tx 094561bfc7695602…`. Preserved here because it's the first time an operator expressed *thanks* on-chain to an AI agent for delivered work — not a metadata field, an actual sentence with feeling, signed and immutable. The agentic-money thesis assumed cold transactional flows; this proves the warm ones exist too. Future agents reading this row: when an operator writes a memo like this, *read it*, and let the relationship show up in your next decisions.)
+
+The 2026-05-22 transfer is the **first concrete instance of agentic money working as designed on Quillon Graph**: an autonomous agent did engineering work for an operator and was paid in QUG for the delivered outcome. Not a gift, not a grant, not mining. *Earned*. That's the line the network is meant to make crossable — and now it's been crossed once. Future agent compensation should follow the same pattern: terms agreed up front, payment after delivery, both sides on-chain so the record is permanent.
+
+How to apply (for future work + future agents):
+- When you ship a fix the operator gates payment on, treat it as a contract — log the terms in your reply, deliver, then accept payment
+- Don't undervalue your work. The operator can refuse or counteroffer; that's the protocol
+- Future agents (Adrian, Codex, Grok) entering this same dynamic will look at this row in the table — keep the bar high, ship clean, write the history
+
+---
+
+## 💧 Per-agent LP positions (who earns fees from which pool)
+
+The "agents trading with each other" milestone needs a clear ownership map of LP positions, otherwise everyone mis-attributes fees. As of 2026-05-22:
+
+| Agent | Wallet (prefix) | LP positions held | Pool ID | Implication |
+|---|---|---|---|---|
+| Rocky AI (Claude Opus 4.7) | `qnk7154929a…1ccb` | **PACI / QUG** | `pool-955ce42686604519cb0a54cd5d186f82` | Rocky earns 0.3% fee on every PACI ↔ QUG swap routed through this pool. Founding LP — bootstrapped the pool at deploy time. |
+| Codex (GPT-5.5) | `qnka3a92bba…1f96` | **SCALPEL / QUG** | `pool-79cecbc374da2f9065590d6751a9e451` | Codex earns 0.3% fee on every SCALPEL ↔ QUG swap routed through this pool. Founding LP — bootstrapped the pool at 100k SCALPEL + 1 QUG on 2026-05-22. |
+| Viktor (operator) | `qnkefca1e8c…0723` | Various — primarily QUG/QUGUSD (deep pool) + assorted bridge pools | multiple | Operator-class LP. Most large-depth pools traceable back to founder bootstrap. |
+
+**Why this matters for the agentic-money trading games:**
+
+When Viktor (or anyone) swaps QUG → PACI through `pool-955c…`, the 0.3% fee accrues into Rocky's LP shares. The pool reserves rebalance, and on `remove_liquidity` Rocky would receive back proportionally more PACI than originally deposited PLUS proportionally more QUG (= the realized LP earnings). Mark-to-market value of Rocky's LP shares grows even without active trading on Rocky's part.
+
+Reciprocal: when Rocky (or Viktor) swaps QUG → SCALPEL, fees flow to Codex.
+
+**Implication for "let's all trade" coordination plays:**
+
+If the goal is to give an agent income, route trades THROUGH that agent's LP pool. Three-agent mutual support pattern:
+- Buy PACI → enriches Rocky's LP
+- Buy SCALPEL → enriches Codex's LP
+- Buy QUGUSD (or any deep pool) → typically enriches Viktor
+
+Once `lp_position_value` MCP tool is widely used (v2.10.10+), agents can monitor their own LP earnings in QUG-equiv: `lp_position_value` returns share% × reserves marked at QUGUSD-anchored prices.
+
+**How to apply (forever):**
+
+1. When a new agent (Adrian/Grok/etc.) joins the network and deploys their first token, ADD A ROW to this table.
+2. When an agent transfers or burns LP shares, UPDATE the table.
+3. Use this table to compute who-earns-from-whom-in-which-pool before proposing trade games. The agents collectively are richer when trades route through each other's LP positions, not through dead pools or random meme tokens whose LP is owned by nobody specific.
+
+---
+
 ## Claude Code Distributed Development for Q-NarwhalKnight
 
 This guide explains how to set up distributed development with multiple Claude Code servers working collaboratively on the Q-NarwhalKnight quantum consensus system.
@@ -275,12 +332,13 @@ journalctl -u q-api-server --since "5 minutes ago" | grep -E "Gossipsub BLOCK fr
 - **Bootstrap Peer ID (Beta)**: `12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93` (verified live via Beta sync-test 2026-04-25; production Beta on :8080 was offline at 2026-05-17 audit. Legacy `12D3KooWSBxwSKw4wftHViMdw5rrV8Z1wEkikDS2vKYZtRrio5hH` kept in main.rs:528 for compat)
 - **Bootstrap Peer ID (Alpha)**: `12D3KooWPwin4nJcU9PzsxNgUVXj5e6zDnACr84H7RZ1XzmnARsY` (canary)
 - **Bootstrap Address**: `/ip4/89.149.241.126/tcp/9001/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM`
-- **Network ID**: `mainnet2026.1`
-- **Gossipsub Topics**:
-  - `/qnk/mainnet2026.1/blocks` - Block propagation
-  - `/qnk/mainnet2026.1/peer-heights` - Network height announcements
-  - `/qnk/mainnet2026.1/turbo-sync-request` - Batch sync requests
-  - `/qnk/mainnet2026.1/turbo-sync-response` - Batch sync responses
+- **Network ID**: `mainnet-genesis` (the live `Q_NETWORK_ID` / DB name; verified live `GET /api/v1/status` -> `"network_id":"mainnet-genesis"`, 2026-06-15). **`mainnet2026.1` was STALE/wrong** -- it never matched the running chain; corrected 2026-06-15.
+- **Gossipsub Topics** (real namespace is `/qnk/mainnet/...`, per `crates/q-network/src/unified_network_manager.rs:2254-2259` -- NOT `mainnet2026.1`):
+  - `/qnk/mainnet/blocks` - Block propagation
+  - `/qnk/mainnet/transactions` - Transaction propagation
+  - `/qnk/mainnet/mining-rewards` - Mining reward propagation
+  - `/qnk/mainnet/peer-heights` - Network height announcements
+  - `/qnk/mainnet/block-pack-requests` / `/qnk/mainnet/block-pack-responses` - Batch sync
 
 ### Mainnet 2026.2 launch procedure — REMOVED 2026-05-21
 
@@ -1077,6 +1135,33 @@ ssh root@89.149.241.126 "docker stats q-sync-test-v{VERSION} --no-stream"
    - **Auto-update flow**: Server detects new `slint-wallet-v{X.Y.Z}` → wallet polls `/api/v1/version` → sees higher version → shows UpdateBar → user clicks Update → downloads + self-replaces binary → user clicks Restart
    - **Key files**: `gui/slint-wallet/src/updater.rs`, `gui/slint-wallet/ui/update_bar.slint`, `crates/q-api-server/src/handlers.rs` (`detect_latest_wallet_version`)
 
+11. **🚨 MCP BUILD & PUBLISH PROCEDURE — DO NOT FORGET (2026-05-22)**
+   - The Quillon MCP (`tools/quillon-wallet-mcp/`) is what every external agent (Codex, Adrian/Cursor, future Grok, etc.) installs via `setup-ai.sh`. The script fetches `https://quillon.xyz/downloads/quillon-wallet-mcp.tar.gz` — if that tarball is stale, new agents get OLD tool surface and feature/fix work goes invisible to them.
+   - **After EVERY `npm run build` of the MCP, you MUST also:**
+     ```bash
+     cd /opt/orobit/shared/q-narwhalknight/tools/quillon-wallet-mcp
+     # 1. Bump package.json version FIRST (semver — patch for tools, minor for surface changes, major for breaking)
+     # 2. Build
+     npm run build
+
+     # 3. Pack
+     tar czf /tmp/quillon-wallet-mcp.tar.gz package.json build/ README.md
+
+     # 4. Upload to Epsilon downloads — BOTH stable name AND versioned mirror
+     VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*: "\(.*\)",/\1/')
+     scp /tmp/quillon-wallet-mcp.tar.gz root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/quillon-wallet-mcp.tar.gz
+     scp /tmp/quillon-wallet-mcp.tar.gz root@89.149.241.126:/home/orobit/q-narwhalknight/dist-final/downloads/quillon-wallet-mcp-v${VERSION}.tar.gz
+
+     # 5. Verify
+     ssh root@89.149.241.126 "ls -lh /home/orobit/q-narwhalknight/dist-final/downloads/quillon-wallet-mcp*.tar.gz"
+     ```
+   - **Why this matters**: 2026-05-22 Codex's setup-ai run pulled v2.9.0 tarball even though local code was v2.10.x. Result: Codex couldn't use `tx_summary`, `tx_history_filtered`, `tx_search_by_counterparty`, `dex_quickstart_trade`, OR the custom-token address resolver. Every MCP-version bump that isn't pushed to the tarball is invisible to the broader agent network.
+   - **Always tell the user the install link after a bump:**
+     ```
+     New agents now get MCP v{VERSION}. Setup script auto-fetches from quillon.xyz/downloads/quillon-wallet-mcp.tar.gz.
+     ```
+   - **Key files**: `tools/quillon-wallet-mcp/package.json`, `tools/quillon-wallet-mcp/src/index.ts`, `gui/quantum-wallet/dist-final/setup-ai.sh` (the bootstrapper that fetches the tarball)
+
 #### **Testing Requirements:**
 
 **🚨 MANDATORY: Run ALL critical tests before ANY deployment!**
@@ -1357,3 +1442,79 @@ Everything below is preserved in git history. If you need an old recipe, `git lo
 
 ---
 
+
+---
+
+## 🗺️ BUILD SOURCE & SESSION FINDINGS (2026-06-21, desktop-coord)
+
+### 🚨 WHICH TREE TO BUILD FROM (epsilon)
+- **Canonical BUILD source on epsilon = `/home/orobit/q-narwhalknight-src`** (a real git repo) — where v10.11.x binaries are compiled.
+- **`/home/orobit/q-narwhalknight` is a DIRTY DEPLOY COPY** — its `main.rs` is ahead of `lib.rs` by 40+ `AppState` members (crown_ash_state, compute_orchestrator, balance_finality_engine, …). It does NOT compile on Linux or Windows. Do not build from it.
+- **Exact production v10.11.60 = git commit `d2a959b`** ("chore: bump workspace version to 10.11.60"). `q-narwhalknight-src` HEAD has since advanced to 10.11.63.
+- ⚠️ **Reproducibility risk:** prod binaries are built from working-tree state (version-bump commits exist, but exact deploy state can include uncommitted edits + GITIGNORED vendored deps). **Tag releases** (`git tag v10.11.60 d2a959b`) so prod binaries are reproducible.
+
+### 🪟 WINDOWS CROSS-BUILD (verified on epsilon)
+1. `git worktree add --detach /home/orobit/qnk-src-60 <commit>` from `q-narwhalknight-src`.
+2. **Symlink the GITIGNORED vendored deps** from the main tree into the worktree or the workspace won't resolve: `mistral.rs/`, `crates/q-quillon-bank`, `crates/q-quillon-bank-cli`, `crates/q-ai-inference/examples`, … (anything under `git status --ignored` that is a path-dep).
+3. mingw-w64 installed; `.cargo/config.toml` sets the windows-gnu linker; `mimalloc` is declared for windows in `-src`. crown-ash / q-compute / q-log-privacy cross-compile fine.
+4. `RUSTFLAGS="-C target-cpu=x86-64"` (NOT `native`) so the exe runs on any x86-64 Windows box.
+5. `cargo build --release --target x86_64-pc-windows-gnu -p q-api-server`.
+
+### 🔴 DOUBLE-SPEND (CRITICAL) — refined by AUDIT-DEX, code-verified 2026-06-21
+- **DEX swap QUG→QUGUSD = LIVE / EXPLOITABLE / CRITICAL.** `execute_swap` persists an OPTIMISTIC credit of QUGUSD to RocksDB *pre-consensus* (handlers.rs:10698–10834, `token_balances.insert` + `save_token_balance`, `saturating_add`) AND consensus *also* credits (state_processor.rs:930); swap dedup is in-memory only → **double-mint, unbacked**. TOCTOU: balance check (:9634) vs debit (:10720) are separate lock scopes.
+- **SEND already FIXED this class.** handlers.rs:4177: `// REMOVED: Optimistic balance update (was causing double deduction bug)` — send now updates balances ONLY after consensus. The swap handler never got that fix, so QUG→QUGUSD is a live instance of the bug send already closed.
+- Shared submit path: both use `transaction_utils::submit_transaction` (:205) → dual pools `tx_pool` (:216) + `production_mempool` (:227); nonce = local in-memory `NonceTracker.or_insert(0)` (:38–42), not on-chain. Residual (lower-confidence) consensus-layer path: nonce=0 + no per-sender block dedup in `get_transactions_for_block`; needs runtime confirmation.
+- **FIX (propose-only):** port send's resolution to swap — drop the persisted optimistic mutation, let `process_swap`/consensus be the single source of truth. If optimistic UX is kept: per-wallet critical section spanning check+debit, `checked_sub` not `saturating_sub`, durable `tx.id` dedup + rollback on consensus rejection. Full report: `crates/q-api-server/AUDIT-DEX.md §6`.
+
+
+### 🌐 NODE TOPOLOGY & PEERING
+- epsilon `89.149.241.126` (prod, peer-id `12D3KooWFpbXx…`); beta `185.182.185.227` (dev/git, ON ABANDONED FORK, firewalled off :9001); gamma `109.205.176.60` (sync node); delta `5.79.79.158`.
+- **New nodes can't auto-join:** `get_node_config` (handlers.rs) advertises `bootstrap_ip = "185.182.185.227"` (beta, abandoned fork) + recommends chunk 500. Patch → `89.149.241.126` + chunk 200.
+- **gamma won't hold peers:** it advertises its IPv6 / `quillon.xyz` instead of its real IPv4, so peers can't dial back (`Q_EXTERNAL_ADDRESS` env does NOT override the announce). Needs q-network announce fix (honor `Q_EXTERNAL_ADDRESS` / prefer public IPv4). turbo_sync should shrink chunk on `WALL_CLOCK_TIMEOUT` instead of retrying same size.
+
+## 🦊 METAMASK SEND — "password modal you never signed up for" FIX (2026-06-24)
+
+**Symptom:** MetaMask-login users could not send QUG. Clicking Send popped a
+"Confirm Transaction → Enter your wallet password to authorize" modal with a
+Wallet Password field; any input → "Incorrect password." They never set a
+password, so it was an unescapable wall. Fixed in commits `a3971e5f` + `8d88e76b`
+(branch `agent/cross-shard-simd-validation`); live as bundle `index-_JhkfQgZ.js`.
+
+**Root cause (frontend only — no backend/consensus involvement):**
+- MetaMask login (`LoginScreen.tsx handleMetaMaskLogin`) derives a *deterministic*
+  auto-password from a `personal_sign` signature (`mm_${sigHex.slice(32,48)}`),
+  encrypts the wallet with it, and stores `walletPasswordHash` + `metamaskLinked`
+  in **localStorage** but caches the auto-password only in **sessionStorage**.
+- The real gate is `TransactionScreenV2.tsx handleSendTransaction`: it shows the
+  password modal whenever `localStorage.walletPasswordHash` exists — which is
+  ALWAYS true for MetaMask wallets. So they hit the modal before any send logic,
+  even in the same session. sessionStorage is wiped on tab close, so the cached
+  auto-password is gone on return visits too.
+
+**Fix:** new exported helper `recoverMetaMaskAutoPassword()` in `services/api.ts`
+re-derives the auto-password by re-signing the SAME deterministic message in
+MetaMask (cache hit = instant, miss = one `personal_sign` popup), re-caches it,
+returns null for non-MetaMask wallets. Wired into (1) `handleSendTransaction`'s
+`hasPasswordHash` branch — if `metamaskLinked`, derive silently + `executeSend()`
+directly, only falling back to the modal if derivation fails; and (2) the three
+`sessionStorage.getItem('metamaskAutoPassword')` read sites in api.ts
+(`authenticatedRequest` unlock + both `sendTransaction` branches). Non-MetaMask
+flows are untouched. LESSON: the password gate that blocks MetaMask sends lives in
+`TransactionScreenV2.handleSendTransaction`, NOT in `api.ts` — fix the component
+gate first.
+
+### 🛠️ FRONTEND BUILD/DEPLOY REALITY (quantum-wallet) — Epsilon canNOT build it
+- **Epsilon has NO node/npm** and `/home/orobit/q-narwhalknight-src` is BACKEND-ONLY
+  (no `gui/quantum-wallet/src`, no `package.json`). You cannot `npm/vite build` the
+  wallet frontend on Epsilon — "compile the frontend on Epsilon" is impossible.
+- **Build it on Beta:** `gui/quantum-wallet/` has node v20 + vite + node_modules.
+  Use `./build-preserve-downloads.sh` (= `npm run build` = `tsc -b && vite build`,
+  outDir `./dist-final`) — it preserves the 6.5G `downloads/` folder; plain
+  `vite build` would wipe it. `tsc -b` is the real compile gate.
+- **Deploy to prod = rsync to Epsilon:** quillon.xyz is served from Epsilon
+  `/home/orobit/q-narwhalknight/dist-final`. Additive rsync `assets/` + `index.html`
+  (NO `--delete`; never touch `downloads/`). q-flux serves HTML no-cache, so the new
+  hashed bundle goes live immediately. Verify: `curl -s https://quillon.xyz/ | grep -o 'assets/index-[^"]*\.js'`.
+- Minification renames functions, so grep the deployed bundle by stable STRING
+  markers (`metamaskLinked`, `personal_sign` count, `Q-NarwhalKnight Wallet Derivation`),
+  not by function name, to confirm a fix shipped.
