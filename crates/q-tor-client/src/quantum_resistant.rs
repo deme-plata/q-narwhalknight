@@ -22,6 +22,10 @@ use std::{
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+// 🔐 SHA3-256 for key IDs + the hybrid-KEM combiner. The actual Kyber/X25519
+// primitives live in the `pq_kem` submodule (whitepaper §8.3 "hybrid Kyber-1024 + X25519").
+use sha3::{Digest, Sha3_256};
+
 /// Post-quantum algorithm families
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PQAlgorithm {
@@ -46,6 +50,8 @@ pub enum PQAlgorithm {
     /// Hybrid classical + post-quantum
     HybridX25519Kyber768,
     HybridP256Kyber768,
+    /// Hybrid X25519 + Kyber-1024 (NIST Level 5) — whitepaper §8.3 circuit-level TLS target
+    HybridX25519Kyber1024,
 }
 
 impl PQAlgorithm {
@@ -66,6 +72,7 @@ impl PQAlgorithm {
             PQAlgorithm::NtruHps2048677 => "NTRU-HPS-2048-677",
             PQAlgorithm::HybridX25519Kyber768 => "X25519+Kyber-768",
             PQAlgorithm::HybridP256Kyber768 => "P-256+Kyber-768",
+            PQAlgorithm::HybridX25519Kyber1024 => "X25519+Kyber-1024",
         }
     }
 
@@ -79,6 +86,7 @@ impl PQAlgorithm {
             PQAlgorithm::HybridX25519Kyber768 | PQAlgorithm::HybridP256Kyber768 => 3,
             PQAlgorithm::Kyber1024 | PQAlgorithm::Dilithium5 | PQAlgorithm::SphincsShake256f => 5,
             PQAlgorithm::McEliece460896 => 5,
+            PQAlgorithm::HybridX25519Kyber1024 => 5,
         }
     }
 
@@ -88,7 +96,8 @@ impl PQAlgorithm {
             PQAlgorithm::Kyber512 | PQAlgorithm::Kyber768 | PQAlgorithm::Kyber1024 |
             PQAlgorithm::McEliece348864 | PQAlgorithm::McEliece460896 |
             PQAlgorithm::NtruHps2048509 | PQAlgorithm::NtruHps2048677 |
-            PQAlgorithm::HybridX25519Kyber768 | PQAlgorithm::HybridP256Kyber768
+            PQAlgorithm::HybridX25519Kyber768 | PQAlgorithm::HybridP256Kyber768 |
+            PQAlgorithm::HybridX25519Kyber1024
         )
     }
 
@@ -103,7 +112,8 @@ impl PQAlgorithm {
     /// Is this a hybrid algorithm?
     pub fn is_hybrid(&self) -> bool {
         matches!(self,
-            PQAlgorithm::HybridX25519Kyber768 | PQAlgorithm::HybridP256Kyber768
+            PQAlgorithm::HybridX25519Kyber768 | PQAlgorithm::HybridP256Kyber768 |
+            PQAlgorithm::HybridX25519Kyber1024
         )
     }
 
@@ -125,6 +135,7 @@ impl PQAlgorithm {
             PQAlgorithm::NtruHps2048677 => 930,
             PQAlgorithm::HybridX25519Kyber768 => 32 + 1184,
             PQAlgorithm::HybridP256Kyber768 => 65 + 1184,
+            PQAlgorithm::HybridX25519Kyber1024 => 32 + 1568,
         }
     }
 
@@ -146,6 +157,7 @@ impl PQAlgorithm {
             PQAlgorithm::NtruHps2048677 => 930,
             PQAlgorithm::HybridX25519Kyber768 => 32 + 1088,
             PQAlgorithm::HybridP256Kyber768 => 65 + 1088,
+            PQAlgorithm::HybridX25519Kyber1024 => 32 + 1568,
         }
     }
 }
@@ -208,29 +220,29 @@ pub struct PQKeyPair {
 }
 
 impl PQKeyPair {
-    /// Generate a new key pair
+    /// Generate a new key pair.
+    ///
+    /// KEM algorithms (Kyber family + X25519⊕Kyber hybrids) use REAL crypto via
+    /// `pq_kem`. Other (signature / not-yet-wired) algorithms keep the previous
+    /// random-bytes placeholder so existing callers don't regress.
     pub fn generate(algorithm: PQAlgorithm) -> Result<Self> {
-        // In production, use actual PQ crypto library (e.g., liboqs, pqcrypto)
-        // This is a placeholder implementation
-        let pk_size = algorithm.public_key_size();
-        let sk_size = pk_size * 2; // Placeholder
+        let (public_key, secret_key) = if algorithm.is_kem() {
+            pq_kem::generate(algorithm)?
+        } else {
+            // Placeholder for signature/unwired algorithms (sign/verify still stubbed).
+            let pk_size = algorithm.public_key_size();
+            let mut rng = rand::thread_rng();
+            use rand::RngCore;
+            let mut public_key = vec![0u8; pk_size];
+            let mut secret_key = vec![0u8; pk_size * 2];
+            rng.fill_bytes(&mut public_key);
+            rng.fill_bytes(&mut secret_key);
+            (public_key, secret_key)
+        };
 
-        let mut rng = rand::thread_rng();
-        use rand::RngCore;
-
-        let mut public_key = vec![0u8; pk_size];
-        let mut secret_key = vec![0u8; sk_size];
-        rng.fill_bytes(&mut public_key);
-        rng.fill_bytes(&mut secret_key);
-
-        // Generate key ID
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        public_key.hash(&mut hasher);
-        let hash = hasher.finish();
+        // Key ID = SHA3-256(public_key) — stable, collision-resistant.
         let mut key_id = [0u8; 32];
-        key_id[0..8].copy_from_slice(&hash.to_le_bytes());
+        key_id.copy_from_slice(&Sha3_256::digest(&public_key));
 
         info!("Generated {} key pair (ID: {})", algorithm.name(), hex::encode(&key_id[0..8]));
 
@@ -248,28 +260,24 @@ impl PQKeyPair {
         &self.public_key
     }
 
-    /// Encapsulate a shared secret (for KEMs)
-    pub fn encapsulate(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+    /// Encapsulate a shared secret to a peer's public key (KEM initiator→responder).
+    ///
+    /// Returns `(ciphertext, shared_secret)`. The ciphertext is sent to the peer, who
+    /// recovers the same `shared_secret` via [`decapsulate`]. Real Kyber ⊕ X25519
+    /// crypto — no more zero secrets.
+    pub fn encapsulate_to(&self, peer_public_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         if !self.algorithm.is_kem() {
             return Err(anyhow!("Algorithm is not a KEM"));
         }
-
-        // Placeholder - in production use actual KEM encapsulation
-        let ciphertext = vec![0u8; self.algorithm.ciphertext_size()];
-        let shared_secret = vec![0u8; 32];
-
-        Ok((ciphertext, shared_secret))
+        pq_kem::encapsulate(self.algorithm, peer_public_key)
     }
 
-    /// Decapsulate a shared secret (for KEMs)
-    pub fn decapsulate(&self, _ciphertext: &[u8]) -> Result<Vec<u8>> {
+    /// Decapsulate a shared secret from a ciphertext using our secret key (KEM responder→initiator).
+    pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
         if !self.algorithm.is_kem() {
             return Err(anyhow!("Algorithm is not a KEM"));
         }
-
-        // Placeholder - in production use actual KEM decapsulation
-        let shared_secret = vec![0u8; 32];
-        Ok(shared_secret)
+        pq_kem::decapsulate(self.algorithm, ciphertext, &self.secret_key)
     }
 
     /// Sign a message (for signature algorithms)
@@ -321,14 +329,16 @@ impl Default for QuantumResistantConfig {
     fn default() -> Self {
         Self {
             migration_phase: MigrationPhase::HybridOptional,
-            preferred_kem: PQAlgorithm::HybridX25519Kyber768,
+            // Whitepaper §8.3 Q3: hybrid Kyber-1024 + X25519 (NIST Level 5) is the target.
+            preferred_kem: PQAlgorithm::HybridX25519Kyber1024,
             preferred_signature: PQAlgorithm::Dilithium3,
             min_security_level: 3,
             enable_negotiation: true,
             supported_kems: vec![
+                PQAlgorithm::HybridX25519Kyber1024,
                 PQAlgorithm::HybridX25519Kyber768,
-                PQAlgorithm::Kyber768,
                 PQAlgorithm::Kyber1024,
+                PQAlgorithm::Kyber768,
             ],
             supported_signatures: vec![
                 PQAlgorithm::Dilithium3,
@@ -466,7 +476,12 @@ impl PQHandshake {
             return Err(anyhow!("Invalid handshake state"));
         }
 
-        let (ciphertext, shared_secret) = self.our_kem_keypair.encapsulate()?;
+        // Encapsulate to the PEER's (initiator's) public key — not our own.
+        let peer_pubkey = self
+            .peer_kem_pubkey
+            .as_ref()
+            .ok_or_else(|| anyhow!("cannot encapsulate: peer KEM public key not received"))?;
+        let (ciphertext, shared_secret) = self.our_kem_keypair.encapsulate_to(peer_pubkey)?;
         self.shared_secret = Some(shared_secret.clone());
         self.state = HandshakeState::Completed;
 
@@ -681,6 +696,208 @@ impl QuantumResistantManager {
     }
 }
 
+/// 🔐 Real hybrid KEM crypto: CRYSTALS-Kyber (pqcrypto) ⊕ X25519 (dalek).
+///
+/// Wire format for a hybrid `X25519+Kyber-N`:
+/// - public key  = `x25519_pub(32) || kyber_pub`
+/// - secret key  = `x25519_secret(32) || kyber_secret`
+/// - ciphertext  = `x25519_ephemeral_pub(32) || kyber_ciphertext`
+/// - shared secret = `SHA3-256("qnk-hybrid-kem-v1" || x25519_ss || kyber_ss)` (32 bytes)
+///
+/// The SHA3 combiner is the standard concatenation KDF: the result stays secret as long
+/// as EITHER the classical or the post-quantum half is unbroken — that's the whole point
+/// of a hybrid (safe against both a Kyber break and a future quantum X25519 break).
+mod pq_kem {
+    use super::PQAlgorithm;
+    use anyhow::{anyhow, Result};
+    use pqcrypto_traits::kem::{
+        Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _,
+    };
+    use rand::RngCore;
+    use sha3::{Digest, Sha3_256};
+    use x25519_dalek::{PublicKey as XPublicKey, StaticSecret as XStaticSecret};
+
+    const X25519_LEN: usize = 32;
+
+    #[derive(Clone, Copy)]
+    enum KyberVariant {
+        K512,
+        K768,
+        K1024,
+    }
+
+    /// Generate `(public_key, secret_key)` bytes for a KEM algorithm.
+    pub fn generate(alg: PQAlgorithm) -> Result<(Vec<u8>, Vec<u8>)> {
+        match alg {
+            PQAlgorithm::Kyber512 => kyber_keypair(KyberVariant::K512),
+            PQAlgorithm::Kyber768 => kyber_keypair(KyberVariant::K768),
+            PQAlgorithm::Kyber1024 => kyber_keypair(KyberVariant::K1024),
+            PQAlgorithm::HybridX25519Kyber768 => hybrid_keypair(KyberVariant::K768),
+            PQAlgorithm::HybridX25519Kyber1024 => hybrid_keypair(KyberVariant::K1024),
+            other => Err(anyhow!("KEM keygen not implemented for {}", other.name())),
+        }
+    }
+
+    /// Encapsulate to a peer's public key → `(ciphertext, shared_secret)`.
+    pub fn encapsulate(alg: PQAlgorithm, peer_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        match alg {
+            PQAlgorithm::Kyber512 => kyber_encapsulate(KyberVariant::K512, peer_pk),
+            PQAlgorithm::Kyber768 => kyber_encapsulate(KyberVariant::K768, peer_pk),
+            PQAlgorithm::Kyber1024 => kyber_encapsulate(KyberVariant::K1024, peer_pk),
+            PQAlgorithm::HybridX25519Kyber768 => hybrid_encapsulate(KyberVariant::K768, peer_pk),
+            PQAlgorithm::HybridX25519Kyber1024 => hybrid_encapsulate(KyberVariant::K1024, peer_pk),
+            other => Err(anyhow!("KEM encapsulate not implemented for {}", other.name())),
+        }
+    }
+
+    /// Decapsulate `ciphertext` with our `secret_key` → `shared_secret`.
+    pub fn decapsulate(alg: PQAlgorithm, ct: &[u8], sk: &[u8]) -> Result<Vec<u8>> {
+        match alg {
+            PQAlgorithm::Kyber512 => kyber_decapsulate(KyberVariant::K512, ct, sk),
+            PQAlgorithm::Kyber768 => kyber_decapsulate(KyberVariant::K768, ct, sk),
+            PQAlgorithm::Kyber1024 => kyber_decapsulate(KyberVariant::K1024, ct, sk),
+            PQAlgorithm::HybridX25519Kyber768 => hybrid_decapsulate(KyberVariant::K768, ct, sk),
+            PQAlgorithm::HybridX25519Kyber1024 => hybrid_decapsulate(KyberVariant::K1024, ct, sk),
+            other => Err(anyhow!("KEM decapsulate not implemented for {}", other.name())),
+        }
+    }
+
+    // ── Kyber (pqcrypto). Each variant is a distinct module/type → dispatch per variant. ──
+    fn kyber_keypair(v: KyberVariant) -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok(match v {
+            KyberVariant::K512 => {
+                let (pk, sk) = pqcrypto_kyber::kyber512::keypair();
+                (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+            }
+            KyberVariant::K768 => {
+                let (pk, sk) = pqcrypto_kyber::kyber768::keypair();
+                (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+            }
+            KyberVariant::K1024 => {
+                let (pk, sk) = pqcrypto_kyber::kyber1024::keypair();
+                (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+            }
+        })
+    }
+
+    fn kyber_encapsulate(v: KyberVariant, peer_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        Ok(match v {
+            KyberVariant::K512 => {
+                let pk = pqcrypto_kyber::kyber512::PublicKey::from_bytes(peer_pk)
+                    .map_err(|e| anyhow!("bad kyber512 pk: {e:?}"))?;
+                let (ss, ct) = pqcrypto_kyber::kyber512::encapsulate(&pk);
+                (ct.as_bytes().to_vec(), ss.as_bytes().to_vec())
+            }
+            KyberVariant::K768 => {
+                let pk = pqcrypto_kyber::kyber768::PublicKey::from_bytes(peer_pk)
+                    .map_err(|e| anyhow!("bad kyber768 pk: {e:?}"))?;
+                let (ss, ct) = pqcrypto_kyber::kyber768::encapsulate(&pk);
+                (ct.as_bytes().to_vec(), ss.as_bytes().to_vec())
+            }
+            KyberVariant::K1024 => {
+                let pk = pqcrypto_kyber::kyber1024::PublicKey::from_bytes(peer_pk)
+                    .map_err(|e| anyhow!("bad kyber1024 pk: {e:?}"))?;
+                let (ss, ct) = pqcrypto_kyber::kyber1024::encapsulate(&pk);
+                (ct.as_bytes().to_vec(), ss.as_bytes().to_vec())
+            }
+        })
+    }
+
+    fn kyber_decapsulate(v: KyberVariant, ct: &[u8], sk: &[u8]) -> Result<Vec<u8>> {
+        Ok(match v {
+            KyberVariant::K512 => {
+                let ct = pqcrypto_kyber::kyber512::Ciphertext::from_bytes(ct)
+                    .map_err(|e| anyhow!("bad kyber512 ct: {e:?}"))?;
+                let sk = pqcrypto_kyber::kyber512::SecretKey::from_bytes(sk)
+                    .map_err(|e| anyhow!("bad kyber512 sk: {e:?}"))?;
+                pqcrypto_kyber::kyber512::decapsulate(&ct, &sk).as_bytes().to_vec()
+            }
+            KyberVariant::K768 => {
+                let ct = pqcrypto_kyber::kyber768::Ciphertext::from_bytes(ct)
+                    .map_err(|e| anyhow!("bad kyber768 ct: {e:?}"))?;
+                let sk = pqcrypto_kyber::kyber768::SecretKey::from_bytes(sk)
+                    .map_err(|e| anyhow!("bad kyber768 sk: {e:?}"))?;
+                pqcrypto_kyber::kyber768::decapsulate(&ct, &sk).as_bytes().to_vec()
+            }
+            KyberVariant::K1024 => {
+                let ct = pqcrypto_kyber::kyber1024::Ciphertext::from_bytes(ct)
+                    .map_err(|e| anyhow!("bad kyber1024 ct: {e:?}"))?;
+                let sk = pqcrypto_kyber::kyber1024::SecretKey::from_bytes(sk)
+                    .map_err(|e| anyhow!("bad kyber1024 sk: {e:?}"))?;
+                pqcrypto_kyber::kyber1024::decapsulate(&ct, &sk).as_bytes().to_vec()
+            }
+        })
+    }
+
+    // ── X25519 (dalek). We use StaticSecret-from-seed to keep keys serializable. ──
+    fn x25519_keypair() -> ([u8; X25519_LEN], [u8; X25519_LEN]) {
+        let mut seed = [0u8; X25519_LEN];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let sk = XStaticSecret::from(seed);
+        let pk = XPublicKey::from(&sk);
+        (*pk.as_bytes(), sk.to_bytes())
+    }
+
+    fn arr32(b: &[u8]) -> Result<[u8; X25519_LEN]> {
+        if b.len() != X25519_LEN {
+            return Err(anyhow!("expected 32-byte x25519 component, got {}", b.len()));
+        }
+        let mut a = [0u8; X25519_LEN];
+        a.copy_from_slice(b);
+        Ok(a)
+    }
+
+    // ── Hybrid: x25519 ⊕ kyber, SHA3-256 combiner ──
+    fn hybrid_keypair(v: KyberVariant) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (x_pk, x_sk) = x25519_keypair();
+        let (k_pk, k_sk) = kyber_keypair(v)?;
+        let mut pk = x_pk.to_vec();
+        pk.extend_from_slice(&k_pk);
+        let mut sk = x_sk.to_vec();
+        sk.extend_from_slice(&k_sk);
+        Ok((pk, sk))
+    }
+
+    fn hybrid_encapsulate(v: KyberVariant, peer_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        if peer_pk.len() <= X25519_LEN {
+            return Err(anyhow!("hybrid peer public key too short"));
+        }
+        let (x_peer_pk, k_peer_pk) = peer_pk.split_at(X25519_LEN);
+        // Classical: ephemeral X25519 DH against the peer's static X25519 key.
+        let mut eph_seed = [0u8; X25519_LEN];
+        rand::thread_rng().fill_bytes(&mut eph_seed);
+        let eph_sk = XStaticSecret::from(eph_seed);
+        let eph_pk = XPublicKey::from(&eph_sk);
+        let x_ss = eph_sk.diffie_hellman(&XPublicKey::from(arr32(x_peer_pk)?));
+        // Post-quantum: Kyber encapsulation against the peer's Kyber key.
+        let (k_ct, k_ss) = kyber_encapsulate(v, k_peer_pk)?;
+        let mut ct = eph_pk.as_bytes().to_vec();
+        ct.extend_from_slice(&k_ct);
+        Ok((ct, combine(x_ss.as_bytes(), &k_ss)))
+    }
+
+    fn hybrid_decapsulate(v: KyberVariant, ct: &[u8], sk: &[u8]) -> Result<Vec<u8>> {
+        if ct.len() <= X25519_LEN || sk.len() <= X25519_LEN {
+            return Err(anyhow!("hybrid ciphertext/secret too short"));
+        }
+        let (x_ct, k_ct) = ct.split_at(X25519_LEN);
+        let (x_sk_b, k_sk) = sk.split_at(X25519_LEN);
+        let x_sk = XStaticSecret::from(arr32(x_sk_b)?);
+        let x_ss = x_sk.diffie_hellman(&XPublicKey::from(arr32(x_ct)?));
+        let k_ss = kyber_decapsulate(v, k_ct, k_sk)?;
+        Ok(combine(x_ss.as_bytes(), &k_ss))
+    }
+
+    /// Concatenation KDF: `SHA3-256(domain || classical_ss || pq_ss)`.
+    fn combine(classical_ss: &[u8], pq_ss: &[u8]) -> Vec<u8> {
+        let mut h = Sha3_256::new();
+        h.update(b"qnk-hybrid-kem-v1");
+        h.update(classical_ss);
+        h.update(pq_ss);
+        h.finalize().to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +954,65 @@ mod tests {
         let handshake = PQHandshake::new_initiator(&config).unwrap();
         assert!(!handshake.our_public_key().is_empty());
         assert!(!handshake.is_complete());
+    }
+
+    /// Round-trip: initiator and responder MUST derive the same, NON-ZERO shared secret.
+    /// This is the regression guard against the old `vec![0u8; 32]` placeholder.
+    fn kem_roundtrip(alg: PQAlgorithm) {
+        // Initiator generates a keypair and publishes its public key.
+        let initiator = PQKeyPair::generate(alg).unwrap();
+        assert_eq!(initiator.public_key().len(), alg.public_key_size(),
+            "{} public key size mismatch", alg.name());
+
+        // Responder encapsulates to the initiator's public key.
+        let responder = PQKeyPair::generate(alg).unwrap();
+        let (ciphertext, ss_responder) = responder.encapsulate_to(initiator.public_key()).unwrap();
+        assert_eq!(ciphertext.len(), alg.ciphertext_size(),
+            "{} ciphertext size mismatch", alg.name());
+
+        // Initiator decapsulates with its secret key.
+        let ss_initiator = initiator.decapsulate(&ciphertext).unwrap();
+
+        assert_eq!(ss_initiator, ss_responder, "{} shared secrets differ", alg.name());
+        assert_eq!(ss_initiator.len(), 32);
+        assert_ne!(ss_initiator, vec![0u8; 32], "{} shared secret is all-zero (placeholder!)", alg.name());
+    }
+
+    #[test]
+    fn test_hybrid_x25519_kyber1024_roundtrip() {
+        // The whitepaper §8.3 target.
+        kem_roundtrip(PQAlgorithm::HybridX25519Kyber1024);
+        assert_eq!(PQAlgorithm::HybridX25519Kyber1024.security_level(), 5);
+        assert!(PQAlgorithm::HybridX25519Kyber1024.is_kem());
+        assert!(PQAlgorithm::HybridX25519Kyber1024.is_hybrid());
+    }
+
+    #[test]
+    fn test_kem_roundtrips_all_variants() {
+        kem_roundtrip(PQAlgorithm::Kyber512);
+        kem_roundtrip(PQAlgorithm::Kyber768);
+        kem_roundtrip(PQAlgorithm::Kyber1024);
+        kem_roundtrip(PQAlgorithm::HybridX25519Kyber768);
+        kem_roundtrip(PQAlgorithm::HybridX25519Kyber1024);
+    }
+
+    /// Full handshake state machine derives a matching secret end-to-end.
+    #[test]
+    fn test_pq_handshake_end_to_end() {
+        let config = QuantumResistantConfig::default(); // preferred_kem = HybridX25519Kyber1024
+        let mut initiator = PQHandshake::new_initiator(&config).unwrap();
+        let mut responder = PQHandshake::new_responder(&config).unwrap();
+
+        // Initiator → responder: public key.
+        responder.receive_pubkey(initiator.our_public_key()).unwrap();
+        // Responder → initiator: ciphertext + derives its secret.
+        let (ciphertext, ss_responder) = responder.complete_as_responder().unwrap();
+        // Initiator needs responder's pubkey state set before completing (state machine).
+        initiator.receive_pubkey(responder.our_public_key()).unwrap();
+        let ss_initiator = initiator.complete_as_initiator(&ciphertext).unwrap();
+
+        assert_eq!(ss_initiator, ss_responder);
+        assert_ne!(ss_initiator, vec![0u8; 32]);
+        assert!(initiator.is_complete() && responder.is_complete());
     }
 }

@@ -54,6 +54,9 @@ getrandom = "0.2"
 # v3.7.4: Post-quantum Dilithium5 for circuit authentication (NIST Level 5)
 pqcrypto-dilithium = { workspace = true }
 pqcrypto-traits = { workspace = true }
+# Tor Q3 (whitepaper §8.3): hybrid Kyber-1024 + X25519 circuit-level KEM
+pqcrypto-kyber = { workspace = true }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 
 # Prometheus metrics
 prometheus = { workspace = true }
