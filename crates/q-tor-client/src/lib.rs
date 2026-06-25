@@ -74,6 +74,7 @@ pub mod onion_balance;
 // Quantum-resistant: Post-quantum cryptography for Tor
 pub mod quantum_resistant;
 pub mod pq_secure_channel; // 🔐 Q3: PQ secure channel (hybrid KEM handshake + ChaCha20-Poly1305) over a circuit
+pub mod stem_receiver;     // 🧅 Dandelion stem RECEIVER (accept side) — completes stem relay end-to-end
 
 // Decoy routing: Advanced censorship resistance
 pub mod decoy_routing;
@@ -894,6 +895,23 @@ impl QTorClient {
             onion_address
         );
         Ok(conn)
+    }
+
+    /// 🧅 Start the Dandelion stem RECEIVER (accept side). Binds `bind_addr` — the local
+    /// port the node's onion service forwards to — and returns an mpsc receiver of raw stem
+    /// payloads (postcard txs) sent by peers via [`send_over_tor`]. The node injects each
+    /// into its mempool and fluffs it to the open gossip mesh, completing the stem relay.
+    pub fn start_stem_receiver(
+        &self,
+        bind_addr: std::net::SocketAddr,
+    ) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            if let Err(e) = crate::stem_receiver::serve(bind_addr, tx).await {
+                tracing::error!("🧅 [STEM-RX] receiver stopped: {}", e);
+            }
+        });
+        rx
     }
 
     /// Broadcast message through Tor with traffic analysis resistance
