@@ -115,7 +115,12 @@ bincode = "1.3"
 
 # libp2p codec support (v1.0.15.1-beta: handshake protocol)
 unsigned-varint = { version = "0.7", features = ["futures", "codec"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+# "compat" feature added for Tor Phase C: wraps tokio TcpStream as a futures
+# AsyncRead/AsyncWrite so the SOCKS5 transport's Output satisfies .authenticate().
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
+
+# 🧅 Tor Phase C: SOCKS5 outbound dialing through Arti (socks5_transport.rs)
+tokio-socks = { workspace = true }
 
 # void crate for libp2p 0.53 connection_limits (v1.0.17-beta)
 void = "1.0"

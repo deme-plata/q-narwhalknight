@@ -17,6 +17,7 @@ pub mod persistent_channels;
 pub mod protocol_handshake;
 pub mod handshake_validator;  // ✅ v1.0.15.1-beta - Protocol version validation
 pub mod tor_integration;      // 🧅 v2.1.0: Tor integration with dedicated circuits
+pub mod socks5_transport;     // 🧅 Tor Phase C: SOCKS5-beneath-TCP outbound onion dialing
 pub mod wireguard_check;      // 🛡️ v10.10.15: WireGuard fail-honest gate for Tor outbound
 
 // Export handshake components

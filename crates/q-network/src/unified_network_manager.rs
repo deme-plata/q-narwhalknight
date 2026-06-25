@@ -1866,6 +1866,26 @@ impl UnifiedNetworkManager {
                 yamux::Config::default,
             )?  // Sync
             .with_quic()  // Sync
+            // 🧅 Tor Phase C (SOCKS5-beneath-TCP) — the whitepaper §8.3 "Tor-native"
+            // outbound transport. Connects through Arti's SOCKS5 proxy and hands libp2p
+            // a Compat<TcpStream>, which then gets the SAME Noise+Yamux upgrade as TCP.
+            // This resolves the three reverted-splice root causes documented above:
+            //   (1) returns the transport directly (no Result<T> double-wrap),
+            //   (2) Output = Compat<TcpStream> satisfies futures AsyncRead/AsyncWrite
+            //       for .authenticate(),
+            //   (3) lands AFTER .with_quic() and BEFORE .with_dns() (phase order).
+            // Inert by default: Socks5DialTransport::dial returns MultiaddrNotSupported
+            // unless Q_TOR_SOCKS5_DIAL=1 / Q_TOR_ONLY=1, so libp2p falls through to the
+            // TCP/QUIC transports above — zero behaviour change until an operator opts in.
+            .with_other_transport(|kp| {
+                use crate::socks5_transport::{Socks5DialConfig, Socks5DialTransport};
+                let cfg = Socks5DialConfig::from_env();
+                let transport = Socks5DialTransport::new(cfg)
+                    .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+                    .authenticate(noise::Config::new(kp)?)
+                    .multiplex(yamux::Config::default());
+                Ok(transport)
+            })?
             .with_dns()?  // Sync
             .with_websocket(
                 noise::Config::new,
