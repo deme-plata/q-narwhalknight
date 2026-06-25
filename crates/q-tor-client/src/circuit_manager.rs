@@ -592,6 +592,24 @@ impl CircuitManager {
             .unwrap_or_default()
     }
 
+    /// All onion peer addresses associated with circuits (Dandelion/Tor stem targets).
+    pub fn known_onion_targets(&self) -> Vec<String> {
+        self.circuits
+            .values()
+            .flatten()
+            .filter_map(|c| c.peer_onion.clone())
+            .collect()
+    }
+
+    /// The onion peer address bound to a specific circuit, if any.
+    pub fn onion_for_circuit(&self, circuit_id: u64) -> Option<String> {
+        self.circuits
+            .values()
+            .flatten()
+            .find(|c| c.id == circuit_id)
+            .and_then(|c| c.peer_onion.clone())
+    }
+
     /// Rotate all circuits
     pub async fn rotate_all_circuits(&mut self) -> Result<()> {
         info!("🔄 Rotating all Tor circuits");

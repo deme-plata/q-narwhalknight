@@ -910,48 +910,103 @@ impl QTorClient {
         Ok(())
     }
 
-    /// Direct broadcast through Tor circuits
-    async fn direct_broadcast(&self, message: &[u8], _topic: &str) -> Result<()> {
-        let circuit_manager = self.circuit_manager.lock().await;
-
-        // Use all gossip circuits for broadcasting
-        for circuit_id in circuit_manager.get_gossip_circuits() {
-            let proxy_addr = self.socks_proxy;
-            let message = message.to_vec();
-            let circuit_id = *circuit_id;
-
-            tokio::spawn(async move {
-                // Send message through this circuit
-                // Implementation would depend on the specific networking protocol
-                debug!("📤 Sending message through circuit {}", circuit_id);
-            });
+    /// Candidate onion stem targets: configured bootstrap onions + any peer onions the
+    /// circuit manager has learned. Placeholders/empties filtered out.
+    async fn stem_onion_targets(&self) -> Vec<String> {
+        let mut targets: Vec<String> = self
+            .config
+            .bootstrap_onions
+            .iter()
+            .filter(|o| !o.is_empty() && o.contains(".onion"))
+            .cloned()
+            .collect();
+        let manager = self.circuit_manager.lock().await;
+        for o in manager.known_onion_targets() {
+            if o.contains(".onion") && !targets.contains(&o) {
+                targets.push(o);
+            }
         }
+        targets
+    }
 
+    /// Actually send `message` to an onion peer over Tor (SOCKS5 → onion circuit).
+    /// This is a REAL Tor send — the bytes traverse a Tor circuit to the target onion.
+    async fn send_over_tor(&self, onion: &str, message: &[u8]) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut conn = self
+            .connect_to_peer(onion)
+            .await
+            .with_context(|| format!("Tor connect to stem target {onion}"))?;
+        let stream = conn.stream_mut();
+        // Length-prefixed frame so the receiver can delimit the message.
+        stream.write_all(&(message.len() as u32).to_be_bytes()).await?;
+        stream.write_all(message).await?;
+        stream.flush().await?;
+        debug!("🧅 sent {} bytes over Tor → {}", message.len(), onion);
         Ok(())
     }
 
-    /// Dandelion++ broadcast for traffic analysis resistance
+    /// Direct broadcast through Tor circuits. Sends to every known onion target.
+    /// Returns Err if there are no targets or every send fails — so callers NEVER
+    /// report "sent via Tor" unless bytes genuinely left over a Tor circuit.
+    async fn direct_broadcast(&self, message: &[u8], _topic: &str) -> Result<()> {
+        let targets = self.stem_onion_targets().await;
+        if targets.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no Tor onion targets (set Q_TOR_BOOTSTRAP_ONIONS) — refusing to fake a Tor broadcast"
+            ));
+        }
+        let mut sent = 0usize;
+        for onion in &targets {
+            match self.send_over_tor(onion, message).await {
+                Ok(()) => sent += 1,
+                Err(e) => warn!("🧅 Tor broadcast to {} failed: {}", onion, e),
+            }
+        }
+        if sent == 0 {
+            return Err(anyhow::anyhow!(
+                "Tor broadcast failed to all {} onion target(s)",
+                targets.len()
+            ));
+        }
+        info!("🧅 tx broadcast via Tor to {}/{} onion peers", sent, targets.len());
+        Ok(())
+    }
+
+    /// Dandelion++ stem: relay the tx to ONE pseudo-random onion peer over Tor before it
+    /// fluffs into the open mesh. Returns Err (→ honest gossipsub fallback) if no Tor stem
+    /// target is reachable, instead of silently pretending the stem went over Tor.
     async fn dandelion_broadcast(&self, message: &[u8], topic: &str) -> Result<()> {
-        debug!("🌻 Using Dandelion++ broadcast for topic: {}", topic);
-
-        // Phase 1: Stem phase - relay to random peer
-        let random_circuit = {
-            let manager = self.circuit_manager.lock().await;
-            manager.get_random_circuit().await?
-        };
-
-        // Send to random peer first (stem phase)
-        // Then peer will either continue stem or switch to fluff phase
-        self.relay_through_circuit(message, random_circuit).await?;
-
+        let targets = self.stem_onion_targets().await;
+        if targets.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Dandelion stem: no Tor onion targets (set Q_TOR_BOOTSTRAP_ONIONS) — refusing to fake Tor"
+            ));
+        }
+        // Pseudo-random stem target (selection spread; not security-critical).
+        let idx = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0)
+            % targets.len();
+        let target = &targets[idx];
+        self.send_over_tor(target, message)
+            .await
+            .with_context(|| format!("Dandelion stem relay via Tor to {target}"))?;
+        info!("🌻 Dandelion++ stem relayed via Tor → {} (topic={})", target, topic);
         Ok(())
     }
 
-    /// Relay message through specific circuit
-    async fn relay_through_circuit(&self, _message: &[u8], circuit_id: u64) -> Result<()> {
-        debug!("🔄 Relaying message through circuit {}", circuit_id);
-        // Implementation would integrate with the actual circuit
-        Ok(())
+    /// Relay a message through the Tor circuit associated with `circuit_id` (real send
+    /// to that circuit's onion peer). Errs if the circuit has no onion peer.
+    async fn relay_through_circuit(&self, message: &[u8], circuit_id: u64) -> Result<()> {
+        let onion = {
+            let manager = self.circuit_manager.lock().await;
+            manager
+                .onion_for_circuit(circuit_id)
+                .ok_or_else(|| anyhow::anyhow!("circuit {circuit_id} has no onion peer to relay to"))?
+        };
+        self.send_over_tor(&onion, message).await
     }
 
     /// Generate quantum-enhanced circuit parameters
