@@ -93,7 +93,7 @@ impl CircuitAuthKey {
 }
 
 /// Circuit authentication handshake message
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CircuitAuthHandshake {
     /// Dilithium5 public key (2,592 bytes)
     pub public_key: Vec<u8>,
@@ -167,6 +167,23 @@ impl CircuitManager {
     /// Create new circuit manager
     pub async fn new(socks_proxy: SocketAddr, circuit_count: usize) -> Result<Self> {
         Self::new_with_phase(socks_proxy, circuit_count, Phase::Phase0).await
+    }
+
+    /// Test-only constructor: builds a manager with a real Dilithium5 auth key but NO
+    /// network/QRNG/circuit setup (so unit tests can exercise the auth + KEM handshake
+    /// without a running Tor daemon).
+    #[cfg(test)]
+    pub(crate) fn new_test(socks_proxy: SocketAddr) -> Self {
+        Self {
+            socks_proxy,
+            circuits: HashMap::new(),
+            circuit_count: 0,
+            latency_target: Duration::from_millis(300),
+            last_rotation: Instant::now(),
+            qrng: None,
+            current_phase: Phase::Phase0,
+            auth_key: CircuitAuthKey::generate(),
+        }
     }
 
     /// Create new circuit manager with specific phase

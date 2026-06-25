@@ -73,6 +73,7 @@ pub mod onion_balance;
 
 // Quantum-resistant: Post-quantum cryptography for Tor
 pub mod quantum_resistant;
+pub mod pq_secure_channel; // 🔐 Q3: PQ secure channel (hybrid KEM handshake + ChaCha20-Poly1305) over a circuit
 
 // Decoy routing: Advanced censorship resistance
 pub mod decoy_routing;
@@ -863,6 +864,38 @@ impl QTorClient {
         ))
     }
 
+    /// 🔐 Q3: connect to a peer AND perform the post-quantum circuit handshake.
+    ///
+    /// Like [`connect_to_peer`], but after the SOCKS connection is up it runs the
+    /// hybrid X25519+Kyber-1024 KEM handshake (Dilithium5-authenticated) over the stream and
+    /// attaches the agreed key to the returned [`TorConnection`] (see `circuit_key()`), which
+    /// callers wrap with [`pq_secure_channel::PqAead`] to encrypt circuit payloads.
+    ///
+    /// The remote MUST run the matching accept side (`pq_secure_channel::server_handshake`),
+    /// so this is opt-in for PQ-capable peers. Legacy peers keep using `connect_to_peer`.
+    pub async fn connect_to_peer_pq(&self, onion_address: &str) -> Result<TorConnection> {
+        let mut conn = self.connect_to_peer(onion_address).await?;
+        let circuit_id = conn.get_circuit_id();
+
+        // Build the authenticated KEM handshake WITHOUT holding the manager lock across IO.
+        let (handshake, ephemeral) = {
+            let manager = self.circuit_manager.lock().await;
+            manager.create_auth_handshake_kem(circuit_id)?
+        };
+
+        let key =
+            crate::pq_secure_channel::client_handshake(conn.stream_mut(), &handshake, &ephemeral)
+                .await
+                .context("post-quantum circuit handshake failed")?;
+        conn.set_circuit_key(key);
+
+        info!(
+            "🔐 [PQ-CIRCUIT] Established hybrid X25519+Kyber-1024 circuit key with {}",
+            onion_address
+        );
+        Ok(conn)
+    }
+
     /// Broadcast message through Tor with traffic analysis resistance
     pub async fn broadcast_message(&self, message: &[u8], topic: &str) -> Result<()> {
         debug!("📡 Broadcasting message via Tor to topic: {}", topic);
@@ -1329,6 +1362,9 @@ pub struct TorConnection {
     stream: TcpStream,
     circuit_id: u64,
     peer_onion: String,
+    /// 🔐 Q3: post-quantum circuit key (hybrid X25519+Kyber-1024), set by connect_to_peer_pq.
+    /// `None` for legacy (auth-only / no key agreement) connections.
+    circuit_key: Option<[u8; 32]>,
 }
 
 impl TorConnection {
@@ -1337,7 +1373,18 @@ impl TorConnection {
             stream,
             circuit_id,
             peer_onion,
+            circuit_key: None,
         }
+    }
+
+    /// 🔐 Q3: the agreed post-quantum circuit key, if a PQ handshake was performed.
+    pub fn circuit_key(&self) -> Option<[u8; 32]> {
+        self.circuit_key
+    }
+
+    /// 🔐 Q3: attach the agreed PQ circuit key (used by connect_to_peer_pq).
+    pub fn set_circuit_key(&mut self, key: [u8; 32]) {
+        self.circuit_key = Some(key);
     }
 
     pub fn get_circuit_id(&self) -> u64 {

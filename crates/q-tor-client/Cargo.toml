@@ -57,6 +57,8 @@ pqcrypto-traits = { workspace = true }
 # Tor Q3 (whitepaper §8.3): hybrid Kyber-1024 + X25519 circuit-level KEM
 pqcrypto-kyber = { workspace = true }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+# Tor Q3: ChaCha20-Poly1305 AEAD for the PQ circuit channel (pq_secure_channel)
+chacha20poly1305 = { workspace = true }
 
 # Prometheus metrics
 prometheus = { workspace = true }
