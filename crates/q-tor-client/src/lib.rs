@@ -76,6 +76,13 @@ pub mod quantum_resistant;
 pub mod pq_secure_channel; // 🔐 Q3: PQ secure channel (hybrid KEM handshake + ChaCha20-Poly1305) over a circuit
 pub mod stem_receiver;     // 🧅 Dandelion stem RECEIVER (accept side) — completes stem relay end-to-end
 
+/// 🧅 OOTB: onions auto-discovered from Tor-capable peers (fed by register_peer_onion,
+/// populated from libp2p Identify in q-network). Process-global so it survives across the
+/// QTorClient handle without threading a field through every constructor.
+static HARVESTED_PEER_ONIONS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashSet::new()));
+
 // Decoy routing: Advanced censorship resistance
 pub mod decoy_routing;
 
@@ -914,6 +921,18 @@ impl QTorClient {
         rx
     }
 
+    /// 🧅 onion-on-boot: launch the node's embedded-Arti onion service and forward inbound
+    /// streams to the local stem-receiver port (`local_port`). Returns the published .onion
+    /// address — set it as `Q_TOR_ADVERTISE_ONION` so the Identify layer advertises it and
+    /// peers auto-discover us as a Tor-capable stem target (the OOTB path). Errors in SOCKS
+    /// mode (no embedded Arti).
+    pub async fn launch_onion_forwarder(&self, nickname: &str, local_port: u16) -> Result<String> {
+        let rtc = self.real_tor_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no embedded Arti client (SOCKS mode) — cannot launch onion service")
+        })?;
+        rtc.launch_onion_forwarder(nickname, local_port).await
+    }
+
     /// Broadcast message through Tor with traffic analysis resistance
     pub async fn broadcast_message(&self, message: &[u8], topic: &str) -> Result<()> {
         debug!("📡 Broadcasting message via Tor to topic: {}", topic);
@@ -944,7 +963,29 @@ impl QTorClient {
                 targets.push(o);
             }
         }
+        // 🧅 OOTB: onions auto-discovered from Tor-capable peers' Identify (register_peer_onion).
+        for o in HARVESTED_PEER_ONIONS.read().unwrap().iter() {
+            if o.contains(".onion") && !targets.contains(o) {
+                targets.push(o.clone());
+            }
+        }
         targets
+    }
+
+    /// 🧅 OOTB: record a Tor-capable peer's onion address (harvested from libp2p Identify by
+    /// q-network's tor_capability layer). These auto-populate the Dandelion stem-target set
+    /// via [`stem_onion_targets`], so stems route to reachable Tor peers with no config — the
+    /// out-of-the-box path. Capability negotiation is implicit: only peers that advertise an
+    /// onion (i.e. are Tor-reachable) ever land here.
+    pub fn register_peer_onion(&self, onion: &str) {
+        if onion.contains(".onion") {
+            HARVESTED_PEER_ONIONS.write().unwrap().insert(onion.to_string());
+        }
+    }
+
+    /// 🧅 OOTB: drop a peer's onion (e.g. on disconnect / capability loss).
+    pub fn forget_peer_onion(&self, onion: &str) {
+        HARVESTED_PEER_ONIONS.write().unwrap().remove(onion);
     }
 
     /// Actually send `message` to an onion peer over Tor (SOCKS5 → onion circuit).

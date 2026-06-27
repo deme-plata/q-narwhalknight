@@ -3300,6 +3300,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v10.10.8: pass the bootstrapped Arti client through so Phases A/B/C can
     // wire the libp2p transport against it. `tor_client` is the Arc built at
     // line ~2914 above; it's `None` if Tor bootstrap failed (e.g., no network).
+    // 🧅 onion-on-boot (OOTB Tor): when stem routing is enabled, launch a REAL embedded-Arti
+    // onion service, forward its inbound streams to the local stem receiver, and advertise the
+    // .onion via Identify (Q_TOR_ADVERTISE_ONION) so Tor-capable peers auto-discover us.
+    // Runs BEFORE the network manager builds Identify so the address is advertised from boot.
+    if std::env::var("Q_TOR_STEM").ok().as_deref() == Some("1") {
+        if let Some(ref tor) = tor_client {
+            let stem_port: u16 = std::env::var("Q_TOR_STEM_BIND")
+                .ok()
+                .and_then(|s| s.rsplit(':').next().map(|x| x.to_string()))
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(9055);
+            let tor_boot = tor.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                tor_boot.launch_onion_forwarder("qnk-stem", stem_port),
+            )
+            .await
+            {
+                Ok(Ok(onion)) => {
+                    let advertised = format!("{}:{}", onion, stem_port);
+                    std::env::set_var("Q_TOR_ADVERTISE_ONION", &advertised);
+                    info!("🧅 [ONION-BOOT] onion service live + advertised via Identify: {}", advertised);
+                }
+                Ok(Err(e)) => warn!("🧅 [ONION-BOOT] onion launch failed: {} — Tor stem inbound disabled", e),
+                Err(_) => warn!("🧅 [ONION-BOOT] onion launch timed out (>180s) — Tor stem inbound disabled"),
+            }
+        }
+    }
+
     let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone(), tor_client.clone()).await {
         Ok(mut manager) => {
             info!(

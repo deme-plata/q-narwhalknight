@@ -23,10 +23,13 @@ tokio-socks = { workspace = true }
 # Implements Proposal 368: usage-based timeouts on strongly isolated circuits
 # static-sqlite feature enables bundled SQLite for Windows cross-compilation
 # v10.1.9: Use rustls instead of native-tls to avoid dynamic OpenSSL dependency
-arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"] }
+arti-client = { version = "0.37.0", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite", "onion-service-service", "onion-service-client"] }
 # arti-hyper removed - causes version conflict and not used (dedicated_circuits uses arti-client directly)
 tor-rtcompat = { version = "0.37.0", default-features = false, features = ["tokio", "rustls"] }
 tor-hsservice = "0.37.0"
+# 🧅 onion-on-boot: stream accept + onion-address display
+tor-cell = "0.37.0"
+safelog = "=0.7.2"
 url = "2.5"
 
 # Q-NarwhalKnight types

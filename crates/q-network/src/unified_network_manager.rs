@@ -1939,7 +1939,13 @@ impl UnifiedNetworkManager {
                 // Identify
                 let identify = libp2p::identify::Behaviour::new(
                     libp2p::identify::Config::new("/qnarwhal/1.0.0".to_string(), keypair_inner.public())
-                        .with_push_listen_addr_updates(true),
+                        .with_push_listen_addr_updates(true)
+                        // 🧅 OOTB Tor: advertise our onion (if Q_TOR_ADVERTISE_ONION set by onion-on-boot)
+                        // so Tor-capable peers learn they can stem-relay to us over Tor.
+                        .with_agent_version(crate::tor_capability::build_agent_version(
+                            concat!("qnk/", env!("CARGO_PKG_VERSION")),
+                            std::env::var("Q_TOR_ADVERTISE_ONION").ok().as_deref(),
+                        )),
                 );
 
                 // Ping
@@ -3963,6 +3969,15 @@ impl UnifiedNetworkManager {
                 // to dial. Without this, the [PEER CHECK] fast-fail path drops
                 // the ideal sync source and round-robins through unrelated peers.
                 if let libp2p::identify::Event::Received { peer_id, info, .. } = event {
+                    // 🧅 OOTB Tor: harvest peer Tor capability + onion from agent_version.
+                    // Only Tor-capable peers advertise an onion, so feeding these to the
+                    // stem-target set makes capability negotiation implicit + safe-by-default.
+                    let _peer_cap = crate::tor_capability::parse_peer(&info.agent_version);
+                    if let (true, Some(onion)) = (_peer_cap.tor_capable, _peer_cap.onion.clone()) {
+                        if let Some(tor) = &self.tor_client {
+                            tor.register_peer_onion(&onion);
+                        }
+                    }
                     let listen_addrs = info.listen_addrs.clone();
                     if !listen_addrs.is_empty() {
                         let cache = self.peer_addresses.clone();

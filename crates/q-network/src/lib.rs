@@ -297,3 +297,4 @@ mod tests {
 }
 pub mod connection_manager;
 pub mod handshake;
+pub mod tor_capability;  // 🧅 OOTB Tor capability negotiation + onion auto-discovery
