@@ -991,6 +991,17 @@ impl QTorClient {
     /// Actually send `message` to an onion peer over Tor (SOCKS5 → onion circuit).
     /// This is a REAL Tor send — the bytes traverse a Tor circuit to the target onion.
     async fn send_over_tor(&self, onion: &str, message: &[u8]) -> Result<()> {
+        // Prefer embedded Arti's NATIVE connect: embedded Arti exposes no SOCKS port, so the
+        // SOCKS5 path below only works with an external tor daemon. With embedded Arti
+        // (real_tor_client present) we dial the onion directly through Arti.
+        if let Some(rtc) = &self.real_tor_client {
+            rtc.send_framed(onion, message)
+                .await
+                .with_context(|| format!("Tor (embedded Arti) send to {onion}"))?;
+            debug!("🧅 sent {} bytes over Tor (arti) → {}", message.len(), onion);
+            return Ok(());
+        }
+        // Fallback: SOCKS5 (external tor daemon at Q_TOR_SOCKS5_ADDR).
         use tokio::io::AsyncWriteExt;
         let mut conn = self
             .connect_to_peer(onion)
@@ -1001,7 +1012,7 @@ impl QTorClient {
         stream.write_all(&(message.len() as u32).to_be_bytes()).await?;
         stream.write_all(message).await?;
         stream.flush().await?;
-        debug!("🧅 sent {} bytes over Tor → {}", message.len(), onion);
+        debug!("🧅 sent {} bytes over Tor (socks) → {}", message.len(), onion);
         Ok(())
     }
 

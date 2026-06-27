@@ -286,6 +286,20 @@ impl RealTorClient {
     /// 🧅 onion-on-boot: launch a REAL embedded-Arti onion service and forward every inbound
     /// stream to a local TCP port (the Dandelion stem receiver). Returns the published .onion
     /// address. The RunningOnionService is kept alive inside the spawned forwarder task.
+    /// 🧅 Send a length-framed message to an onion target via the embedded Arti client's
+    /// NATIVE connect (no SOCKS port needed). Used by the Dandelion stem sender.
+    pub async fn send_framed(&self, target: &str, message: &[u8]) -> Result<()> {
+        let mut stream = self
+            .arti_client
+            .connect(target)
+            .await
+            .map_err(|e| anyhow!("arti connect {}: {}", target, e))?;
+        stream.write_all(&(message.len() as u32).to_be_bytes()).await?;
+        stream.write_all(message).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
     pub async fn launch_onion_forwarder(&self, nickname: &str, local_port: u16) -> Result<String> {
         use futures::StreamExt;
         use safelog::DisplayRedacted;
