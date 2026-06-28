@@ -2020,6 +2020,55 @@ fn boot_step(n: u8, status: char, label: &str, detail: &str) {
     eprintln!("    [{:02}] {} {:<22}{} {}{}{}", n, icon, label, c_dim, c_status, detail, c_r);
 }
 
+/// PQC-004: enforce the producer's Hybrid Ed25519+Dilithium5 signature over the
+/// CANONICAL block hash (`block.signing_payload()`, the same message the Ed25519
+/// producer signature covers) at/after the `HybridSignaturesV1` activation height.
+///
+/// - Below activation → `Ok(())` (no PQ requirement; pre-activation chain unchanged).
+/// - At/after activation → reject if the producer's Dilithium5 signature is missing,
+///   the producer's Dilithium pubkey is unknown to this node, or it fails to verify.
+///
+/// The producer identity is its Ed25519 pubkey (`header.producer_public_key`); its
+/// Dilithium pubkey comes from the validator key registry (the producer self-registers
+/// its own; remote verifiers must have it pinned before activation — see PQC-003/005).
+fn pqc_hybrid_block_check(
+    block: &q_types::QBlock,
+    registry: &q_types::ValidatorKeyRegistry,
+) -> Result<(), String> {
+    let height = block.header.height;
+    if !q_consensus_guard::is_upgrade_active(
+        q_consensus_guard::Upgrade::HybridSignaturesV1,
+        height,
+    ) {
+        return Ok(());
+    }
+    let producer_id = block
+        .header
+        .producer_public_key
+        .ok_or_else(|| "PQC-004: block has no producer public key".to_string())?;
+    let dil = registry.get_dilithium5(&producer_id);
+    if dil.is_none() {
+        return Err(
+            "PQC-004: producer Dilithium pubkey unknown — pin Q_PRODUCER_DILITHIUM_PUBKEY_HEX \
+             on this node before the activation height"
+                .to_string(),
+        );
+    }
+    let ed = registry.get_ed25519(&producer_id);
+    let sig = block
+        .quantum_metadata
+        .spectral_signatures
+        .iter()
+        .find(|s| s.validator == producer_id)
+        .ok_or_else(|| {
+            "PQC-004: block missing producer Dilithium signature (required at/after activation)"
+                .to_string()
+        })?;
+    let canonical = block.signing_payload();
+    q_types::verify_spectral_signature_extended(sig, &canonical, ed, dil, None)
+        .map_err(|e| format!("PQC-004: producer Dilithium signature invalid: {}", e))
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // v10.9.15: Pretty boot banner FIRST, before any other output.
@@ -2721,25 +2770,62 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             }
         }
     } else {
-        info!("ℹ️  No validator keypair specified (use --validator-key)");
-        info!("   Fallback: Using zk-STARK untrusted setup for PQC");
-        info!("   🔐 PQC block signing: ENABLED (via zk-STARK)");
-        info!("   ⚠️  Untrusted setup - suitable for testing/development");
-
-        // Generate ephemeral keypair using zk-STARK untrusted setup
-        // This provides quantum-resistant signatures without requiring pre-generated keys
-        match q_types::ValidatorKeypair::generate_with_zk_stark_untrusted() {
-            Ok(keypair) => {
-                let node_id_hex = hex::encode(&keypair.node_id[..8]);
-                info!("✅ Generated ephemeral keypair with zk-STARK");
-                info!("   Node ID: {}...", node_id_hex);
-                info!("   zk-STARK untrusted setup: ACTIVE");
-                Some(Arc::new(keypair))
+        // PQC-003: PERSISTENT validator keypair (load-or-create-and-save).
+        //
+        // Previously this generated a fresh EPHEMERAL keypair on every boot, so the
+        // producer's Dilithium pubkey changed on every restart — verifiers could
+        // never pin/recognize it, which makes hard PQ verification (PQC-004)
+        // impossible. We now persist the keypair so the Dilithium identity is
+        // STABLE across reboots. Path: $Q_VALIDATOR_KEY_FILE (default
+        // $HOME/.quillon/validator-keypair.json).
+        let key_path = std::env::var("Q_VALIDATOR_KEY_FILE").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            format!("{}/.quillon/validator-keypair.json", home)
+        });
+        if std::path::Path::new(&key_path).exists() {
+            #[allow(deprecated)]
+            match q_types::ValidatorKeypair::load_from_file(&key_path) {
+                Ok(mut keypair) => {
+                    // Force the hybrid (real Dilithium5) PQ phase regardless of what
+                    // an older saved file specified.
+                    keypair.set_preferred_phase(q_types::SignaturePhase::HybridEd25519Dilithium5);
+                    info!(
+                        "✅ Loaded PERSISTENT validator keypair from {} (Node ID {}..., Dilithium pubkey {} bytes)",
+                        key_path,
+                        hex::encode(&keypair.node_id[..8]),
+                        keypair.dilithium5_public.as_bytes().len()
+                    );
+                    Some(Arc::new(keypair))
+                }
+                Err(e) => {
+                    error!("❌ Failed to load validator keypair from {}: {} — PQC signing DISABLED", key_path, e);
+                    None
+                }
             }
-            Err(e) => {
-                error!("❌ Failed to generate zk-STARK keypair: {}", e);
-                error!("   PQC block signing will be DISABLED");
-                None
+        } else {
+            info!("ℹ️  No persistent validator keypair at {} — generating + saving one", key_path);
+            match q_types::ValidatorKeypair::generate_with_zk_stark_untrusted() {
+                Ok(keypair) => {
+                    if let Some(parent) = std::path::Path::new(&key_path).parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match keypair.save_to_file(&key_path) {
+                        Ok(()) => {
+                            info!("✅ Generated + PERSISTED validator keypair to {} (Node ID {}...)",
+                                  key_path, hex::encode(&keypair.node_id[..8]));
+                            // The pubkey verifiers must pin (Q_PRODUCER_DILITHIUM_PUBKEY_HEX)
+                            // before the PQC-002 activation height — log it once here.
+                            info!("   📌 [PQC] Producer Dilithium pubkey (PIN on verifiers before activation): {}",
+                                  hex::encode(keypair.dilithium5_public.as_bytes()));
+                        }
+                        Err(e) => warn!("⚠️  Could not persist validator keypair to {}: {} (running ephemeral this boot)", key_path, e),
+                    }
+                    Some(Arc::new(keypair))
+                }
+                Err(e) => {
+                    error!("❌ Failed to generate validator keypair: {} — PQC signing DISABLED", e);
+                    None
+                }
             }
         }
     };
@@ -4621,6 +4707,42 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         );
     } else {
         info!("ℹ️  No validator keypair - blocks will not be PQC signed");
+    }
+
+    // 🔐 PQC-005: pin the producer's Dilithium pubkey on VERIFIER nodes.
+    //
+    // Remote verifiers learn only a producer's Ed25519 key from blocks, never its
+    // Dilithium key — so without a pin, pqc_hybrid_block_check() fails closed at/after
+    // activation and a node would reject every block (chain stall for that node).
+    // Operators MUST set this on every node BEFORE the HybridSignaturesV1 activation
+    // height (PQC-002), to the producer's PERSISTENT Dilithium pubkey logged at boot
+    // by PQC-003. Format: "<producer_ed25519_nodeid_hex>:<dilithium_pubkey_hex>",
+    // comma-separated for multiple producers.
+    if let Ok(pins) = std::env::var("Q_PRODUCER_DILITHIUM_PUBKEY_HEX") {
+        let mut registry = state.validator_key_registry.write().await;
+        let mut pinned = 0usize;
+        for entry in pins.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let (id_hex, dil_hex) = match entry.split_once(':') {
+                Some(p) => p,
+                None => { warn!("🔐 [PQC PIN] skipping malformed entry (need nodeid:dil): {}", &entry[..entry.len().min(16)]); continue; }
+            };
+            match (hex::decode(id_hex.trim()), hex::decode(dil_hex.trim())) {
+                (Ok(id), Ok(dil)) if id.len() == 32 => {
+                    let mut node_id = [0u8; 32];
+                    node_id.copy_from_slice(&id);
+                    registry.register(q_types::ValidatorPublicKeys {
+                        node_id,
+                        ed25519: id.clone(),
+                        dilithium5: dil,
+                        sqisign: Vec::new(),
+                    });
+                    pinned += 1;
+                    info!("🔐 [PQC PIN] pinned producer Dilithium pubkey for {}...", hex::encode(&node_id[..8]));
+                }
+                _ => warn!("🔐 [PQC PIN] skipping entry with bad hex / wrong node_id length"),
+            }
+        }
+        info!("🔐 [PQC PIN] {} producer key(s) pinned for PQC-004 verification", pinned);
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -12078,6 +12200,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // This protects mainnet from "cowboy coding" data corruption.
                             // ========================================
 
+                            // 🔐 PQC-004: HARD, UNCONDITIONAL hybrid-signature enforcement.
+                            // At/after HybridSignaturesV1 (PQC-002, ≈2026-07-01 / height
+                            // 19_700_000) every accepted block MUST carry a valid producer
+                            // Dilithium5 signature over the CANONICAL block hash. Below that
+                            // height this is a no-op (pre-activation chain unchanged). This is
+                            // the consensus-critical reject that makes Dilithium5 real — it
+                            // does NOT depend on the old known_count>50% soft gate below.
+                            {
+                                let reg = app_state_gossip.validator_key_registry.read().await;
+                                if let Err(e) = pqc_hybrid_block_check(&block, &reg) {
+                                    drop(reg);
+                                    error!("🚨 [PQC-004] Block {} REJECTED (gossip): {}", block_height, e);
+                                    continue 'gossip_loop;
+                                }
+                            }
+
                             // Check if PostQuantumSignatures upgrade is active at this height
                             let pq_sigs_required = is_upgrade_active(Upgrade::PostQuantumSignatures, block_height);
 
@@ -13930,6 +14068,19 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         }
                                     }
 
+                                    // 🔐 PQC-004: hybrid Dilithium enforcement (batch sync path).
+                                    // Same canonical-hash check as the gossip path so sync-ingested
+                                    // blocks can't bypass enforcement at/after activation.
+                                    {
+                                        let reg = app_state_gossip.validator_key_registry.read().await;
+                                        if let Err(e) = pqc_hybrid_block_check(&block, &reg) {
+                                            drop(reg);
+                                            error!("🚨 [PQC-004] REJECTED block {} (batch sync): {}", block.header.height, e);
+                                            rejected_count += 1;
+                                            continue;
+                                        }
+                                    }
+
                                     // ============================================================================
                                     // 🔐 v1.3.9-beta CRITICAL SECURITY: Verify Transaction Signatures in Block
                                     // Validates all non-coinbase transaction signatures before accepting block
@@ -14385,6 +14536,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     "✅ [Phase 3] Block {} producer signature verified",
                                     block_height
                                 );
+                            }
+
+                            // 🔐 PQC-004: hybrid Dilithium enforcement (single-block sync path).
+                            {
+                                let reg = app_state_gossip.validator_key_registry.read().await;
+                                if let Err(e) = pqc_hybrid_block_check(&block, &reg) {
+                                    drop(reg);
+                                    error!("🚨 [PQC-004] REJECTED block {} (block-response sync): {}", block_height, e);
+                                    continue;
+                                }
                             }
 
                             // ========================================

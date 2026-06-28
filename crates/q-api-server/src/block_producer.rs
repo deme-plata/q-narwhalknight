@@ -1219,6 +1219,49 @@ impl BlockProducer {
             );
         }
 
+        // ============================================================================
+        // 🔐 PQC-001: Hybrid spectral signature over the CANONICAL block hash
+        //     (height-gated on HybridSignaturesV1; identical message to the Ed25519
+        //      producer signature). Below activation this whole block is skipped, so
+        //      pre-activation behavior is byte-identical (no spectral signature).
+        //      signing_payload() nulls producer_signature before hashing, so signing
+        //      after block.sign() above still covers the SAME canonical bytes.
+        // ============================================================================
+        if q_consensus_guard::is_upgrade_active(
+            q_consensus_guard::Upgrade::HybridSignaturesV1,
+            block.header.height,
+        ) {
+            if let Some(keypair) = &self.validator_keypair {
+                let canonical: [u8; 32] = block.signing_payload();
+                match self.sign_block_with_keypair(&canonical, keypair) {
+                    Ok(sig) => {
+                        debug!(
+                            "🔐 [PQC] Block {} hybrid-signed over canonical hash (phase {:?}, {} PQ bytes)",
+                            block.header.height,
+                            sig.crypto_phase,
+                            sig.pqc_sig.as_ref().map(|s| s.len()).unwrap_or(0)
+                        );
+                        block.quantum_metadata.spectral_signatures = vec![sig];
+                    }
+                    Err(e) => {
+                        // Above activation, a producer that cannot PQ-sign must NOT emit a
+                        // block peers will reject — fail closed.
+                        error!(
+                            "🚨 [PQC] Block {} hybrid signing failed: {} — not producing",
+                            block.header.height, e
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                error!(
+                    "🚨 [PQC] HybridSignaturesV1 active at height {} but no validator keypair — cannot produce",
+                    block.header.height
+                );
+                return None;
+            }
+        }
+
         // Calculate block hash (after signing, so hash includes signature)
         let block_hash = block.calculate_hash();
 
@@ -2269,35 +2312,18 @@ impl BlockProducer {
             + energy_components.temporal
             + energy_components.finality;
 
-        // ✨ v1.0.16-beta: Generate spectral signatures with PQC support
-        // Sign the block if validator keypair is available
-        let spectral_signatures = if let Some(keypair) = &self.validator_keypair {
-            // Generate block hash for signing (using difficulty + entropy as unique identifier)
-            let block_hash = {
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(&difficulty.to_le_bytes());
-                hasher.update(&quantum_entropy.to_le_bytes());
-                hasher.update(&self.current_height.to_le_bytes());
-                let hash = hasher.finalize();
-                let mut block_hash = [0u8; 32];
-                block_hash.copy_from_slice(&hash);
-                block_hash
-            };
-
-            match self.sign_block_with_keypair(&block_hash, &keypair) {
-                Ok(signature) => {
-                    info!("🔐 [PQC] Block signed with {:?}", signature.crypto_phase);
-                    vec![signature]
-                }
-                Err(e) => {
-                    error!("🚨 [PQC] Failed to sign block: {}", e);
-                    vec![] // Empty signatures on error
-                }
-            }
-        } else {
-            vec![] // No validator keypair - blocks unsigned
-        };
+        // PQC-001: spectral signing is NO LONGER done here.
+        //
+        // The old code signed SHA256(difficulty‖entropy‖height) — a DEGENERATE stand-in
+        // that does NOT commit to tx_root/state_root/prev_hash (this fn runs before the
+        // header exists), so the signature secured nothing about block contents. The
+        // spectral signature is now produced in produce_block() AFTER the header is
+        // assembled, over the CANONICAL block hash (block.signing_payload(), the same
+        // message the Ed25519 producer signature covers), height-gated on
+        // HybridSignaturesV1. quantum_metadata is a sibling of the header, so attaching
+        // the signature there does not feed back into the canonical hash.
+        let _ = &quantum_entropy; // (still used above for coordinates/k-param)
+        let spectral_signatures: Vec<SpectralSignature> = Vec::new();
 
         Ok(QuantumMetadata {
             vertex_coordinates,

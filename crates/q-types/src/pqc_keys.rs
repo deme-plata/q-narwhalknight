@@ -210,7 +210,11 @@ impl ValidatorKeypair {
             dilithium5_public,
             sqisign_secret,
             sqisign_public,
-            preferred_phase: SignaturePhase::Phase2SQIsign, // Use compact PQC by default
+            // PQC-001/003: use REAL Dilithium5 (FIPS-204) hybrid as the PQ phase, NOT the
+            // homemade SQIsign (q_types::signature_verification::sign_sqisign is a forgeable
+            // SHA3 placeholder). The producer-side HybridSignaturesV1 gate keeps the on-wire
+            // phase at Phase0Ed25519 until activation, so this is safe pre-activation.
+            preferred_phase: SignaturePhase::HybridEd25519Dilithium5,
         })
     }
 }

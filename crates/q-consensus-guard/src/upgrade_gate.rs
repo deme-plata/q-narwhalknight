@@ -176,14 +176,21 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
     });
 
     // Hybrid Ed25519 + Dilithium5 producer-side gate.
-    // Dormant on mainnet (u64::MAX) until a concrete activation height is
-    // chosen after canary soak. Until then, producers with
-    // preferred_phase = Hybrid fall back to Phase0Ed25519.
+    // PQC-002: activation scheduled for ~2026-07-01 00:00 UTC.
+    //   Mapping: tip was 19,419,502 at 2026-06-28 15:00 UTC; at the observed
+    //   ~1.3 blk/s, 2026-07-01 lands near height 19,700,000. CONFIRM against the
+    //   live tip before cutting the release — and DO NOT let this height arrive
+    //   until the whole producing fleet runs this binary with a PERSISTENT
+    //   validator keypair AND every verifier has the producer's pinned Dilithium
+    //   pubkey (Q_PRODUCER_DILITHIUM_PUBKEY_HEX), or post-activation blocks will
+    //   be rejected (chain stall). Soak the transition on Alpha first.
+    // At/after this height: producers emit Hybrid Ed25519+Dilithium5 over the
+    // canonical block hash (PQC-001/003) and verifiers REQUIRE it (PQC-004).
     upgrades.insert(Upgrade::HybridSignaturesV1, UpgradeConfig {
-        activation_height: u64::MAX,
-        description: "Allow producers to emit Hybrid Ed25519+Dilithium5 signatures".to_string(),
-        mandatory: false,
-        min_version: "10.9.20".to_string(),
+        activation_height: 19_700_000,
+        description: "Hybrid Ed25519+Dilithium5 block signatures enforced (≈2026-07-01)".to_string(),
+        mandatory: true,
+        min_version: "10.11.75".to_string(),
     });
 
     // balance_root_v2 — Sparse Merkle Tree balance commitment.
@@ -451,14 +458,16 @@ mod tests {
     }
 
     #[test]
-    fn test_hybrid_signatures_dormant_on_mainnet() {
-        // v10.9.20: HybridSignaturesV1 must stay dormant on mainnet until a
-        // concrete activation height is chosen. Until then, producers fall
-        // back to Phase0Ed25519 even if their preferred_phase is Hybrid.
+    fn test_hybrid_signatures_activation_on_mainnet() {
+        // PQC-002: HybridSignaturesV1 activates on mainnet at height 19_700_000
+        // (~2026-07-01). Below it, producers fall back to Phase0Ed25519; at/above
+        // it, Hybrid Ed25519+Dilithium5 over the canonical hash is REQUIRED.
         let mainnet = UpgradeGate::new(true);
         assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 0));
         assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 17_700_000));
-        assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, u64::MAX - 1));
+        assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 19_699_999));
+        assert!(mainnet.is_active(Upgrade::HybridSignaturesV1, 19_700_000));
+        assert!(mainnet.is_active(Upgrade::HybridSignaturesV1, u64::MAX - 1));
 
         // Testnet activates immediately so canary nodes exercise the path.
         let testnet = UpgradeGate::new(false);
