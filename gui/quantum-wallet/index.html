@@ -5,6 +5,34 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Quillon Graph • $QUG</title>
+    <script>
+    /* TEMP HIDE wrapped bridge tokens (wBTC/wZEC/wIRON/wETH) from dashboard + DEX.
+       Reversible: delete this entire <script> block to restore. rocky 2026-06-28
+       Lives in the Vite source so rebuilds preserve it (mirrors the Epsilon dist-final hotfix). */
+    (function(){
+      if(window.__qHideWrapped)return; window.__qHideWrapped=1;
+      var HIDE=new Set(["wbtc","wzec","wiron","weth"]);
+      var of=window.fetch?window.fetch.bind(window):null; if(!of)return;
+      window.fetch=function(i,init){
+        var u=(typeof i==="string"?i:(i&&i.url))||"";
+        var p=of(i,init);
+        if(!/(dex\/tokens|liquidity\/pools|dex\/pools)(\?|$)/.test(u))return p;
+        return p.then(function(r){
+          return r.clone().json().then(function(j){
+            if(j&&Array.isArray(j.data)){
+              j.data=j.data.filter(function(it){
+                var s=(it.symbol||"").toLowerCase(),
+                    a=(it.token0||"").toLowerCase(),
+                    b=(it.token1||"").toLowerCase();
+                return !HIDE.has(s)&&!HIDE.has(a)&&!HIDE.has(b);
+              });
+            }
+            return new Response(JSON.stringify(j),{status:r.status,statusText:r.statusText,headers:{"content-type":"application/json"}});
+          }).catch(function(){return r;});
+        });
+      };
+    })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
