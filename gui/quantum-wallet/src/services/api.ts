@@ -1497,14 +1497,7 @@ class QNarwhalKnightAPI {
       }
     }
 
-    // Fix: Ensure amount is sent as QNK value, not converted to smallest units
-    // If amount looks like it's been unit-converted (> 1,000,000), convert it back
-    // QUG uses 9 decimals (1 QUG = 1,000,000,000 base units)
-    let fixedAmount = amount;
-    if (amount > 1000000) {
-      console.warn(`⚠️ Detected unit conversion: ${amount} -> ${amount / 1000000000} QNK`);
-      fixedAmount = amount / 1000000000;
-    }
+    const fixedAmount = amount; // v10.11.74 FIX: removed >1M unit-conversion heuristic that divided large QUGUSD/QUG sends by 1e9 (200M QUGUSD -> 0.2)
 
     console.log('📤 Sending transaction:', { from: fromAddress, to, amount: fixedAmount, memo });
 
@@ -1550,16 +1543,77 @@ class QNarwhalKnightAPI {
       const amountBaseBigInt = microsAmount * 10n ** 18n; // micros × 10^18 = base24
       const amountBaseStr = amountBaseBigInt.toString();
 
-      // Hand-build body so amount lands as a RAW JSON integer.
-      // v10.11.19 FIX: JSON.stringify each STRING field (full RFC-8259 escaping
-      // incl. control chars + unicode). The old escMemo only handled \\ \" \n
-      // \r \t, so a memo with any other control char produced invalid JSON ->
-      // server 'expected `,` or `}` at line 1 column N'. amount stays raw int.
+      // ── v10.11.72 DURABLE FIX: client-side transaction signing ──────────────
+      // Sign the canonical transaction so the node verifies it on EVERY peer
+      // (no trusted_via_auth bypass): the transfer actually lands in a block and
+      // debits the sender atomically — fixing "balance stays 150k after sending
+      // 50k" + the consequent 150k↔100k display flicker. We must sign the SAME
+      // (nonce, timestamp, fee, amount) the server commits, so: fetch the nonce,
+      // pick the timestamp here, and send all of it alongside the signature.
+      const fromHex = fromAddress.startsWith('qnk') ? fromAddress.slice(3) : fromAddress;
+      const toHex = to.startsWith('qnk') ? to.slice(3) : to;
+      const nonceAddr = fromAddress.startsWith('qnk') ? fromAddress : `qnk${fromAddress}`;
+
+      const { signTransferV72, MIN_TRANSACTION_FEE_BASE } = await import('./walletAuth');
+
+      // Fetch the next nonce the wallet must sign over (public read).
+      const nonceResp = await this.request<{ address: string; nonce: number }>(
+        `/v1/wallets/${nonceAddr}/nonce`,
+        { method: 'GET' }
+      );
+      if (!nonceResp.success || !nonceResp.data) {
+        throw new Error(`Could not fetch nonce: ${nonceResp.error || 'unknown error'}`);
+      }
+      const nonceVal = nonceResp.data.nonce;
+      const timestampSecs = Math.floor(Date.now() / 1000);
+
+      // v10.11.74 TOKEN-TRANSFER SIGNING: for non-QUG the node fills tx.data with the
+      // token's canonical 32-byte address, and the signature must cover it. Ask the
+      // node to resolve the token EXACTLY as it will (QUGUSD/bridge/index/deployed),
+      // so the bytes we sign match the tx the node rebuilds. Empty for native QUG.
+      let tokenDataHex = '';
+      const ttUpper = (tokenType || 'QUG').toUpperCase();
+      if (ttUpper !== 'QUG' && ttUpper !== 'NATIVE-QUG' && ttUpper !== 'USD') {
+        const resolveResp = await this.request<{ token: string; address: string }>(
+          `/v1/tokens/resolve/${encodeURIComponent(tokenType as string)}`,
+          { method: 'GET' }
+        );
+        if (!resolveResp.success || !resolveResp.data?.address) {
+          throw new Error(`Could not resolve token ${tokenType}: ${resolveResp.error || 'unknown error'}`);
+        }
+        tokenDataHex = resolveResp.data.address;
+      }
+
+      // v10.11.75 FEE FIX: token transfers cost 2x gas (gas_multiplier=2 for
+      // TokenTransfer), so the minimum fee is 2x. Signing/sending only 21000 got
+      // every QUGUSD send REJECTED by the mempool ("minimum 42000 required") — the
+      // tx never landed, so the balance "deducted then came back" (a double-spend).
+      // 42000 satisfies legacy mode (exact min) and reduced mode (well above) and is
+      // far below MAX_TRANSACTION_FEE. QUG (Transfer, 1x gas) stays 21000.
+      const isNativeQug = ttUpper === 'QUG' || ttUpper === 'NATIVE-QUG';
+      const feeBaseForTx = isNativeQug ? MIN_TRANSACTION_FEE_BASE : MIN_TRANSACTION_FEE_BASE * 2n;
+
+      const signed = await signTransferV72(
+        activeSession.privateKey,
+        fromHex,
+        toHex,
+        amountBaseBigInt,
+        nonceVal,
+        timestampSecs,
+        feeBaseForTx,
+        tokenType || 'QUG',
+        tokenDataHex
+      );
+
+      // Hand-build body so amount/fee/nonce/timestamp land as RAW JSON integers
+      // (u128/u64 — must not be JS Numbers or quoted; per u128_in_json_gotcha).
+      // v10.11.19: JSON.stringify each STRING field for full RFC-8259 escaping.
       let rawBody = `{"from":${JSON.stringify(fromAddress)},"to":${JSON.stringify(to)},"amount":${amountBaseStr},"token_type":${JSON.stringify(tokenType || 'QUG')}`;
+      rawBody += `,"nonce":${signed.nonce},"timestamp":${signed.timestamp},"fee":${signed.fee},"signature":${JSON.stringify(signed.signature)}`;
       if (memo) rawBody += `,"memo":${JSON.stringify(memo)}`;
       rawBody += `}`;
 
-      console.log('📤 [v10.11.18 SEND-SIGNED] amount=', amountBaseStr, 'token=', tokenType || 'QUG');
+      console.log('📤 [v10.11.72 SEND-SIGNED] amount=', amountBaseStr, 'token=', tokenType || 'QUG', 'nonce=', nonceVal, 'signed=true');
 
       return this.request<any>('/v1/transactions/send_signed', {
         method: 'POST',
@@ -1744,10 +1798,31 @@ class QNarwhalKnightAPI {
         from: walletAddress  // Always include - never undefined
       };
 
+      // v10.11.73 SECURITY: the mixer now REQUIRES X-Wallet-Auth and the backend
+      // enforces auth-wallet == from. Without proving control of `from`, an attacker
+      // could drain any wallet through /mixer/send (the debit is now persisted
+      // authoritatively). Sign the auth challenge exactly like the normal send path.
+      const { walletSession, generateAuthHeader } = await import('./walletAuth');
+      const mixSession = walletSession.getSession();
+      if (!mixSession || !mixSession.privateKey) {
+        return {
+          success: false,
+          data: null,
+          error: 'No active wallet session for mixer — please log in again to authorize this private transfer.',
+          timestamp: new Date().toISOString(),
+        };
+      }
+      const mixAuthHeader = await generateAuthHeader(
+        mixSession.privateKey,
+        mixSession.address,
+        '/api/v1/mixer/send'
+      );
+
       const response = await fetch(`${this.baseURL}/v1/mixer/send`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Wallet-Auth': mixAuthHeader,
         },
         body: JSON.stringify(requestWithFrom),
       });
