@@ -92,8 +92,8 @@ function QuantumFieldBackground() {
     const pulses: NetworkPulse[] = [];
     const bgStars: Array<{ x: number; y: number; r: number; a: number; s: number }> = [];
 
-    // Initialize background stars
-    for (let i = 0; i < 300; i++) {
+    // Background stars disabled 2026-06-19 (Viktor: circles look creepy)
+    for (let i = 0; i < 0; i++) {
       bgStars.push({
         x: Math.random() * w, y: Math.random() * h,
         r: Math.random() * 1.2 + 0.2,
@@ -146,8 +146,8 @@ function QuantumFieldBackground() {
       }
     };
 
-    // Seed initial particles
-    for (let i = 0; i < 60; i++) {
+    // Initial particles disabled 2026-06-19 (Viktor: circles look creepy)
+    for (let i = 0; i < 0; i++) {
       const types: StringParticle['type'][] = ['honest', 'resonance', 'entangled', 'finalized'];
       spawnParticle(types[Math.floor(Math.random() * types.length)]);
       particles[particles.length - 1].life = Math.random(); // stagger lifecycle
@@ -219,7 +219,7 @@ function QuantumFieldBackground() {
           r -= weights[i];
           if (r <= 0) { chosen = types[i]; break; }
         }
-        if (particles.length < 120) spawnParticle(chosen);
+        if (particles.length < 0) spawnParticle(chosen); // particle spawn disabled 2026-06-19 (creepy circles removed)
       }
 
       // Physics: compute resonance coupling and draw connections
@@ -2726,7 +2726,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="space-y-3">
                 {/* Linux x64 */}
                 <a
-                  href="https://quillon.xyz/downloads/q-api-server-v10.9.54"
+                  href="https://quillon.xyz/downloads/q-api-server-v10.11.73"
                   download="q-api-server"
                   className="w-full p-4 bg-slate-800/60 hover:bg-slate-700/60 border border-cyan-500/20 hover:border-cyan-500/40 rounded-xl transition-all flex items-center gap-4 group block"
                 >
@@ -2751,7 +2751,7 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
                   </div>
                   <div className="text-left flex-1">
                     <div className="font-bold text-cyan-100">Windows x64</div>
-                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (v10.9.54)</div>
+                    <div className="text-xs text-cyan-300/50">Windows 10/11 — Single EXE with TUI (latest)</div>
                   </div>
                   <Download className="w-5 h-5 text-cyan-400/60 group-hover:text-cyan-400 transition-colors" />
                 </a>
@@ -2789,9 +2789,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
               <div className="mt-3 p-3 bg-slate-800/40 rounded-xl border border-cyan-500/10">
                 <h3 className="text-sm font-bold text-cyan-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-cyan-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/q-api-server-v10.9.54
-chmod +x q-api-server-v10.9.54
-./q-api-server-v10.9.54 --port 8080`}
+{`wget https://quillon.xyz/downloads/q-api-server-v10.11.73
+chmod +x q-api-server-v10.11.73
+./q-api-server-v10.11.73 --port 8080`}
                 </code>
                 <div className="text-[10px] text-emerald-400/70 mt-2">WarpSync auto-discovers peers & syncs 900K+ blocks in minutes</div>
               </div>
@@ -3112,8 +3112,8 @@ chmod +x q-miner-linux-x64
               {/* Download Buttons */}
               <div className="relative space-y-3">
                 <motion.a
-                  href="https://quillon.xyz/downloads/slint-wallet-v10.3.12"
-                  download="slint-wallet-v10.3.12"
+                  href="https://quillon.xyz/downloads/slint-wallet-linux-x86_64"
+                  download="slint-wallet-linux-x86_64"
                   className="w-full p-4 bg-gradient-to-r from-emerald-600/80 to-teal-600/80 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
                   whileTap={{ scale: 0.98 }}
@@ -3129,8 +3129,8 @@ chmod +x q-miner-linux-x64
                 </motion.a>
 
                 <motion.a
-                  href="https://quillon.xyz/downloads/slint-wallet-v10.3.12.exe"
-                  download="slint-wallet-v10.3.12.exe"
+                  href="https://quillon.xyz/downloads/slint-wallet-v10.11.77.exe"
+                  download="slint-wallet-v10.11.77.exe"
                   className="w-full p-4 bg-gradient-to-r from-teal-600/80 to-cyan-600/80 hover:from-teal-500 hover:to-cyan-500 border border-teal-400/30 rounded-xl transition-all flex items-center gap-4 group block"
                   whileHover={{ scale: 1.02, x: 4 }}
                   whileTap={{ scale: 0.98 }}
@@ -3150,9 +3150,9 @@ chmod +x q-miner-linux-x64
               <div className="relative mt-4 p-3 bg-slate-800/50 rounded-xl border border-emerald-500/15">
                 <h3 className="text-sm font-bold text-emerald-300 mb-2">Quick Start (Linux)</h3>
                 <code className="text-[11px] text-emerald-100/70 block whitespace-pre-wrap break-all font-mono leading-relaxed">
-{`wget https://quillon.xyz/downloads/slint-wallet-v10.3.12
-chmod +x slint-wallet-v10.3.12
-./slint-wallet-v10.3.12`}
+{`wget https://quillon.xyz/downloads/slint-wallet-linux-x86_64
+chmod +x slint-wallet-linux-x86_64
+./slint-wallet-linux-x86_64`}
                 </code>
               </div>
 
