@@ -3301,6 +3301,35 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v10.10.8: pass the bootstrapped Arti client through so Phases A/B/C can
     // wire the libp2p transport against it. `tor_client` is the Arc built at
     // line ~2914 above; it's `None` if Tor bootstrap failed (e.g., no network).
+    // 🧅 onion-on-boot (OOTB Tor): when stem routing is enabled, launch a REAL embedded-Arti
+    // onion service, forward its inbound streams to the local stem receiver, and advertise the
+    // .onion via Identify (Q_TOR_ADVERTISE_ONION) so Tor-capable peers auto-discover us.
+    // Runs BEFORE the network manager builds Identify so the address is advertised from boot.
+    if std::env::var("Q_TOR_STEM").ok().as_deref() == Some("1") {
+        if let Some(ref tor) = tor_client {
+            let stem_port: u16 = std::env::var("Q_TOR_STEM_BIND")
+                .ok()
+                .and_then(|s| s.rsplit(':').next().map(|x| x.to_string()))
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(9055);
+            let tor_boot = tor.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(180),
+                tor_boot.launch_onion_forwarder("qnk-stem", stem_port),
+            )
+            .await
+            {
+                Ok(Ok(onion)) => {
+                    let advertised = format!("{}:{}", onion, stem_port);
+                    std::env::set_var("Q_TOR_ADVERTISE_ONION", &advertised);
+                    info!("🧅 [ONION-BOOT] onion service live + advertised via Identify: {}", advertised);
+                }
+                Ok(Err(e)) => warn!("🧅 [ONION-BOOT] onion launch failed: {} — Tor stem inbound disabled", e),
+                Err(_) => warn!("🧅 [ONION-BOOT] onion launch timed out (>180s) — Tor stem inbound disabled"),
+            }
+        }
+    }
+
     let libp2p_manager = match q_network::UnifiedNetworkManager::new(network_config.clone(), tor_client.clone()).await {
         Ok(mut manager) => {
             info!(
@@ -4712,6 +4741,63 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 warn!("⚠️  Failed to initialize Dandelion++: {}", e);
                 warn!("   Transactions will be broadcast directly (reduced anonymity)");
             }
+        }
+    }
+
+    // ========================================
+    // 🧅 Tor Phase B+ : Dandelion stem RECEIVER (accept side) — completes the stem relay.
+    // Gated by Q_TOR_STEM=1 (same flag as stem SEND). Binds the local port the onion service
+    // forwards to (Q_TOR_STEM_BIND, default 127.0.0.1:9055); injects received txs into the
+    // production mempool + fluffs them into the open gossip mesh (origin hidden — they
+    // entered via Tor). Default-off ⇒ no listener, zero behavior change.
+    // ========================================
+    if std::env::var("Q_TOR_STEM").ok().as_deref() == Some("1") {
+        if let Some(tor) = state.tor_client.clone() {
+            let stem_bind: std::net::SocketAddr = std::env::var("Q_TOR_STEM_BIND")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| "127.0.0.1:9055".parse().unwrap());
+            let mut stem_rx = tor.start_stem_receiver(stem_bind);
+            let prod_mempool = state.production_mempool.clone();
+            let cmd_tx_stem = state.libp2p_command_tx.clone();
+            let tx_pool_stem = state.tx_pool.clone();
+            let tx_status_stem = state.tx_status.clone();
+            tokio::spawn(async move {
+                info!("🧅 [STEM-RX] consumer live — injecting Tor stem txs to mempool + fluff");
+                while let Some(data) = stem_rx.recv().await {
+                    let tx = match postcard::from_bytes::<q_types::Transaction>(&data) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            warn!("🧅 [STEM-RX] decode failed: {}", e);
+                            continue;
+                        }
+                    };
+                    let tx_hash = tx.id;
+                    if let Err(e) = tx.verify_signature() {
+                        warn!("🧅 [STEM-RX] reject {} bad sig: {}", hex::encode(&tx_hash[..8]), e);
+                        continue;
+                    }
+                    // Local inclusion (mirror the gossipsub tx-ingest path).
+                    tx_pool_stem.insert(tx_hash, tx.clone());
+                    tx_status_stem.insert(tx_hash, q_types::TxStatus::InMempool);
+                    if let Some(ref mp) = prod_mempool {
+                        if let Err(e) = mp.add_transaction(tx.clone(), None).await {
+                            warn!("🧅 [STEM-RX] mempool add {} failed: {}", hex::encode(&tx_hash[..8]), e);
+                        }
+                    }
+                    // Fluff: re-broadcast into the open mesh; origin is now hidden behind Tor.
+                    if let Some(ref cmd) = cmd_tx_stem {
+                        let _ = cmd.send(q_network::NetworkCommand::PublishMessage {
+                            topic: "/qnk/mainnet/transactions".to_string(),
+                            data,
+                        });
+                    }
+                    info!("🧅 [STEM-RX] ✅ stem tx {} injected + fluffed", hex::encode(&tx_hash[..8]));
+                }
+                warn!("🧅 [STEM-RX] consumer channel closed");
+            });
+        } else {
+            warn!("🧅 [STEM-RX] Q_TOR_STEM=1 but no Tor client — stem receiver NOT started");
         }
     }
 
@@ -25501,6 +25587,14 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/transactions/send_signed",
             post(handlers::send_transaction_signed),
         ) // v10.9.46: X-Wallet-Auth-only mode (no mnemonic, no vault) — for client-managed wallets
+        .route(
+            "/api/v1/wallets/:address/nonce",
+            get(handlers::get_wallet_nonce),
+        ) // v10.11.72: next-nonce lookup for the durable client-signing send path
+        .route(
+            "/api/v1/tokens/resolve/:token",
+            get(handlers::resolve_token),
+        ) // v10.11.74: token symbol/address -> canonical 32-byte address for client-side token-transfer signing
         .route(
             "/api/v1/transactions/send_batch",
             post(handlers::send_transactions_batch),

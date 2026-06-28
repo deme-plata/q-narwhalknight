@@ -2959,19 +2959,6 @@ impl Transaction {
             return Err("Transaction Ed25519 signature is missing".to_string());
         }
 
-        // Extract public key - check if stored in data field (first 32 bytes)
-        // or fall back to using 'from' as the public key
-        let public_key_bytes: [u8; 32] = if self.data.len() >= 32 {
-            let mut pk = [0u8; 32];
-            pk.copy_from_slice(&self.data[..32]);
-            pk
-        } else {
-            self.from
-        };
-
-        let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)
-            .map_err(|e| format!("Invalid Ed25519 public key: {}", e))?;
-
         // Ed25519 signatures are 64 bytes
         if self.signature.len() != 64 {
             return Err(format!(
@@ -2985,28 +2972,49 @@ impl Transaction {
 
         let signature = Signature::from_bytes(&signature_bytes);
 
-        // v10.11.7 (2026-05-21): accept signatures over EITHER signable_payload
-        // OR self.hash().
-        //
-        // Why: empirical reality contradicted the v10.10.0 comment. Slint wallet
-        // and the server's /transactions/send handler both sign `self.hash()`
-        // (the tx's id field). The verifier here was changed to compare against
-        // signable_payload(), which they never produce — so every browser+Slint
-        // send was getting rejected at the mempool with `signature invalid`
-        // (txs landed in mempool, then evicted before block inclusion).
-        //
-        // Both targets are deterministic functions of the same tx body; accepting
-        // either still proves the signer holds the private key. Try canonical
-        // first (the intended future-state), fall back to hash (the legacy
-        // reality). When all clients have migrated to canonical, drop the fallback.
+        // v10.11.74 TOKEN-TRANSFER SIGNING FIX: try BOTH candidate signer keys.
+        //   - `from` is the sender's address (== their Ed25519 public key for
+        //     standard wallets). This is the correct key for native QUG AND for
+        //     TOKEN transfers.
+        //   - data[..32] is the LEGACY convention where the public key was carried
+        //     in `data` (kept for backward compatibility). For a token transfer
+        //     data[..32] is the TOKEN CONTRACT ADDRESS, NOT a key — which is exactly
+        //     why token transfers were unverifiable before: the verifier ONLY tried
+        //     data[..32], so a sender could never sign a token transfer with their
+        //     own key. Trying both keeps every legacy path working while letting the
+        //     real sender sign token transfers. Each candidate still requires the
+        //     corresponding private key, so this adds zero forgeability.
+        let mut candidate_keys: Vec<[u8; 32]> = Vec::with_capacity(2);
+        candidate_keys.push(self.from);
+        if self.data.len() >= 32 {
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&self.data[..32]);
+            if pk != self.from {
+                candidate_keys.push(pk);
+            }
+        }
+
+        // v10.11.7: accept a signature over ANY of three deterministic targets —
+        // canonical signable_payload / tx hash / p2p_signable_hash. Different
+        // clients sign different ones; all prove key possession over the same body
+        // (which includes `data`, so the token being moved is covered by the sig).
         let canonical = self.signable_payload();
         let hash_target = self.hash();
         let p2p_hash = self.p2p_signable_hash();
-        if verifying_key.verify(&canonical, &signature).is_err()
-            && verifying_key.verify(hash_target.as_ref(), &signature).is_err()
-            && verifying_key.verify(p2p_hash.as_ref(), &signature).is_err()
-        {
-            return Err("Ed25519 signature verification failed: matches neither signable_payload, hash, nor p2p_signable_hash".to_string());
+
+        let verified = candidate_keys.iter().any(|pk_bytes| {
+            match VerifyingKey::from_bytes(pk_bytes) {
+                Ok(vk) => {
+                    vk.verify(&canonical, &signature).is_ok()
+                        || vk.verify(hash_target.as_ref(), &signature).is_ok()
+                        || vk.verify(p2p_hash.as_ref(), &signature).is_ok()
+                }
+                Err(_) => false,
+            }
+        });
+
+        if !verified {
+            return Err("Ed25519 signature verification failed: no candidate key (from / data[..32]) matches signable_payload, hash, or p2p_signable_hash".to_string());
         }
 
         Ok(())

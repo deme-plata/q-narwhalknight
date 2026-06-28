@@ -4828,17 +4828,27 @@ async fn send_transaction_inner(
     // For custom tokens, we must:
     // 1. Set tx_type to TokenTransfer (so state_processor routes correctly)
     // 2. Store token address in data field (state_processor expects it at data[0..32])
-    let (tx_type, initial_data) = if is_custom_token {
-        if let Some(token_addr) = custom_token_address {
-            info!("📦 Creating TokenTransfer for {} (address: {})",
-                token_type_str, q_log_privacy::mask_addr(&hex::encode(&token_addr[..8])));
-            (q_types::TransactionType::TokenTransfer, token_addr.to_vec())
-        } else {
-            // Fallback to Transfer if token not found (will fail later with proper error)
-            (q_types::TransactionType::Transfer, vec![])
+    // 2026-06-24 FIX (A2): QUGUSD/QSHARE/Custom must broadcast as TokenTransfer with the
+    // token address in `data`, matching the canonical /transactions/send_signed path.
+    // Previously QUGUSD fell into the `else` Transfer arm with empty data, so event/explorer/
+    // wallet layers (which infer the coin from tx_type) rendered it as native QUG to the
+    // recipient ("sent QUGUSD, received QUG"). The apply layer already routes on token_type;
+    // this makes the broadcast label/data consistent so it can never be mistaken for QUG.
+    let (tx_type, initial_data) = match token_type {
+        q_types::TokenType::QUGUSD => {
+            info!("📦 Creating TokenTransfer for QUGUSD (reserved address)");
+            (q_types::TransactionType::TokenTransfer, q_types::QUGUSD_TOKEN_ADDRESS.to_vec())
         }
-    } else {
-        (q_types::TransactionType::Transfer, vec![])
+        q_types::TokenType::QSHARE => {
+            info!("📦 Creating TokenTransfer for QSHARE (reserved address)");
+            (q_types::TransactionType::TokenTransfer, q_types::QSHARE_TOKEN_ADDRESS.to_vec())
+        }
+        q_types::TokenType::Custom(addr) => {
+            info!("📦 Creating TokenTransfer for {} (address: {})",
+                token_type_str, q_log_privacy::mask_addr(&hex::encode(&addr[..8])));
+            (q_types::TransactionType::TokenTransfer, addr.to_vec())
+        }
+        q_types::TokenType::QUG => (q_types::TransactionType::Transfer, vec![]),
     };
 
     info!(
@@ -4853,7 +4863,7 @@ async fn send_transaction_inner(
         to: to_address,
         amount: amount_u128,
         fee: fee_u128,
-        nonce: 0,          // TODO: Get actual nonce from wallet state
+        nonce: state.nonce_tracker.get_and_increment(&from_address), // v10.11.69: real per-wallet nonce (was 0 → no replay protection)
         signature: vec![], // Will be filled by signing process
         timestamp: chrono::Utc::now(),
         data: initial_data, // v1.4.9: Contains token address for custom tokens
@@ -5210,21 +5220,57 @@ async fn send_transaction_inner(
                 signed_transaction.amount + signed_transaction.fee
             };
 
+            // ── v10.11.69 (2026-06-25): MEMPOOL PENDING-BALANCE RESERVATION ──
+            // Root fix for "balance not deducted → send the same amount again and again":
+            // the confirmed balance is debited only at block-apply, and nothing reserved
+            // the in-flight spend, so repeated sends within the confirmation window all
+            // passed against the FULL confirmed balance = repeat-spend / phantom mint.
+            // Reserve against this sender's still-pending txs (already in tx_pool, evicted
+            // on inclusion) so available = confirmed − pending. The current tx is not yet
+            // in tx_pool (inserted below), so it is correctly excluded from `pending`.
+            let pending_outgoing: u128 = {
+                let mut sum: u128 = 0;
+                for entry in state.tx_pool.iter() {
+                    let t = entry.value();
+                    if t.from != signed_transaction.from {
+                        continue;
+                    }
+                    let same_token = if is_qugusd {
+                        t.token_type == q_types::TokenType::QUGUSD
+                    } else {
+                        t.token_type == q_types::TokenType::QUG
+                    };
+                    if !same_token {
+                        continue;
+                    }
+                    let c = if t.token_type == q_types::TokenType::QUGUSD {
+                        t.amount
+                    } else {
+                        t.amount.saturating_add(t.fee)
+                    };
+                    sum = sum.saturating_add(c);
+                }
+                sum
+            };
+            let available_balance = sender_balance.saturating_sub(pending_outgoing);
+
             // Privacy: Don't log exact transaction amounts, addresses, or balances in production
             // v2.7.9-beta: Cast total_cost to u128 for comparison with u128 sender_balance
-            let balance_check = if sender_balance >= total_cost as u128 {
+            let balance_check = if available_balance >= total_cost as u128 {
                 "sufficient"
             } else {
                 "insufficient"
             };
-            info!("💳 {} transaction validation: balance check {}", token_name, balance_check);
+            info!("💳 {} transaction validation: balance check {} (confirmed minus {} pending)", token_name, balance_check, pending_outgoing);
 
-            if sender_balance < total_cost as u128 {
-                // v2.2.4: Privacy fix - don't log actual balances
-                warn!("Insufficient {} balance for transaction", token_name);
+            if available_balance < total_cost as u128 {
+                // v10.11.69: reject against AVAILABLE (confirmed − pending), not confirmed.
+                warn!("Insufficient {} available balance for transaction (pending reservation active)", token_name);
                 return Ok(Json(ApiResponse::error(format!(
-                    "Insufficient balance. Have: {} {}, Need: {} {}",
+                    "Insufficient available balance. Confirmed: {} {}, Reserved (pending sends): {} {}, Need: {} {}",
                     sender_balance as f64 / QUG_DISPLAY_DIVISOR,
+                    token_name,
+                    pending_outgoing as f64 / QUG_DISPLAY_DIVISOR,
                     token_name,
                     total_cost as f64 / QUG_DISPLAY_DIVISOR,
                     token_name
@@ -5627,6 +5673,26 @@ pub struct SendTransactionSignedRequest {
     /// "QUG" | "QUGUSD" | "<qnk-contract-address-hex>"
     #[serde(default = "default_token_type_str")]
     pub token_type: String,
+
+    // ── v10.11.72 DURABLE FIX: client-side signing ──────────────────────────
+    // When the wallet signs the canonical transaction itself, it sends these so
+    // the server builds the EXACT same bytes the client signed (the signature
+    // covers from/to/amount/fee/nonce/timestamp/token/data via p2p_signable_hash).
+    // The server then attaches `signature` and lets perform_validation verify it
+    // on every node — no `trusted_via_auth` bypass. All optional for backward
+    // compatibility; when `signature` is present the durable (verified) path runs.
+    /// 64-byte Ed25519 signature, hex (over p2p_signable_hash / signable_payload / hash).
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// Sender nonce the client signed over (must match server's expected next nonce).
+    #[serde(default)]
+    pub nonce: Option<u64>,
+    /// Unix timestamp in SECONDS the client signed over (p2p payload uses seconds).
+    #[serde(default)]
+    pub timestamp: Option<i64>,
+    /// Fee (u128 base units) the client signed over. Defaults to MIN_TRANSACTION_FEE.
+    #[serde(default)]
+    pub fee: Option<u128>,
 }
 
 pub async fn send_transaction_signed(
@@ -5674,6 +5740,50 @@ pub async fn send_transaction_signed(
         return Ok(Json(ApiResponse::error("from == to (no-op)".to_string())));
     }
 
+    // 🛡 v10.11.72 INTERIM DOUBLE-SPEND GUARD (2026-06-27)
+    // ----------------------------------------------------------------------
+    // This endpoint builds the transaction with an EMPTY tx.signature and relied
+    // on the in-memory `trusted_via_auth` flag (set from the X-Wallet-Auth header)
+    // to bypass mempool signature validation. That trust flag lives ONLY in the
+    // memory of the node that received the HTTP request — it does NOT travel with
+    // the transaction over P2P gossip. So on every OTHER node (i.e. whichever miner
+    // actually produces the block) the tx has an empty signature and no trust flag,
+    // perform_validation() rejects it, and it is filtered out of
+    // get_transactions_for_block() → the transfer NEVER lands in a block.
+    //
+    // Consequence (the live double-spend): balance_consensus never debits the
+    // sender (no block ⇒ no apply), so the sender keeps full balance and can re-send
+    // the same coins indefinitely, while the recipient sees an off-consensus
+    // optimistic credit. Confirmed on mainnet-genesis: 0 non-coinbase txs in 400
+    // consecutive blocks.
+    //
+    // Until the wallet is updated to SIGN transactions client-side (the durable fix),
+    // refuse the transfer rather than acknowledge an unspendable, mint-prone ghost tx.
+    // This is a pure rejection — it performs NO balance writes (CLAUDE.md balance
+    // safety). Reversible WITHOUT recompile: set Q_ALLOW_UNSIGNED_TX=1 to restore the
+    // legacy (vulnerable) behavior.
+    // v10.11.72: the durable path is a client-signed tx (request.signature present).
+    let is_client_signed = request
+        .signature
+        .as_ref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !is_client_signed && std::env::var("Q_ALLOW_UNSIGNED_TX").ok().as_deref() != Some("1") {
+        warn!(
+            "🛡 [DOUBLE-SPEND GUARD] Rejecting UNSIGNED transfer from {} (amount={}) — client-side signature required; tx would never land in a block and the sender would not be debited",
+            q_log_privacy::mask_addr(&hex::encode(from_address)),
+            q_log_privacy::mask_amt(request.amount),
+        );
+        return Ok(Json(ApiResponse::error(
+            "Transfer rejected: transaction is not cryptographically signed. \
+             Sending now requires a wallet that signs transactions client-side. \
+             (Unsigned transfers were dropped by the network's block producers and \
+             could be re-sent indefinitely without debiting the sender — they are now \
+             refused to protect balance integrity.)"
+                .to_string(),
+        )));
+    }
+
     // 5. Resolve token type
     let token_str_upper = request.token_type.to_uppercase();
     let (tx_type, token_type, tx_data) = if token_str_upper == "QUG" || token_str_upper == "NATIVE-QUG" {
@@ -5699,9 +5809,29 @@ pub async fn send_transaction_signed(
         (TransactionType::TokenTransfer, TokenType::Custom(token_addr), token_addr.to_vec())
     };
 
-    // 6. Build the unsigned transaction (mirrors /dex/swap pattern)
-    let nonce = state.nonce_tracker.get_and_increment(&from_address);
-    let now = chrono::Utc::now();
+    // 6. Build the transaction. DURABLE (client-signed) path MUST use the client's
+    //    nonce + timestamp so the bytes match what was signed; legacy path assigns them.
+    let nonce = if is_client_signed {
+        match request.nonce {
+            Some(n) => n,
+            None => return Ok(Json(ApiResponse::error(
+                "signed transfer requires `nonce` (GET /api/v1/wallets/<addr>/nonce)".to_string()))),
+        }
+    } else {
+        state.nonce_tracker.get_and_increment(&from_address)
+    };
+    let now = if is_client_signed {
+        match request
+            .timestamp
+            .and_then(|t| chrono::DateTime::<chrono::Utc>::from_timestamp(t, 0))
+        {
+            Some(ts) => ts,
+            None => return Ok(Json(ApiResponse::error(
+                "signed transfer requires a valid `timestamp` (unix SECONDS)".to_string()))),
+        }
+    } else {
+        chrono::Utc::now()
+    };
     let mut tx = transaction_utils::TransactionBuilder::new()
         .from(from_address)
         .to(to_address)
@@ -5711,67 +5841,82 @@ pub async fn send_transaction_signed(
         .data(tx_data)
         .build_with_nonce(nonce, now);
 
-    // v10.10.14 fix: explicit fee. Pre-fix, fee defaulted to 0 (TransactionBuilder
-    // initializes fee: 0 unconditionally), so once v10.9.58 PR #68 tightened
-    // ProductionMempool::perform_validation from Ok(true) stub to real
-    // signature/fee/coinbase checks, every send_signed tx silently failed
-    // block-inclusion because of the zero-fee check (the API still returned
-    // success+tx_id at queue time, producing "ghost confirmations" where the
-    // explorer showed the hash but no balance delta applied — confirmed via
-    // 2026-05-21 1-QUG handshake-test that the user observed as
-    // "amount 0.000000 received"). Set to MIN_TRANSACTION_FEE so the fee check
-    // passes. The signature path is still broken (signature: vec![] empty by
-    // default; X-Wallet-Auth doesn't double as tx authorization); fixing that
-    // requires either client-pre-signing or a server-side trust flag and is
-    // tracked separately.
-    // v10.11.11: was MIN_TRANSACTION_FEE_V1 (2100). validate_fee()'s zero-arg
-    // path uses validate_fee_at_height(0) i.e. LEGACY mode where
-    // min_required_fee = BASE_GAS * MIN_FEE_PER_GAS = 21_000. V1 (2_100) is
-    // 10x below the threshold → tx stored Invalid → never selected for a
-    // block → ghost ("/transactions/<hash>" reports confirmed but the tx is
-    // not in any block and balance never moves). MIN_TRANSACTION_FEE (21_000)
-    // always passes both legacy + reduced-fee modes.
-    tx.fee = q_types::MIN_TRANSACTION_FEE;
+    // Fee: the client-signed path uses the fee the client signed over (default MIN);
+    // legacy path uses MIN_TRANSACTION_FEE (validate_fee threshold = BASE_GAS *
+    // MIN_FEE_PER_GAS = 21_000). Fee is part of the signed p2p payload, so for the
+    // durable path tx.fee MUST equal what the client signed.
+    tx.fee = if is_client_signed {
+        request.fee.unwrap_or(q_types::MIN_TRANSACTION_FEE)
+    } else {
+        q_types::MIN_TRANSACTION_FEE
+    };
 
-    // 7. Memo support (preserves the field used by inbox messages)
-    if let Some(memo) = request.memo {
+    // 7. Memo (NOT part of the signed p2p payload, so attaching it does not
+    //    invalidate the client signature over p2p_signable_hash).
+    if let Some(memo) = request.memo.clone() {
         tx.memo = Some(memo);
-        // Recompute the tx hash to include the memo
-        tx.id = transaction_utils::compute_transaction_id(&tx);
     }
+    tx.id = transaction_utils::compute_transaction_id(&tx);
 
     info!(
-        "📤 [SEND-SIGNED v10.9.46] {} → {}: amount={} token={} nonce={} tx_id=0x{}",
+        "📤 [SEND-SIGNED v10.11.72] {} → {}: amount={} token={} nonce={} signed={} tx_id=0x{}",
         q_log_privacy::mask_addr(&hex::encode(from_address)),
         q_log_privacy::mask_addr(&hex::encode(to_address)),
         q_log_privacy::mask_amt(request.amount),
         request.token_type,
         nonce,
+        is_client_signed,
         &hex::encode(tx.id)[..16],
     );
 
-    // 🛡 v10.11.0a: mark this tx as trusted-by-API-auth so the mempool's
-    // perform_validation skips the inner-signature check (which would
-    // otherwise reject because we leave tx.signature empty — the
-    // X-Wallet-Auth header IS the proof of authorization here).
-    //
-    // v10.11.16: mark via BOTH tx.id (SHA3-256 of core fields) AND tx.hash()
-    // (postcard-based). The mempool's TxValidator looks up trusted_via_auth
-    // via transaction.hash() at production_mempool.rs:873, but pre-v10.11.16
-    // we only called mark_auth_trusted(tx.id, …) — those hashes differ
-    // (documented at block_producer.rs:966-970). The lookup missed → tx
-    // rejected by mempool with "signature invalid" because tx.signature
-    // is empty by design → tx never enters production_mempool with Valid
-    // status → block_producer never packs it → tx ghost-confirmed via
-    // the dag_knight cert callback path but never landed in any block
-    // → v10.11.15 persist call DID move money, but block-recovery on
-    // restart re-derived from chain (which had no record) and reverted.
-    //
-    // Marking BOTH ensures the auth-trusted bypass fires regardless of
-    // which hash variant the lookup uses.
-    if let Some(mp) = state.production_mempool.as_ref() {
-        mp.mark_auth_trusted(tx.id, from_address);
-        mp.mark_auth_trusted(tx.hash(), from_address);
+    if is_client_signed {
+        // ── DURABLE PATH (v10.11.72) ── attach the client's Ed25519 signature and let
+        // perform_validation verify it on EVERY node (no trusted_via_auth bypass). We
+        // also verify here for an immediate, clear 400 — and so an unverifiable tx is
+        // NEVER submitted. A tx that fails verify_signature() cannot mint: it's rejected
+        // before it ever reaches the mempool / a block.
+        let sig_hex = request
+            .signature
+            .as_ref()
+            .map(|s| s.trim().trim_start_matches("0x"))
+            .unwrap_or("");
+        let sig_bytes = match hex::decode(sig_hex) {
+            Ok(b) if b.len() == 64 => b,
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "`signature` must be a 64-byte Ed25519 signature in hex".to_string(),
+                )))
+            }
+        };
+        tx.signature = sig_bytes;
+        tx.signature_phase = q_types::TxSignaturePhase::Phase0Ed25519;
+        if let Err(e) = tx.verify_signature() {
+            warn!(
+                "🛡 [SEND-SIGNED v10.11.72] client signature REJECTED for {}: {}",
+                q_log_privacy::mask_addr(&hex::encode(from_address)),
+                e
+            );
+            return Ok(Json(ApiResponse::error(format!(
+                "Invalid transaction signature: {}. (Note: the verifier resolves the \
+                 signer key from `from`; this path currently covers QUG native transfers \
+                 — token-transfer signing is a tracked follow-up because the token address \
+                 occupies the data[..32] field the verifier prefers as the key.)",
+                e
+            ))));
+        }
+        // Advance the server's nonce view so the next send gets a fresh nonce
+        // (the signed path does not call get_and_increment).
+        state
+            .nonce_tracker
+            .set_nonce(&from_address, nonce.saturating_add(1));
+    } else {
+        // ── LEGACY UNSIGNED PATH ── only reachable when Q_ALLOW_UNSIGNED_TX=1 (the
+        // interim guard rejects it otherwise). Keep the in-memory X-Wallet-Auth trust
+        // bypass so an explicitly-opted-in operator can still use the old behavior.
+        if let Some(mp) = state.production_mempool.as_ref() {
+            mp.mark_auth_trusted(tx.id, from_address);
+            mp.mark_auth_trusted(tx.hash(), from_address);
+        }
     }
 
     // 8. Submit unsigned tx to mempool (same path /dex/swap uses)
@@ -5792,6 +5937,51 @@ pub async fn send_transaction_signed(
         "amount": request.amount.to_string(),
         "token_type": request.token_type,
     }))))
+}
+
+/// v10.11.72: GET /api/v1/wallets/:address/nonce
+///
+/// Returns the next nonce the wallet should sign + submit with on the durable
+/// client-signing path (the signature covers the nonce, so the client must use
+/// the correct value). Public read — exposes only the monotonic counter, never
+/// balances.
+pub async fn get_wallet_nonce(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let addr = match parse_wallet_address(&address) {
+        Ok(a) => a,
+        Err(e) => return Ok(Json(ApiResponse::error(format!("Invalid address: {}", e)))),
+    };
+    let nonce = state.nonce_tracker.get_current(&addr);
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "address": hex::encode(addr),
+        "nonce": nonce,
+    }))))
+}
+
+/// v10.11.74: GET /api/v1/tokens/resolve/:token
+///
+/// Resolve a token symbol/address (QUGUSD, wBTC, a contract address, …) to its
+/// canonical 32-byte address (hex) — the SAME mapping `send_transaction_signed`
+/// uses to fill `tx.data` for a token transfer. The durable client-signing path
+/// signs over `data`, so the client must sign this EXACT value or its signature
+/// won't match the tx the server rebuilds (the cause of "Cannot decompress Edwards
+/// point" / "Invalid transaction signature" on token sends). Public read.
+pub async fn resolve_token(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    match resolve_token_address(&state, &token).await {
+        Ok(addr) => Ok(Json(ApiResponse::success(serde_json::json!({
+            "token": token,
+            "address": hex::encode(addr),
+        })))),
+        Err(e) => Ok(Json(ApiResponse::error(format!(
+            "Cannot resolve token '{}': {}",
+            token, e
+        )))),
+    }
 }
 
 // ============================================================================
@@ -9424,6 +9614,7 @@ pub async fn join_mixing_pool(
 
 /// Send transaction through quantum privacy mixer
 pub async fn send_private_transaction(
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<PrivacyMixTransactionRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
@@ -9499,6 +9690,70 @@ pub async fn send_private_transaction(
         // Fallback to node_id if no from address provided (backwards compatibility)
         state.node_id
     };
+
+    // v10.11.73 SECURITY — the mixer now REQUIRES X-Wallet-Auth and the caller MUST
+    // own `from`. Without this, `from` was client-claimed with no proof: an attacker
+    // could POST from=<any victim> and (now that complete_mixing_process persists the
+    // debit authoritatively) DRAIN that victim into their own wallet. Proving control
+    // of `from` (Ed25519 over the auth challenge) is what makes a mixer transfer a
+    // legitimate spend of one's OWN funds rather than theft of someone else's.
+    if auth_wallet.address != from_address {
+        warn!(
+            "🚨 [MIXER] Auth mismatch: auth={} request.from={} — rejecting (no impersonation)",
+            q_log_privacy::mask_addr(&hex::encode(auth_wallet.address)),
+            q_log_privacy::mask_addr(&hex::encode(from_address)),
+        );
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: X-Wallet-Auth wallet does not match request.from".to_string(),
+        )));
+    }
+
+    // 2026-06-24 (rocky) SECURITY — reject self-send through the mixer.
+    // complete_mixing_process snapshots old_recipient BEFORE writing the sender debit,
+    // so for from==to the credit insert clobbers the debit insert and the wallet ends at
+    // old_balance + amount = an unbacked mint of `amount` from nothing. Repeated unauthenticated
+    // (no AuthenticatedWallet on this handler) this compounds — the mechanism behind the
+    // 84B–148B QUG inflation. A self-mix is a no-op anyway, so reject it outright.
+    if from_address == to_address {
+        return Ok(Json(ApiResponse::error(
+            "Mixer self-transfer (from == to) is not allowed".to_string(),
+        )));
+    }
+
+    // 2026-06-24 (rocky) SECURITY — enforce the Q_BLOCKED_WALLETS freeze on the MIXER path too.
+    // The mixer bypasses mempool admission (writes balances directly), so without this a frozen
+    // exploiter could launder phantom QUG to a fresh, un-frozen address via /api/v1/mixer/send.
+    // Reject if either party is frozen. (Shares the env list with production_mempool.rs.)
+    {
+        use std::sync::OnceLock;
+        static BLOCKED: OnceLock<std::collections::HashSet<[u8; 32]>> = OnceLock::new();
+        let blocked = BLOCKED.get_or_init(|| {
+            let mut s = std::collections::HashSet::new();
+            if let Ok(raw) = std::env::var("Q_BLOCKED_WALLETS") {
+                for part in raw.split(|c| c == ',' || c == ' ' || c == '\n' || c == '\t') {
+                    let h = part.trim().strip_prefix("qnk").unwrap_or(part.trim());
+                    if h.len() == 64 {
+                        if let Ok(b) = hex::decode(h) {
+                            if b.len() == 32 {
+                                let mut a = [0u8; 32];
+                                a.copy_from_slice(&b);
+                                s.insert(a);
+                            }
+                        }
+                    }
+                }
+            }
+            s
+        });
+        if !blocked.is_empty()
+            && (blocked.contains(&from_address) || blocked.contains(&to_address))
+        {
+            warn!("🧊 [WALLET-FREEZE] Rejecting MIXER tx — from/to is on Q_BLOCKED_WALLETS");
+            return Ok(Json(ApiResponse::error(
+                "Wallet is frozen — mixer is disabled for this address".to_string(),
+            )));
+        }
+    }
 
     // Generate mixing session parameters
     let mixing_session_id = generate_quantum_mixing_id();
@@ -9947,12 +10202,33 @@ async fn complete_mixing_process(
         (old_sender, old_recipient)
     };
 
-    // Persist balance changes to RocksDB
+    // v10.11.73 MIXER DOUBLE-SPEND FIX: persist BOTH legs AUTHORITATIVELY.
+    //
+    // The previous code persisted via save_wallet_balances() — the batch MAX-WINS
+    // save (it skips any wallet where existing >= new). That SILENTLY DROPPED the
+    // sender's DEBIT (new < old) while keeping the recipient's CREDIT (new > old).
+    // On the next RocksDB reload (the mixer reloads wallet_balances at entry) the
+    // sender's spent coins reappeared → the same coins could be mixed again and
+    // again = infinite mint / double-spend through /api/v1/mixer/send. This is the
+    // exact class of bug the v10.11.70 fix cured on the NORMAL send path
+    // ("batch max-wins was skipping every new<old = money minted per transfer");
+    // the mixer path was missed. save_wallet_balance_authoritative() force-writes
+    // the exact value (no max-wins), so the debit lands and survives reload.
+    let new_sender_balance = old_sender_balance.saturating_sub(total_deduction);
+    let new_recipient_balance = old_recipient_balance.saturating_add(amount);
+    if let Err(e) = state
+        .storage_engine
+        .save_wallet_balance_authoritative(&sender_address, new_sender_balance)
+        .await
     {
-        let balances = state.wallet_balances.read().await;
-        if let Err(e) = state.storage_engine.save_wallet_balances(&*balances).await {
-            error!("❌ [TX] Failed to persist balance changes: {}", e);
-        }
+        error!("❌ [TX] Failed to persist sender debit (authoritative): {}", e);
+    }
+    if let Err(e) = state
+        .storage_engine
+        .save_wallet_balance_authoritative(&recipient, new_recipient_balance)
+        .await
+    {
+        error!("❌ [TX] Failed to persist recipient credit (authoritative): {}", e);
     }
 
     // v3.4.15-beta: Propagate mixed transaction through Dandelion++ for IP unlinkability
@@ -11165,10 +11441,17 @@ pub async fn get_mining_challenge(
         // 121 FULL blocks (decompress + deserialize ≈ multi-GB transient allocation) on
         // every challenge regeneration. The 121-block fetch now runs at most once per
         // height instead of 155×/min under miner polling load.
-        static LWMA_BITS_CACHE: std::sync::Mutex<Option<(u64, u32)>> = std::sync::Mutex::new(None);
+        // 2026-06-22 (rocky) OOM FIX: the per-height cache is DEFEATED when this node is
+        // peerless and solo-produces ~1 block/s — block_height churns every second, so the
+        // cache misses every second and re-runs the 121-FULL-BLOCK fetch (multi-GB) under
+        // miner polling → jemalloc RSS ratchets to ~40G → OOM. Add a 30s TTL fallback so the
+        // expensive fetch runs at most ~1×/30s during fast height churn, while still serving
+        // exact-per-height (deterministic) when the cache matches the current height.
+        static LWMA_BITS_CACHE: std::sync::Mutex<Option<(u64, u32, std::time::Instant)>> = std::sync::Mutex::new(None);
         let cached_bits = match LWMA_BITS_CACHE.lock() {
             Ok(g) => match *g {
-                Some((h, bits)) if h == block_height => Some(bits),
+                Some((h, bits, _)) if h == block_height => Some(bits),
+                Some((_, bits, t)) if t.elapsed().as_secs() < 30 => Some(bits),
                 _ => None,
             },
             Err(_) => None,
@@ -11213,7 +11496,7 @@ pub async fn get_mining_challenge(
             1, // target: 1 second per block (1 bps)
         );
         if let Ok(mut g) = LWMA_BITS_CACHE.lock() {
-            *g = Some((block_height, bits));
+            *g = Some((block_height, bits, std::time::Instant::now()));
         }
         bits
         }

@@ -321,6 +321,46 @@ impl ProductionMempool {
             hex::encode(&tx_hash)
         );
 
+        // 2026-06-24 (rocky) SECURITY — wallet freeze at mempool admission.
+        // Reject any tx whose sender OR recipient is on the operator-controlled blocklist
+        // (env Q_BLOCKED_WALLETS = comma/space-separated 64-hex or qnk… addresses). This
+        // soft-freezes exploited / phantom-QUG wallets here, where ALL tx types (transfer,
+        // swap, liquidity) enter — WITHOUT touching consensus replay (already-committed blocks
+        // are not re-admitted), so it is fully reversible: edit the drop-in + restart, no recompile.
+        {
+            use std::sync::OnceLock;
+            static BLOCKED: OnceLock<std::collections::HashSet<[u8; 32]>> = OnceLock::new();
+            let blocked = BLOCKED.get_or_init(|| {
+                let mut s = std::collections::HashSet::new();
+                if let Ok(raw) = std::env::var("Q_BLOCKED_WALLETS") {
+                    for part in raw.split(|c| c == ',' || c == ' ' || c == '\n' || c == '\t') {
+                        let h = part.trim().strip_prefix("qnk").unwrap_or(part.trim());
+                        if h.len() == 64 {
+                            if let Ok(b) = hex::decode(h) {
+                                if b.len() == 32 {
+                                    let mut a = [0u8; 32];
+                                    a.copy_from_slice(&b);
+                                    s.insert(a);
+                                }
+                            }
+                        }
+                    }
+                }
+                s
+            });
+            if !blocked.is_empty()
+                && (blocked.contains(&transaction.from) || blocked.contains(&transaction.to))
+            {
+                warn!(
+                    "🧊 [WALLET-FREEZE] Rejecting tx {} — from/to is on Q_BLOCKED_WALLETS",
+                    hex::encode(&tx_hash[..8])
+                );
+                let mut metrics = self.metrics.write().await;
+                metrics.invalid_transactions += 1;
+                return Ok(false);
+            }
+        }
+
         // Check if already exists
         {
             let pending = self.pending_transactions.read().await;
@@ -928,17 +968,29 @@ impl TxValidator {
         // inner-signature check. Still apply fee + format checks below. See the
         // doc on TxValidator.trusted_via_auth for the bug history.
         let tx_id = transaction.hash();
-        let auth_trusted: bool = self
-            .trusted_via_auth
-            .get(&tx_id)
-            .map(|entry| {
-                let (addr, ts): ([u8; 32], std::time::Instant) = *entry.value();
-                // Only trust if the recorded address matches the tx's from. This
-                // prevents a malicious internal path from marking arbitrary tx_ids
-                // as trusted with a wrong from.
-                addr == transaction.from && ts.elapsed() < Duration::from_secs(3600)
-            })
-            .unwrap_or(false);
+        // 🛡 v10.11.72 INTERIM DOUBLE-SPEND GUARD (2026-06-27)
+        // The `trusted_via_auth` bypass admits a tx with an EMPTY signature based on
+        // an in-memory, HTTP-scoped X-Wallet-Auth flag that does NOT propagate over
+        // P2P. The result was the live double-spend: such a tx is Valid only on the
+        // originating node and Invalid on every miner → it never lands in a block →
+        // the sender is never debited and can re-send forever. By default we now
+        // DISABLE the bypass so an unsigned non-coinbase tx is rejected uniformly on
+        // every node (it falls through to the verify_signature / empty-signature
+        // checks below). This is pure rejection — no balance writes. Reversible WITHOUT
+        // recompile: set Q_ALLOW_UNSIGNED_TX=1 to restore the legacy (vulnerable) bypass.
+        let allow_unsigned = std::env::var("Q_ALLOW_UNSIGNED_TX").ok().as_deref() == Some("1");
+        let auth_trusted: bool = allow_unsigned
+            && self
+                .trusted_via_auth
+                .get(&tx_id)
+                .map(|entry| {
+                    let (addr, ts): ([u8; 32], std::time::Instant) = *entry.value();
+                    // Only trust if the recorded address matches the tx's from. This
+                    // prevents a malicious internal path from marking arbitrary tx_ids
+                    // as trusted with a wrong from.
+                    addr == transaction.from && ts.elapsed() < Duration::from_secs(3600)
+                })
+                .unwrap_or(false);
 
         if auth_trusted {
             debug!(

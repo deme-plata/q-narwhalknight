@@ -379,44 +379,18 @@ pub async fn submit_transaction(
 
                 // Spawn broadcast task (don't block on it, but track success)
                 let broadcast_handle = tokio::spawn(async move {
-                    // RESILIENT BROADCAST (settlement fix): the libp2p manager mutex is
-                    // shared with block-processing/sync. The old try_lock() SILENTLY
-                    // DROPPED the tx on any momentary contention ("libp2p lock busy,
-                    // broadcast skipped") — under lock pressure (same lock family as the
-                    // block-processing deadlock) payments never gossiped and settled
-                    // local-only (broadcast_success=false). Now we WAIT for the lock with
-                    // a bounded retry: acquire in the loop, publish once after, so a
-                    // briefly-busy manager publishes as soon as the lock frees instead of
-                    // dropping the transaction.
-                    let mut guard = None;
-                    for attempt in 1..=6u32 {
-                        match tokio::time::timeout(
-                            std::time::Duration::from_millis(250),
-                            libp2p_clone.lock(),
-                        )
-                        .await
-                        {
-                            Ok(nm) => {
-                                guard = Some(nm);
-                                break;
-                            }
-                            Err(_) => {
-                                // Lock still held by block-processing/sync. Back off
-                                // briefly and retry instead of dropping the tx.
-                                tracing::debug!(
-                                    "libp2p lock busy, retry {}/6 for tx {}",
-                                    attempt,
-                                    &tx_id_log[..16]
-                                );
-                                tokio::time::sleep(std::time::Duration::from_millis(50))
-                                    .await;
-                            }
-                        }
-                    }
-                    match guard {
-                        Some(mut nm) => {
-                            let topic =
-                                nm.network_config().network_id.transactions_topic();
+                    // FIX(broadcast-revert): bounded lock().await instead of try_lock().
+                    // try_lock() failed INSTANTLY whenever block-production/serving held the
+                    // shared libp2p mutex → broadcast skipped → tx settled local-only → user
+                    // saw the balance "revert" once routed to a node that never got the gossip.
+                    // lock().await makes this spawned task WAIT for the lock and actually publish
+                    // (it outlives the 100ms HTTP fast-path below, so the broadcast still lands).
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        libp2p_clone.lock(),
+                    ).await.map_err(|_| ()) {
+                        Ok(mut nm) => {
+                            let topic = nm.network_config().network_id.transactions_topic();
                             match nm.publish_topic(&topic, tx_bytes) {
                                 Ok(_) => {
                                     tracing::info!(
@@ -435,9 +409,9 @@ pub async fn submit_transaction(
                                 }
                             }
                         }
-                        None => {
+                        Err(_) => {
                             tracing::warn!(
-                                "⚠️ libp2p lock contended after 6 attempts, tx {} not gossiped this pass (will re-broadcast on mempool drain)",
+                                "⚠️ libp2p lock not acquired within 5s, tx {} broadcast failed",
                                 &tx_id_log[..16]
                             );
                             false
