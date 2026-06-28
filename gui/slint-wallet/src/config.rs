@@ -17,6 +17,9 @@ pub struct WalletConfig {
     /// v1.3.0: Settings page additions (Network / Appearance / Updates / etc).
     #[serde(default)]
     pub settings: SettingsConfig,
+    /// v1.4.0: persisted login session + optional password-encrypted mnemonic.
+    #[serde(default)]
+    pub wallet: WalletStore,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -171,6 +174,14 @@ pub fn set_rpc_url(url: String) {
     let _ = save(&cfg);
 }
 
+pub fn theme_pref() -> String {
+    load().settings.theme.unwrap_or_else(|| "dark".to_string())
+}
+
+pub fn accent_pref() -> String {
+    load().settings.accent_color.unwrap_or_else(|| "cyan".to_string())
+}
+
 pub fn set_theme(theme: String) {
     let mut cfg = load();
     cfg.settings.theme = Some(theme);
@@ -218,4 +229,40 @@ pub fn set_auto_login_enabled(enabled: bool) {
     let mut cfg = load();
     cfg.settings.auto_login_enabled = Some(enabled);
     let _ = save(&cfg);
+}
+
+/// v1.4.0: persisted wallet session (stay-logged-in-until-logout) + optional
+/// website-compatible password-encrypted mnemonic.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WalletStore {
+    /// Plaintext mnemonic kept so the user stays logged in across restarts
+    /// until they press Logout. `None` = no active session (show login screen).
+    pub session_mnemonic: Option<String>,
+    /// Optional PBKDF2/AES-GCM encrypted mnemonic blob (JSON), byte-compatible
+    /// with the quillon.xyz web wallet. `None` = no password protection set.
+    pub encrypted_mnemonic: Option<String>,
+}
+
+/// Persist (or clear) the active login session mnemonic.
+pub fn set_session_mnemonic(mnemonic: Option<String>) {
+    let mut cfg = load();
+    cfg.wallet.session_mnemonic = mnemonic;
+    let _ = save(&cfg);
+}
+
+/// Persist (or clear) the password-encrypted mnemonic blob.
+pub fn set_encrypted_mnemonic(blob: Option<String>) {
+    let mut cfg = load();
+    cfg.wallet.encrypted_mnemonic = blob;
+    let _ = save(&cfg);
+}
+
+/// Read the active session mnemonic, if any (for auto-login at startup).
+pub fn session_mnemonic() -> Option<String> {
+    load().wallet.session_mnemonic
+}
+
+/// Read the password-encrypted mnemonic blob, if any (for unlock at startup).
+pub fn encrypted_mnemonic() -> Option<String> {
+    load().wallet.encrypted_mnemonic
 }

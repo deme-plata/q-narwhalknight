@@ -1,0 +1,385 @@
+$date
+	Thu Jun 11 11:22:50 2026
+$end
+$version
+	Icarus Verilog
+$end
+$timescale
+	1ps
+$end
+$scope module core_tb $end
+$var wire 1 ! dmem_gnt $end
+$var wire 32 " dmem_rdata [31:0] $end
+$var wire 1 # imem_gnt $end
+$var wire 32 $ imem_rdata [31:0] $end
+$var wire 1 % xcrypto_ready $end
+$var wire 32 & xcrypto_result [31:0] $end
+$var wire 1 ' xlattice_ready $end
+$var wire 32 ( xlattice_result [31:0] $end
+$var wire 1 ) xlattice_valid $end
+$var wire 32 * xlattice_rs2 [31:0] $end
+$var wire 32 + xlattice_rs1 [31:0] $end
+$var wire 32 , xlattice_instr [31:0] $end
+$var wire 1 - xcrypto_valid $end
+$var wire 32 . xcrypto_rs2 [31:0] $end
+$var wire 32 / xcrypto_rs1 [31:0] $end
+$var wire 32 0 xcrypto_instr [31:0] $end
+$var wire 1 1 imem_req $end
+$var wire 32 2 imem_addr [31:0] $end
+$var wire 4 3 dmem_we [3:0] $end
+$var wire 32 4 dmem_wdata [31:0] $end
+$var wire 1 5 dmem_req $end
+$var wire 32 6 dmem_addr [31:0] $end
+$var reg 1 7 clk $end
+$var reg 1 8 rst_n $end
+$var reg 1 9 xcrypto_fired $end
+$var integer 32 : cycle_count [31:0] $end
+$var integer 32 ; fail_count [31:0] $end
+$var integer 32 < pass_count [31:0] $end
+$scope function rv_add $end
+$upscope $end
+$scope function rv_addi $end
+$upscope $end
+$scope function rv_and $end
+$upscope $end
+$scope function rv_beq $end
+$upscope $end
+$scope function rv_bne $end
+$upscope $end
+$scope function rv_custom0 $end
+$upscope $end
+$scope function rv_lw $end
+$upscope $end
+$scope function rv_nop $end
+$upscope $end
+$scope function rv_or $end
+$upscope $end
+$scope function rv_sub $end
+$upscope $end
+$scope function rv_sw $end
+$upscope $end
+$scope module u_dut $end
+$var wire 1 7 clk $end
+$var wire 1 ! dmem_gnt $end
+$var wire 32 = dmem_rdata [31:0] $end
+$var wire 1 # imem_gnt $end
+$var wire 32 > imem_rdata [31:0] $end
+$var wire 1 8 rst_n $end
+$var wire 1 % xcrypto_ready $end
+$var wire 32 ? xcrypto_result [31:0] $end
+$var wire 1 ' xlattice_ready $end
+$var wire 32 @ xlattice_result [31:0] $end
+$var wire 1 ) xlattice_valid $end
+$var wire 32 A xlattice_rs2 [31:0] $end
+$var wire 32 B xlattice_rs1 [31:0] $end
+$var wire 33 C xlattice_resp_w [32:0] $end
+$var wire 97 D xlattice_req_w [96:0] $end
+$var wire 32 E xlattice_instr [31:0] $end
+$var wire 1 - xcrypto_valid $end
+$var wire 32 F xcrypto_rs2 [31:0] $end
+$var wire 32 G xcrypto_rs1 [31:0] $end
+$var wire 33 H xcrypto_resp_w [32:0] $end
+$var wire 97 I xcrypto_req_w [96:0] $end
+$var wire 32 J xcrypto_instr [31:0] $end
+$var wire 1 1 imem_req $end
+$var wire 32 K imem_addr [31:0] $end
+$var wire 4 L dmem_we [3:0] $end
+$var wire 32 M dmem_wdata [31:0] $end
+$var wire 1 5 dmem_req $end
+$var wire 32 N dmem_addr [31:0] $end
+$scope module u_pipeline $end
+$var wire 1 7 clk $end
+$var wire 1 ! dmem_gnt $end
+$var wire 32 O dmem_rdata [31:0] $end
+$var wire 1 5 dmem_req $end
+$var wire 1 P ext_stall $end
+$var wire 1 Q flush_ex1 $end
+$var wire 1 R flush_id $end
+$var wire 1 S flush_if $end
+$var wire 1 # imem_gnt $end
+$var wire 32 T imem_rdata [31:0] $end
+$var wire 1 U load_use_hazard $end
+$var wire 1 V rf_rd_we $end
+$var wire 1 8 rst_n $end
+$var wire 1 W stall_id $end
+$var wire 1 X stall_if $end
+$var wire 33 Y xcrypto_resp [32:0] $end
+$var wire 33 Z xlattice_resp [32:0] $end
+$var wire 32 [ rf_rs2_data [31:0] $end
+$var wire 5 \ rf_rs2_addr [4:0] $end
+$var wire 32 ] rf_rs1_data [31:0] $end
+$var wire 5 ^ rf_rs1_addr [4:0] $end
+$var wire 32 _ rf_rd_data [31:0] $end
+$var wire 5 ` rf_rd_addr [4:0] $end
+$var wire 1 1 imem_req $end
+$var wire 32 a imem_addr [31:0] $end
+$var wire 32 b dmem_addr [31:0] $end
+$var wire 1 c dec_is_compressed $end
+$var wire 32 d dec_instr_expanded [31:0] $end
+$var wire 73 e dec_ctrl [72:0] $end
+$var wire 1 f alu_zero $end
+$var wire 32 g alu_result [31:0] $end
+$var wire 1 h alu_overflow $end
+$var wire 1 i alu_carry $end
+$var reg 32 j alu_operand_a [31:0] $end
+$var reg 32 k alu_operand_b [31:0] $end
+$var reg 1 l branch_taken $end
+$var reg 32 m branch_target [31:0] $end
+$var reg 32 n dmem_wdata [31:0] $end
+$var reg 4 o dmem_we [3:0] $end
+$var reg 170 p ex1_ex2_next [169:0] $end
+$var reg 170 q ex1_ex2_r [169:0] $end
+$var reg 170 r ex2_mem_next [169:0] $end
+$var reg 170 s ex2_mem_r [169:0] $end
+$var reg 32 t fwd_rs1_data [31:0] $end
+$var reg 32 u fwd_rs2_data [31:0] $end
+$var reg 170 v id_ex1_next [169:0] $end
+$var reg 170 w id_ex1_r [169:0] $end
+$var reg 65 x if_id_next [64:0] $end
+$var reg 65 y if_id_r [64:0] $end
+$var reg 32 z mem_load_data [31:0] $end
+$var reg 138 { mem_wb1_next [137:0] $end
+$var reg 138 | mem_wb1_r [137:0] $end
+$var reg 32 } pc_next [31:0] $end
+$var reg 32 ~ pc_r [31:0] $end
+$var reg 39 !" wb1_wb2_next [38:0] $end
+$var reg 39 "" wb1_wb2_r [38:0] $end
+$var reg 97 #" xcrypto_req [96:0] $end
+$var reg 97 $" xlattice_req [96:0] $end
+$scope module u_alu $end
+$var wire 32 %" a_signed [31:0] $end
+$var wire 32 &" b_signed [31:0] $end
+$var wire 4 '" op [3:0] $end
+$var wire 32 (" operand_a [31:0] $end
+$var wire 32 )" operand_b [31:0] $end
+$var wire 1 f zero $end
+$var wire 33 *" sub_result [32:0] $end
+$var wire 64 +" mul_result_uu [63:0] $end
+$var wire 64 ," mul_result_ss [63:0] $end
+$var wire 33 -" add_result [32:0] $end
+$var reg 1 i carry $end
+$var reg 32 ." div_result [31:0] $end
+$var reg 1 h overflow $end
+$var reg 32 /" rem_result [31:0] $end
+$var reg 32 0" result [31:0] $end
+$upscope $end
+$scope module u_decoder $end
+$var wire 32 1" instr_expanded_o [31:0] $end
+$var wire 32 2" instr_i [31:0] $end
+$var wire 1 c is_compressed_o $end
+$var wire 32 3" pc_i [31:0] $end
+$var wire 7 4" opcode [6:0] $end
+$var wire 1 5" is_c $end
+$var wire 32 6" instr [31:0] $end
+$var wire 7 7" funct7 [6:0] $end
+$var wire 3 8" funct3 [2:0] $end
+$var reg 32 9" c_expanded [31:0] $end
+$var reg 73 :" ctrl_o [72:0] $end
+$upscope $end
+$scope module u_regfile $end
+$var wire 1 7 clk $end
+$var wire 5 ;" rd_addr [4:0] $end
+$var wire 32 <" rd_data [31:0] $end
+$var wire 1 V rd_we $end
+$var wire 5 =" rs1_addr [4:0] $end
+$var wire 5 >" rs2_addr [4:0] $end
+$var wire 1 8 rst_n $end
+$var reg 32 ?" rs1_data [31:0] $end
+$var reg 32 @" rs2_data [31:0] $end
+$scope begin $ivl_for_loop0 $end
+$var integer 32 A" i [31:0] $end
+$upscope $end
+$upscope $end
+$scope begin $unm_blk_108 $end
+$var reg 8 B" byte_val [7:0] $end
+$upscope $end
+$scope begin $unm_blk_109 $end
+$var reg 16 C" half_val [15:0] $end
+$upscope $end
+$upscope $end
+$upscope $end
+$scope begin $unm_blk_119 $end
+$var integer 32 D" idx [31:0] $end
+$scope begin $ivl_for_loop1 $end
+$var integer 32 E" i [31:0] $end
+$upscope $end
+$scope begin $ivl_for_loop2 $end
+$var integer 32 F" i [31:0] $end
+$upscope $end
+$scope begin $ivl_for_loop3 $end
+$var integer 32 G" i [31:0] $end
+$upscope $end
+$upscope $end
+$scope task check_mem $end
+$upscope $end
+$scope task check_reg $end
+$upscope $end
+$upscope $end
+$enddefinitions $end
+#0
+$dumpvars
+b100101 G"
+b10000000000 F"
+b10000000000 E"
+b10001 D"
+bx C"
+bx B"
+b100000 A"
+b0 @"
+b0 ?"
+b0 >"
+b0 ="
+b0 <"
+b0 ;"
+b111000110000000000000100000000000000000000000000000000000000000000000 :"
+b0 9"
+b0 8"
+b0 7"
+b0 6"
+15"
+b0 4"
+b0 3"
+b0 2"
+b0 1"
+b0 0"
+b0 /"
+b11111111111111111111111111111111 ."
+b0 -"
+b0 ,"
+b0 +"
+b0 *"
+b0 )"
+b0 ("
+b0 '"
+b0 &"
+b0 %"
+b0 $"
+b0 #"
+b0 ""
+b0 !"
+b0 ~
+b100 }
+b0 |
+b0 {
+b0 z
+b0 y
+b1010000000000000100100111 x
+b0 w
+b1110001100000000000001000000000000000000000000000000000000000000000000 v
+b0 u
+b0 t
+b0 s
+b0 r
+b0 q
+b0 p
+b0 o
+b0 n
+b0 m
+0l
+b0 k
+b0 j
+0i
+0h
+b0 g
+1f
+b111000110000000000000100000000000000000000000000000000000000000000000 e
+b0 d
+1c
+b0 b
+b0 a
+b0 `
+b0 _
+b0 ^
+b0 ]
+b0 \
+b0 [
+b110111101010110110111110111011110 Z
+b0 Y
+0X
+0W
+0V
+0U
+b101000000000000010010011 T
+0S
+0R
+0Q
+0P
+b0 O
+b0 N
+b0 M
+b0 L
+b0 K
+b0 J
+b0 I
+b0 H
+b0 G
+b0 F
+b0 E
+b0 D
+b110111101010110110111110111011110 C
+b0 B
+b0 A
+b11011110101011011011111011101111 @
+b0 ?
+b101000000000000010010011 >
+b0 =
+b0 <
+b0 ;
+b0 :
+09
+08
+07
+b0 6
+05
+b0 4
+b0 3
+b0 2
+11
+b0 0
+b0 /
+b0 .
+0-
+b0 ,
+b0 +
+b0 *
+0)
+b11011110101011011011111011101111 (
+0'
+b0 &
+0%
+b101000000000000010010011 $
+1#
+b0 "
+0!
+$end
+#5000
+b100000 A"
+17
+#10000
+07
+#15000
+b100000 A"
+17
+#20000
+07
+#25000
+b100000 A"
+17
+#30000
+07
+#35000
+b100000 A"
+17
+#40000
+07
+#45000
+b1010 \
+b1010 >"
+b10011 4"
+b101000000000000010010011 d
+b101000000000000010010011 1"
+b101000000000000010010011 6"
+0c
+05"
+b1110001100000000000001000000000000000000000000000000000000000000000000 p
+b111000

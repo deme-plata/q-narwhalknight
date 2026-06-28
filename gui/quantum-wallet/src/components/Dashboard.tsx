@@ -113,6 +113,44 @@ interface DashboardProps {
 }
 
 // ── HiBT Listing Donation Banner (v10.5.4) ────────────────────────────────
+function HiBTDonationBannerSmall() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <motion.div
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.05 }}
+        className="mb-6 mx-auto max-w-2xl cursor-pointer group"
+        onClick={() => setOpen(true)}
+      >
+        <div
+          className="relative w-full rounded-xl overflow-hidden"
+          style={{ border: '1.5px solid rgba(132,204,22,0.35)', boxShadow: '0 0 16px rgba(132,204,22,0.10)' }}
+        >
+          <img
+            src="/hibt-banner.png"
+            alt="$QUG listing on HiBT — donate BTC"
+            className="w-full h-auto block transition-transform duration-300 group-hover:scale-[1.01]"
+          />
+          <div
+            className="absolute inset-0 flex items-center justify-end pr-4 opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+            style={{ background: 'linear-gradient(90deg, transparent 45%, rgba(0,0,0,0.6) 100%)' }}
+          >
+            <span
+              className="text-[11px] font-bold px-2.5 py-1 rounded-lg"
+              style={{ background: 'rgba(132,204,22,0.9)', color: '#000' }}
+            >
+              Donate BTC →
+            </span>
+          </div>
+        </div>
+      </motion.div>
+      <HiBTDonationModal isOpen={open} onClose={() => setOpen(false)} />
+    </>
+  );
+}
+
 function HiBTDonationBanner() {
   const [open, setOpen] = useState(false);
   return (
@@ -1128,13 +1166,13 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
               } else {
                 // Authentication failed - use highest known or cached balance
                 console.warn('⚠️ Balance query failed:', balanceResponse.error);
-                walletBalance = Math.max(previousHighest, cachedValue);
+                walletBalance = cachedValue > 0 ? cachedValue : previousHighest; // v10.11.65: last-known, not all-time-max (stops inflated latch)
                 console.log('💰 Using best known balance:', walletBalance);
               }
             } catch (balanceErr) {
               console.warn('❌ Failed to fetch wallet balance:', balanceErr);
               // Fallback: use highest known or cached balance
-              walletBalance = Math.max(previousHighest, cachedValue);
+              walletBalance = cachedValue > 0 ? cachedValue : previousHighest; // v10.11.65: last-known, not all-time-max (stops inflated latch)
               console.log('💰 Using best known balance (error fallback):', walletBalance);
             }
           }
@@ -1265,7 +1303,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
             qugBalance = referenceBalance;
           }
         } else {
-          qugBalance = Math.max(previousHighest, validCachedBalance, nodeStatus?.balance || 0);
+          qugBalance = validCachedBalance > 0 ? validCachedBalance : previousHighest; // v10.11.65: last-known, not all-time-max
           console.warn('⚠️ Balance query failed, using best known:', qugBalance);
         }
 
@@ -2755,7 +2793,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
         const previousHighest = highestKnownBalancesRef.current['QUG'] || 0;
         const nodeBalance = nodeStatus?.balance || 0;
         // Use the maximum of all known sources
-        const qugBalance = Math.max(previousHighest, cachedValue, nodeBalance);
+        const qugBalance = nodeBalance > 0 ? nodeBalance : (cachedValue > 0 ? cachedValue : previousHighest); // v10.11.65: trust authoritative/last-known, not all-time-max
         console.log('🔄 Refresh using best balance:', qugBalance, '(highest:', previousHighest, ', cached:', cachedValue, ', node:', nodeBalance, ')');
 
         const now = Date.now();
@@ -3447,8 +3485,8 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
       {activeDashboardTab === 'wallet' && <>
 
-      {/* ── HiBT Listing Donation Banner removed v10.9.54 — listing concluded ── */}
-      {/* <HiBTDonationBanner /> */}
+      {/* ── HiBT Listing Donation Banner (compact) ── */}
+      <HiBTDonationBannerSmall />
 
       {/* ── News & Blog Row ─────────────────────────────────────────── */}
       <motion.div

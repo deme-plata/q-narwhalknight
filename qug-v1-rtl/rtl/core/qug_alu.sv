@@ -38,8 +38,8 @@ module qug_alu
   logic [XLEN-1:0] div_result;
   logic [XLEN-1:0] rem_result;
 
-  assign a_signed = signed'(operand_a);
-  assign b_signed = signed'(operand_b);
+  assign a_signed = $signed(operand_a);
+  assign b_signed = $signed(operand_b);
 
   // -------------------------------------------------------------------------
   // Adder / subtractor (shared logic)

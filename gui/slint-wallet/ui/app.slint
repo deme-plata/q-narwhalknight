@@ -1,4 +1,5 @@
 import { Theme } from "theme.slint";
+export { Theme }  // re-export so Rust (main.rs) can app.global::<Theme>() for live theme switching
 import { LoginScreen } from "login.slint";
 import { DashboardScreen, TokenInfo } from "dashboard.slint";
 import { ReceiveScreen } from "receive.slint";
@@ -35,6 +36,9 @@ export component AppWindow inherits Window {
     // Login properties
     in-out property <string> login-error: "";
     in-out property <string> generated-mnemonic: "";
+    in-out property <string> create-password: "";
+    in-out property <bool> has-locked-wallet: false;
+    callback unlock-wallet(string);
     in-out property <bool> show-create-view: false;
     in-out property <string> server-url: "https://quillon.xyz";
 
@@ -244,6 +248,9 @@ export component AppWindow inherits Window {
             if root.active-screen == 0 : LoginScreen {
                 error-message: root.login-error;
                 generated-mnemonic: root.generated-mnemonic;
+                create-password <=> root.create-password;
+                has-locked-wallet: root.has-locked-wallet;
+                unlock-wallet(p) => { root.unlock-wallet(p); }
                 show-create-view <=> root.show-create-view;
                 server-url <=> root.server-url;
                 wallet-version: root.wallet-version;

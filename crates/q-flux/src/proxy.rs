@@ -139,6 +139,21 @@ async fn handle_connection_inner<S>(
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string())
             .unwrap_or_else(generate_request_id);
+
+        // Grok custom MCP connector. This must run before static routing because
+        // SPA fallback would otherwise return index.html for /mcp/grok.
+        if req_path == "/mcp/grok"
+            || req_path.starts_with("/mcp/grok/")
+            || req_path.starts_with("/mcp/grok?")
+            || req_path.starts_with("/oauth/grok/")
+        {
+            handle_grok_mcp_direct(stream, &req, &buf[header_end..buf_len], client_addr, metrics, &request_id, drain_rx.clone()).await;
+            let latency = req_start.elapsed();
+            metrics.record_latency(latency);
+            log_access(access_logger, client_addr, req_method, &req_path, 200, 0, 0, latency, user_agent.as_deref(), None, Some(request_id.as_str()));
+            return; // Connection consumed by MCP stream/proxy
+        }
+
         if let static_serve::RouteResult::ServeFile(file_resp) = static_serve::route(&req_path, static_config) {
             let if_none_match = req.headers().get("if-none-match")
                 .and_then(|v| v.to_str().ok())
@@ -1179,6 +1194,89 @@ async fn handle_sse_direct<S>(
                 tracing::debug!(client = %client_addr, "SSE drain signal — closing stream");
                 metrics.drain_forced();
             }
+        }
+    }
+}
+
+fn grok_mcp_rewrite_path(path: &str) -> String {
+    if path == "/mcp/grok/health" {
+        "/health".to_string()
+    } else if let Some(rest) = path.strip_prefix("/mcp/grok") {
+        if rest.is_empty() {
+            "/mcp".to_string()
+        } else if rest.starts_with('?') {
+            format!("/mcp{}", rest)
+        } else {
+            rest.to_string()
+        }
+    } else {
+        path.to_string()
+    }
+}
+
+async fn handle_grok_mcp_direct<S>(
+    mut client_stream: S,
+    req: &hyper::Request<()>,
+    already_read_body: &[u8],
+    client_addr: SocketAddr,
+    metrics: &Metrics,
+    request_id: &str,
+    mut drain_rx: DrainReceiver,
+) where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut upstream_conn = match tokio::net::TcpStream::connect("127.0.0.1:8787").await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(client = %client_addr, "Grok MCP upstream connect failed: {}", e);
+            let _ = write_error_response(&mut client_stream, 502, "Bad Gateway").await;
+            return;
+        }
+    };
+
+    let original_path = req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = grok_mcp_rewrite_path(original_path);
+    let mut raw_req = Vec::with_capacity(1024);
+    write!(raw_req, "{} {} HTTP/1.1\r\n", req.method(), path).ok();
+
+    for (key, value) in req.headers() {
+        if key == hyper::header::CONNECTION
+            || key == hyper::header::TRANSFER_ENCODING
+            || key == "keep-alive"
+            || key == "proxy-connection"
+            || key == hyper::header::HOST
+        {
+            continue;
+        }
+        write!(raw_req, "{}: {}\r\n", key, value.to_str().unwrap_or("")).ok();
+    }
+    write!(raw_req, "Host: 127.0.0.1:8787\r\n").ok();
+    write!(raw_req, "X-Forwarded-For: {}\r\n", client_addr.ip()).ok();
+    write!(raw_req, "X-Forwarded-Proto: https\r\n").ok();
+    write!(raw_req, "X-Real-IP: {}\r\n", client_addr.ip()).ok();
+    write!(raw_req, "X-Request-ID: {}\r\n", request_id).ok();
+    raw_req.extend_from_slice(b"\r\n");
+    raw_req.extend_from_slice(already_read_body);
+
+    if upstream_conn.write_all(&raw_req).await.is_err() {
+        let _ = write_error_response(&mut client_stream, 502, "Bad Gateway").await;
+        return;
+    }
+
+    let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream_conn);
+    let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+    let u2c = tokio::io::copy(&mut upstream_read, &mut client_write);
+    let c2u = tokio::io::copy(&mut client_read, &mut upstream_write);
+
+    tokio::select! {
+        r = u2c => {
+            if let Ok(n) = r { metrics.bytes_tx(n); }
+        }
+        r = c2u => {
+            if let Ok(n) = r { metrics.bytes_rx(n); }
+        }
+        _ = drain_rx.changed() => {
+            tracing::debug!(client = %client_addr, "Grok MCP drain signal — closing stream");
         }
     }
 }

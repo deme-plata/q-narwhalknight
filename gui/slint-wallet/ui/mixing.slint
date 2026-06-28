@@ -1,3 +1,4 @@
+import { Theme } from "theme.slint";
 // Quantum Mixer animation (Slint-native, runs inside the wallet's software renderer).
 // Metaphor: your transaction (glowing core) shuffled among orbiting decoy nodes,
 // wrapped by counter-rotating ring-signature rings, with sonar energy pulses and a
@@ -40,16 +41,16 @@ export component MixingAnimation inherits Rectangle {
     property <length> cy: root.height / 2 - 30px;
     property <length> orbit-r: 150px;
 
-    background: #070b16;
+    background: Theme.bg-primary;
 
     // depth + ambient glows
     Rectangle {
         x: 0; y: 0; width: 100%; height: 100%;
-        background: @linear-gradient(180deg, #0a1322 0%, #080e1a 60%, #060912 100%);
+        background: @linear-gradient(180deg, Theme.bg-primary 0%, Theme.bg-primary 60%, Theme.bg-primary 100%);
     }
     Rectangle {
         x: root.cx - 300px; y: root.cy - 300px; width: 600px; height: 600px; border-radius: 300px;
-        background: @radial-gradient(circle, #22d3ee.with-alpha(0.16) 0%, #22d3ee.with-alpha(0.04) 55%, transparent 100%);
+        background: @radial-gradient(circle, Theme.accent-cyan.with-alpha(0.16) 0%, Theme.accent-cyan.with-alpha(0.04) 55%, transparent 100%);
     }
     Rectangle {
         x: root.width - 240px; y: root.height - 260px; width: 420px; height: 420px; border-radius: 210px;
@@ -71,26 +72,26 @@ export component MixingAnimation inherits Rectangle {
         property <length> rr: 56px + root.sonar-a * 150px;
         x: root.cx - rr; y: root.cy - rr; width: rr * 2; height: rr * 2; border-radius: rr;
         background: transparent; border-width: 1.5px;
-        border-color: #22d3ee.with-alpha((1.0 - root.sonar-a) * 0.45);
+        border-color: Theme.accent-cyan.with-alpha((1.0 - root.sonar-a) * 0.45);
     }
     Rectangle {
         property <length> rr: 56px + root.sonar-b * 150px;
         x: root.cx - rr; y: root.cy - rr; width: rr * 2; height: rr * 2; border-radius: rr;
         background: transparent; border-width: 1.5px;
-        border-color: #2dd4bf.with-alpha((1.0 - root.sonar-b) * 0.40);
+        border-color: Theme.accent-cyan.with-alpha((1.0 - root.sonar-b) * 0.40);
     }
 
     // ── outer ring-signature ring (outline + spinning segment dots) ──
     Rectangle {
         x: root.cx - 168px; y: root.cy - 168px; width: 336px; height: 336px;
-        border-radius: 168px; border-width: 1px; border-color: #22d3ee.with-alpha(0.28);
+        border-radius: 168px; border-width: 1px; border-color: Theme.accent-cyan.with-alpha(0.28);
         background: transparent;
     }
     for i in 12 : Rectangle {
         property <angle> a: root.ring1 + i * 30deg;
         width: 6px; height: 6px; border-radius: 3px;
-        background: #22d3ee;
-        drop-shadow-blur: 5px; drop-shadow-color: #22d3ee.with-alpha(0.7);
+        background: Theme.accent-cyan;
+        drop-shadow-blur: 5px; drop-shadow-color: Theme.accent-cyan.with-alpha(0.7);
         x: root.cx + 166px * cos(a) - 3px;
         y: root.cy + 166px * sin(a) - 3px;
     }
@@ -98,14 +99,14 @@ export component MixingAnimation inherits Rectangle {
     // ── inner ring (counter-spin) ──
     Rectangle {
         x: root.cx - 120px; y: root.cy - 120px; width: 240px; height: 240px;
-        border-radius: 120px; border-width: 1px; border-color: #2dd4bf.with-alpha(0.30);
+        border-radius: 120px; border-width: 1px; border-color: Theme.accent-cyan.with-alpha(0.30);
         background: transparent;
     }
     for i in 8 : Rectangle {
         property <angle> a: 22deg - root.ring2 + i * 45deg;
         width: 5px; height: 5px; border-radius: 3px;
-        background: #2dd4bf;
-        drop-shadow-blur: 5px; drop-shadow-color: #2dd4bf.with-alpha(0.7);
+        background: Theme.accent-cyan;
+        drop-shadow-blur: 5px; drop-shadow-color: Theme.accent-cyan.with-alpha(0.7);
         x: root.cx + 118px * cos(a) - 2.5px;
         y: root.cy + 118px * sin(a) - 2.5px;
     }
@@ -121,22 +122,22 @@ export component MixingAnimation inherits Rectangle {
         y: root.cy + root.orbit-r * sin(a) - self.width / 2;
         background: real ? #eafdff : #38e0f5;
         border-width: real ? 2px : 0px;
-        border-color: #ffffff.with-alpha(0.8);
+        border-color: Theme.text-primary.with-alpha(0.8);
         drop-shadow-blur: real ? 16px : 8px;
-        drop-shadow-color: real ? #ffffff.with-alpha(0.9) : #22d3ee.with-alpha(0.65);
+        drop-shadow-color: real ? #ffffff.with-alpha(0.9) : Theme.accent-cyan.with-alpha(0.65);
     }
 
     // ── glowing core (your transaction) ──
     Rectangle {
         x: root.cx - 66px; y: root.cy - 66px; width: 132px; height: 132px; border-radius: 66px;
-        background: @radial-gradient(circle, #22d3ee.with-alpha(0.22) 0%, #8b5cf6.with-alpha(0.10) 60%, transparent 100%);
+        background: @radial-gradient(circle, Theme.accent-cyan.with-alpha(0.22) 0%, #8b5cf6.with-alpha(0.10) 60%, transparent 100%);
         drop-shadow-blur: 30px + root.glow * 20px;
-        drop-shadow-color: #22d3ee.with-alpha(0.5);
+        drop-shadow-color: Theme.accent-cyan.with-alpha(0.5);
 
         Rectangle {
             x: parent.width / 2 - 47px; y: parent.height / 2 - 47px; width: 94px; height: 94px; border-radius: 47px;
             background: @radial-gradient(circle, #123249 0%, #0a1626 100%);
-            border-width: 1.5px; border-color: #22d3ee.with-alpha(0.6 + root.glow * 0.3);
+            border-width: 1.5px; border-color: Theme.accent-cyan.with-alpha(0.6 + root.glow * 0.3);
             VerticalLayout {
                 alignment: center; spacing: 1px;
                 Text { text: "⬡"; color: #5eeaff; font-size: 28px; horizontal-alignment: center; }
@@ -152,11 +153,11 @@ export component MixingAnimation inherits Rectangle {
 
         HorizontalLayout {
             alignment: center; spacing: 8px;
-            Text { text: "Quantum Mixing"; color: #f1f5f9; font-size: 24px; font-weight: 800; }
+            Text { text: "Quantum Mixing"; color: Theme.text-primary; font-size: 24px; font-weight: 800; }
             Rectangle {
                 width: 54px; height: 22px; border-radius: 11px; y: 4px;
-                background: #22d3ee.with-alpha(0.14); border-width: 1px; border-color: #22d3ee.with-alpha(0.5);
-                Text { text: root.privacy-level; color: #22d3ee; font-size: 11px; font-weight: 700;
+                background: Theme.accent-cyan.with-alpha(0.14); border-width: 1px; border-color: Theme.accent-cyan.with-alpha(0.5);
+                Text { text: root.privacy-level; color: Theme.accent-cyan; font-size: 11px; font-weight: 700;
                        horizontal-alignment: center; vertical-alignment: center; }
             }
         }
@@ -172,7 +173,7 @@ export component MixingAnimation inherits Rectangle {
             alignment: center; spacing: 8px; padding-top: 8px;
             for i in 5 : Rectangle {
                 width: 8px; height: 8px; border-radius: 4px;
-                background: i <= 2 ? #22d3ee : #22d3ee.with-alpha(0.25);
+                background: i <= 2 ? Theme.accent-cyan : Theme.accent-cyan.with-alpha(0.25);
             }
         }
     }

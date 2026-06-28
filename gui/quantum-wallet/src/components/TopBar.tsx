@@ -570,10 +570,13 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
 
     // Update if: significant change (>1 QUG) OR stability window passed
     if (balanceDifference > 1 || timeSinceLastUpdate > balanceStabilityWindowMs) {
-      // v3.6.1-beta: Use Math.max ONLY on validated values to prevent corrupted values from persisting
-      // Filter out any corrupted values before comparing
-      const candidates = [newBalance, validStable, validCurrent].filter(v => isValidBalance(v));
-      const bestBalance = candidates.length > 0 ? Math.max(...candidates) : 0;
+      // v10.11.65: Track the LATEST validated balance, not Math.max(...).
+      // Math.max latched any transient high value (stale cache / DEX-locked / pending
+      // burst) until an absolute mining/tx event reset it — the exact 63k<->1.3M flicker.
+      // Prefer the live chain balance, fall back to cache, then last stable. All are
+      // already wallet-gated + isValidBalance-checked upstream.
+      const freshest = [validCurrent, newBalance, validStable].find(v => isValidBalance(v) && v > 0);
+      const bestBalance = freshest !== undefined ? freshest : 0;
 
       if (Math.abs(bestBalance - currentStable) > 0.0001) {
         console.log('💰 TopBar: Stable balance update:', currentStable.toFixed(4), '→', bestBalance.toFixed(4));
@@ -662,11 +665,10 @@ const TopBar = memo(function TopBar({ currentBalance, nodeId, blockHeight, peers
         console.log(isDexSwapDeduct ? '💸 TopBar: DEX deduct - setting balance to:' : isTransactionSent ? '📤 TopBar: Transaction sent - setting balance to:' : '⛏️ TopBar: Mining update - setting balance to:', balance);
         setStableBalance(balance);
       } else {
-        // v3.6.1-beta: Use Math.max only if BOTH values are valid
-        setStableBalance(prev => {
-          if (!isValidBalance(prev)) return balance;
-          return Math.max(prev, balance);
-        });
+        // v10.11.65: Trust the latest validated, wallet-gated balance directly.
+        // Was Math.max(prev, balance), which pinned transient highs (pending-reward
+        // bursts, stale SSE) and produced the persistent 207k/1.3M wrong-balance.
+        setStableBalance(balance);
       }
       lastBalanceUpdateRef.current = Date.now();
     };

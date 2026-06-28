@@ -847,16 +847,39 @@ async fn merge_p2p_response(
                     let count = missing.len();
                     info!("🔧 [NEW-WALLET IMPORT v10.9.6] Importing {} wallets absent locally (coinbase-only sync gap, peer={})",
                           count, response.block_height);
-                    let mut wb = app_state.wallet_balances.write().await;
+
+                    // v10.11.22 MEM-LEAK/FREEZE FIX (2026-05-22): do not hold
+                    // wallet_balances.write() while fsyncing one RocksDB write per
+                    // missing wallet. Large state-sync batches can contain 6000+
+                    // addresses; holding the writer lock across that loop stalls
+                    // readers and producers for 60+ seconds and lets upstream
+                    // channels grow without being drained. Keep the lock-free
+                    // persistence phase separate from the brief in-memory merge.
+                    let mut persisted = Vec::with_capacity(count);
                     for (addr, amount) in &missing {
                         if let Err(e) = app_state.storage_engine.save_wallet_balance(addr, *amount).await {
                             warn!("⚠️ [NEW-WALLET IMPORT] Failed to persist {}: {}", hex::encode(&addr[..8]), e);
                             continue;
                         }
-                        wb.insert(*addr, *amount);
+                        persisted.push((*addr, *amount));
                     }
-                    let new_total = wb.len();
-                    drop(wb);
+
+                    let added = {
+                        let mut wb = app_state.wallet_balances.write().await;
+                        let mut added = 0usize;
+                        for (addr, amount) in &persisted {
+                            if !wb.contains_key(addr) {
+                                wb.insert(*addr, *amount);
+                                added += 1;
+                            }
+                        }
+                        added
+                    };
+
+                    let new_total = {
+                        let wb = app_state.wallet_balances.read().await;
+                        wb.len()
+                    };
                     let total: u128 = {
                         let wb = app_state.wallet_balances.read().await;
                         wb.values().sum()
@@ -865,8 +888,9 @@ async fn merge_p2p_response(
                         let mut supply = app_state.total_minted_supply.write().await;
                         *supply = total;
                     }
-                    info!("✅ [NEW-WALLET IMPORT v10.9.6] Added {} missing wallets → {} total wallets", count, new_total);
-                    result.wallets_added += count;
+                    info!("✅ [NEW-WALLET IMPORT v10.11.22] Added {} missing wallets ({} persisted) → {} total wallets",
+                          added, persisted.len(), new_total);
+                    result.wallets_added += added;
                 }
             }
         } else {
@@ -972,60 +996,73 @@ async fn merge_p2p_response(
     {
         let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
         let mut qugusd_rejected = 0u64;
-        let mut balances = app_state.token_balances.write().await;
-        for (composite_key, amount_str) in &response.token_balances {
-            let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let wallet_bytes = match hex_to_32bytes(parts[0]) {
-                Some(b) => b,
-                None => continue,
-            };
-            let token_bytes = match hex_to_32bytes(parts[1]) {
-                Some(b) => b,
-                None => continue,
-            };
-            let amount: u128 = match amount_str.parse() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
+        let convergence_done = app_state.storage_engine
+            .has_migration_flag(b"migration_safe_convergence_v103_done").await;
 
-            // v8.5.6: Block QUGUSD from P2P — ghost balance propagation prevention
-            // v8.8.2: Allow QUGUSD only on FIRST state sync (before wallet bootstrap completes).
-            // v1.0.3: After convergence migration, QUGUSD is chain-derived and correct.
-            //         Ghost prevention only needed for pre-migration nodes.
-            if token_bytes == qugusd_addr && bootstrap_was_done_before_this_sync {
-                let convergence_done = app_state.storage_engine
-                    .has_migration_flag(b"migration_safe_convergence_v103_done").await;
-                if !convergence_done {
-                    qugusd_rejected += 1;
-                    continue;
+        // v10.11.23 MEM-LEAK/FREEZE FIX: do not hold token_balances.write()
+        // while checking RocksDB and fsyncing token balance writes. Large state
+        // snapshots can otherwise block readers/producers long enough for
+        // upstream queues to grow into tens of GB.
+        let candidates: Vec<(([u8; 32], [u8; 32]), u128)> = {
+            let balances = app_state.token_balances.read().await;
+            response.token_balances.iter().filter_map(|(composite_key, amount_str)| {
+                let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
+                if parts.len() != 2 {
+                    return None;
                 }
-                // Post-convergence: allow QUGUSD from peers (chain is source of truth)
-            }
+                let wallet_bytes = hex_to_32bytes(parts[0])?;
+                let token_bytes = hex_to_32bytes(parts[1])?;
+                let amount: u128 = amount_str.parse().ok()?;
 
-            let key = (wallet_bytes, token_bytes);
+                // v8.5.6: Block QUGUSD from P2P — ghost balance propagation prevention
+                // v8.8.2: Allow QUGUSD only on FIRST state sync (before wallet bootstrap completes).
+                // v1.0.3: After convergence migration, QUGUSD is chain-derived and correct.
+                //         Ghost prevention only needed for pre-migration nodes.
+                if token_bytes == qugusd_addr
+                    && bootstrap_was_done_before_this_sync
+                    && !convergence_done
+                {
+                    qugusd_rejected += 1;
+                    return None;
+                }
+
+                let key = (wallet_bytes, token_bytes);
+                if amount > 0 && !balances.contains_key(&key) {
+                    Some((key, amount))
+                } else {
+                    None
+                }
+            }).collect()
+        };
+
+        let mut persisted = Vec::with_capacity(candidates.len());
+        for ((wallet_bytes, token_bytes), amount) in candidates {
             // v8.5.2: Check BOTH in-memory HashMap AND RocksDB.
             // If we have any local record (even 0 from a swap), don't overwrite.
-            let has_local = balances.contains_key(&key);
-            let has_persisted = if !has_local {
-                // Check RocksDB — if key exists at all (even 0), trust local state
-                app_state.storage_engine.has_token_balance_key(&wallet_bytes, &token_bytes).await
-            } else {
-                true
-            };
+            if app_state.storage_engine
+                .has_token_balance_key(&wallet_bytes, &token_bytes).await
+            {
+                continue;
+            }
 
-            if !has_local && !has_persisted && amount > 0 {
-                if let Err(e) = app_state
-                    .storage_engine
-                    .save_token_balance(&wallet_bytes, &token_bytes, amount)
-                    .await
-                {
-                    warn!("🔄 [STATE SYNC] Failed to persist token balance: {}", e);
+            if let Err(e) = app_state
+                .storage_engine
+                .save_token_balance(&wallet_bytes, &token_bytes, amount)
+                .await
+            {
+                warn!("🔄 [STATE SYNC] Failed to persist token balance: {}", e);
+                continue;
+            }
+            persisted.push(((wallet_bytes, token_bytes), amount));
+        }
+
+        if !persisted.is_empty() {
+            let mut balances = app_state.token_balances.write().await;
+            for (key, amount) in persisted {
+                if !balances.contains_key(&key) {
+                    balances.insert(key, amount);
+                    result.tokens_added += 1;
                 }
-                balances.insert(key, amount);
-                result.tokens_added += 1;
             }
         }
         if qugusd_rejected > 0 {
@@ -1584,14 +1621,16 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
     if !snapshot.finality_records.is_empty() {
         info!("🔐 [STATE SYNC HTTP] Applying {} BFT-finalized balance records from peer",
               snapshot.finality_records.len());
-        let mut wb = app_state.wallet_balances.write().await;
+        // v10.11.23 MEM-LEAK/FREEZE FIX: finality records are authoritative,
+        // but persisting them can fsync per record. Do that without holding the
+        // wallet_balances writer lock, then merge in-memory in one short pass.
+        let mut persisted_records = Vec::with_capacity(snapshot.finality_records.len());
         for record in &snapshot.finality_records {
-            // Write to in-memory cache
-            wb.insert(record.wallet_address, record.new_balance);
             // Persist to RocksDB
             if let Err(e) = app_state.storage_engine.save_wallet_balance(&record.wallet_address, record.new_balance).await {
                 warn!("🔐 [STATE SYNC HTTP] Failed to persist finality record for {}: {e}",
                       hex::encode(&record.wallet_address[..8]));
+                continue;
             }
             // Persist the finality proof itself
             if let Err(e) = app_state.storage_engine.put_manifest_sync(
@@ -1599,10 +1638,18 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
                 &record.to_cbor().unwrap_or_default(),
             ).await {
                 warn!("🔐 [STATE SYNC HTTP] Failed to persist finality proof: {e}");
+                continue;
             }
-            result.wallets_added += 1;
+            persisted_records.push((record.wallet_address, record.new_balance));
         }
-        info!("✅ [STATE SYNC HTTP] Applied {} BFT-finalized balances", snapshot.finality_records.len());
+        if !persisted_records.is_empty() {
+            let mut wb = app_state.wallet_balances.write().await;
+            for (wallet_address, new_balance) in &persisted_records {
+                wb.insert(*wallet_address, *new_balance);
+            }
+            result.wallets_added += persisted_records.len();
+        }
+        info!("✅ [STATE SYNC HTTP] Applied {} BFT-finalized balances", persisted_records.len());
     }
 
     // ---- Merge token balances (add-only for NEW tokens, never overwrite existing) ----
@@ -1611,41 +1658,65 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
     {
         let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
         let mut qugusd_rejected = 0u64;
-        let mut balances = app_state.token_balances.write().await;
-        for (composite_key, amount_str) in &snapshot.token_balances {
-            let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
-            if parts.len() != 2 { continue; }
-            let wallet_bytes = match hex_to_32bytes(parts[0]) { Some(b) => b, None => continue };
-            let token_bytes = match hex_to_32bytes(parts[1]) { Some(b) => b, None => continue };
-            let amount: u128 = match amount_str.parse() { Ok(a) => a, Err(_) => continue };
+        let convergence_done = app_state.storage_engine
+            .has_migration_flag(b"migration_safe_convergence_v103_done").await;
 
-            // v8.5.6: Block QUGUSD from HTTP state sync — ghost balance propagation prevention
-            // v1.0.3: After convergence migration, QUGUSD is chain-derived. Allow from peers.
-            if token_bytes == qugusd_addr {
-                let convergence_done = app_state.storage_engine
-                    .has_migration_flag(b"migration_safe_convergence_v103_done").await;
-                if !convergence_done {
+        // v10.11.23 MEM-LEAK/FREEZE FIX: same snapshot-pass/persist/merge
+        // pattern as the P2P token path above. Never hold token_balances.write()
+        // across RocksDB existence checks or per-token persistence.
+        let candidates: Vec<(([u8; 32], [u8; 32]), u128)> = {
+            let balances = app_state.token_balances.read().await;
+            snapshot.token_balances.iter().filter_map(|(composite_key, amount_str)| {
+                let parts: Vec<&str> = composite_key.splitn(2, '_').collect();
+                if parts.len() != 2 { return None; }
+                let wallet_bytes = hex_to_32bytes(parts[0])?;
+                let token_bytes = hex_to_32bytes(parts[1])?;
+                let amount: u128 = amount_str.parse().ok()?;
+
+                // v8.5.6: Block QUGUSD from HTTP state sync — ghost balance propagation prevention
+                // v1.0.3: After convergence migration, QUGUSD is chain-derived. Allow from peers.
+                if token_bytes == qugusd_addr && !convergence_done {
                     qugusd_rejected += 1;
-                    continue;
+                    return None;
                 }
+
+                let key = (wallet_bytes, token_bytes);
+                if amount > 0 && !balances.contains_key(&key) {
+                    Some((key, amount))
+                } else {
+                    None
+                }
+            }).collect()
+        };
+
+        let mut persisted = Vec::with_capacity(candidates.len());
+        for ((wallet_bytes, token_bytes), amount) in candidates {
+            if app_state.storage_engine
+                .get_token_balance(&wallet_bytes, &token_bytes).await
+                .unwrap_or(0) > 0
+            {
+                continue;
             }
 
-            let key = (wallet_bytes, token_bytes);
-            let has_local = balances.contains_key(&key);
-            let has_persisted = if !has_local {
-                app_state.storage_engine.get_token_balance(&wallet_bytes, &token_bytes).await.unwrap_or(0) > 0
-            } else {
-                true
-            };
+            if let Err(e) = app_state.storage_engine
+                .save_token_balance(&wallet_bytes, &token_bytes, amount).await
+            {
+                warn!("🔄 [STATE SYNC HTTP] Failed to persist token balance: {}", e);
+                continue;
+            }
+            persisted.push(((wallet_bytes, token_bytes), amount));
+        }
 
-            if !has_local && !has_persisted && amount > 0 {
-                if let Err(e) = app_state.storage_engine.save_token_balance(&wallet_bytes, &token_bytes, amount).await {
-                    warn!("🔄 [STATE SYNC HTTP] Failed to persist token balance: {}", e);
+        if !persisted.is_empty() {
+            let mut balances = app_state.token_balances.write().await;
+            for (key, amount) in persisted {
+                if !balances.contains_key(&key) {
+                    balances.insert(key, amount);
+                    result.tokens_added += 1;
                 }
-                balances.insert(key, amount);
-                result.tokens_added += 1;
             }
         }
+
         if qugusd_rejected > 0 {
             info!("🛡️ [STATE SYNC HTTP v8.5.6] Rejected {} QUGUSD token balances from peer (ghost prevention)", qugusd_rejected);
         }

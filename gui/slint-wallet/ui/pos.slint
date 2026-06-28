@@ -170,7 +170,7 @@ export component PosScreen inherits Rectangle {
             height: 52px;
             border-radius: Theme.radius-md;
             background: root.amount-text != ""
-                ? (gen-touch.pressed ? #0891b2 : (gen-touch.has-hover ? #07a3c4 : Theme.accent-cyan))
+                ? (gen-touch.pressed ? Theme.accent-cyan : (gen-touch.has-hover ? Theme.accent-cyan : Theme.accent-cyan))
                 : Theme.bg-hover;
             drop-shadow-blur: root.amount-text != "" ? (gen-touch.pressed ? 2px : 10px) : 0px;
             drop-shadow-offset-y: gen-touch.pressed ? 0px : 3px;
@@ -416,7 +416,7 @@ export component PosScreen inherits Rectangle {
             Rectangle {
                 height: 48px;
                 border-radius: Theme.radius-md;
-                background: new-touch.pressed ? #0891b2 : (new-touch.has-hover ? #07a3c4 : Theme.accent-cyan);
+                background: new-touch.pressed ? Theme.accent-cyan : (new-touch.has-hover ? Theme.accent-cyan : Theme.accent-cyan);
                 drop-shadow-blur: new-touch.pressed ? 2px : 8px;
                 drop-shadow-offset-y: new-touch.pressed ? 0px : 2px;
                 drop-shadow-color: Theme.accent-cyan.with-alpha(0.3);
@@ -432,7 +432,7 @@ export component PosScreen inherits Rectangle {
 
                 Text {
                     text: "New Payment Request";
-                    color: white;
+                    color: Theme.text-primary;
                     font-size: Theme.font-md;
                     font-weight: 600;
                     vertical-alignment: center;

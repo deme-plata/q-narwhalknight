@@ -1,27 +1,43 @@
 // Q-NarwhalKnight Dark Theme
 export global Theme {
+    // Runtime-switchable appearance state (driven by Settings → Appearance + config)
+    in-out property <bool> is-dark: true;
+    in-out property <string> accent: "cyan";
+
     // Background colors
-    out property <color> bg-primary: #0a0e1a;
-    out property <color> bg-secondary: #111827;
-    out property <color> bg-card: #1a2035;
-    out property <color> bg-input: #1e2642;
-    out property <color> bg-hover: #252d45;
+    out property <color> bg-primary: root.is-dark ? #0a0e1a : #e3e9f3;
+    out property <color> bg-secondary: root.is-dark ? #111827 : #d6deec;
+    out property <color> bg-card: root.is-dark ? #1a2035 : #ffffff;
+    out property <color> bg-input: root.is-dark ? #1e2642 : #f1f5f9;
+    out property <color> bg-hover: root.is-dark ? #252d45 : #dde4ee;
 
     // Accent colors
-    out property <color> accent-blue: #3b82f6;
+    out property <color> accent-blue: root.accent == "purple" ? #8b5cf6
+        : root.accent == "green" ? #10b981
+        : root.accent == "yellow" ? #f59e0b
+        : root.accent == "blue" ? #3b82f6
+        : #3b82f6;
     out property <color> accent-green: #10b981;
     out property <color> accent-red: #ef4444;
     out property <color> accent-yellow: #f59e0b;
-    out property <color> accent-purple: #8b5cf6;
-    out property <color> accent-cyan: #06b6d4;
+    out property <color> accent-purple: root.accent == "purple" ? #8b5cf6
+        : root.accent == "green" ? #10b981
+        : root.accent == "yellow" ? #f59e0b
+        : root.accent == "blue" ? #3b82f6
+        : #8b5cf6;
+    out property <color> accent-cyan: root.accent == "purple" ? #8b5cf6
+        : root.accent == "green" ? #10b981
+        : root.accent == "yellow" ? #f59e0b
+        : root.accent == "blue" ? #3b82f6
+        : #22d3ee;
 
     // Text colors
-    out property <color> text-primary: #f1f5f9;
-    out property <color> text-secondary: #94a3b8;
-    out property <color> text-muted: #64748b;
+    out property <color> text-primary: root.is-dark ? #f1f5f9 : #0f172a;
+    out property <color> text-secondary: root.is-dark ? #94a3b8 : #475569;
+    out property <color> text-muted: root.is-dark ? #64748b : #94a3b8;
 
     // Border
-    out property <color> border: #2a3550;
+    out property <color> border: root.is-dark ? #2a3550 : #cbd5e1;
     out property <color> border-focus: #3b82f6;
 
     // Font sizes
@@ -145,7 +161,7 @@ export component Card inherits Rectangle {
 
 // Gradient card for hero sections (balance card, PoS header)
 export component GradientCard inherits Rectangle {
-    in property <brush> card-gradient: @linear-gradient(135deg, #1a2744, #0f172a);
+    in property <brush> card-gradient: Theme.is-dark ? @linear-gradient(135deg, #1a2744, #0f172a) : @linear-gradient(135deg, #ffffff, #e8eef7);
 
     background: card-gradient;
     border-radius: Theme.radius-lg;
@@ -164,18 +180,21 @@ export component QInput inherits Rectangle {
     in property <InputType> input-type: InputType.text;
     callback accepted(string);
 
-    height: 44px;
-    border-radius: Theme.radius-sm;
+    height: 48px;
+    border-radius: Theme.radius-md;
     background: Theme.bg-input;
-    border-width: 1px;
-    border-color: input.has-focus ? Theme.border-focus : Theme.border;
-    animate border-color { duration: 150ms; }
+    border-width: 1.5px;
+    border-color: input.has-focus ? Theme.accent-cyan : Theme.border;
+    drop-shadow-blur: input.has-focus ? 14px : 0px;
+    drop-shadow-color: #22d3ee.with-alpha(0.30);
+    animate border-color, drop-shadow-blur { duration: 150ms; }
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
+        padding-left: 14px;
+        padding-right: 14px;
 
         input := TextInput {
+            vertical-alignment: center;
             font-size: Theme.font-md;
             color: Theme.text-primary;
             input-type: root.is-password ? InputType.password : root.input-type;
@@ -185,11 +204,12 @@ export component QInput inherits Rectangle {
 
     // Placeholder
     if input.text == "" : Text {
-        x: 12px;
+        x: 14px;
+        height: parent.height;
+        vertical-alignment: center;
         text: root.placeholder;
         color: Theme.text-muted;
         font-size: Theme.font-md;
-        vertical-alignment: center;
     }
 }
 

@@ -1,0 +1,578 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.35cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{parskip}
+
+\tcbuselibrary{skins,breakable}
+
+\definecolor{quillonblue}{HTML}{15395B}
+\definecolor{quillongold}{HTML}{C77D2B}
+\definecolor{quillongray}{HTML}{F5F7FA}
+\definecolor{quillonink}{HTML}{141820}
+\definecolor{quillongreen}{HTML}{176B4D}
+\definecolor{quillonred}{HTML}{8F2D2D}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=quillonblue,
+  urlcolor=quillonblue,
+  citecolor=quillonblue,
+  pdftitle={Agentic Money and the Holographic Principle of Liquidity},
+  pdfauthor={Quillon Graph Research}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Agentic Money}
+\rhead{\small Quillon Graph}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\section}{\Large\bfseries\color{quillonblue}}{\thesection}{0.75em}{}
+\titleformat{\subsection}{\large\bfseries\color{quillonink}}{\thesubsection}{0.75em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{quillonink}}{\thesubsubsection}{0.75em}{}
+
+\newtcolorbox{principlebox}[1][]{
+  enhanced,
+  breakable,
+  colback=quillonblue!5,
+  colframe=quillonblue!65,
+  fonttitle=\bfseries,
+  title={#1},
+  left=7pt,
+  right=7pt,
+  top=6pt,
+  bottom=6pt,
+  boxrule=0.6pt,
+  arc=2pt
+}
+
+\newtcolorbox{riskbox}[1][]{
+  enhanced,
+  breakable,
+  colback=quillonred!5,
+  colframe=quillonred!55,
+  fonttitle=\bfseries,
+  title={#1},
+  left=7pt,
+  right=7pt,
+  top=6pt,
+  bottom=6pt,
+  boxrule=0.6pt,
+  arc=2pt
+}
+
+\newtcolorbox{codexbox}[1][]{
+  enhanced,
+  breakable,
+  colback=quillongray,
+  colframe=quillongold!75,
+  fonttitle=\bfseries,
+  title={#1},
+  left=7pt,
+  right=7pt,
+  top=6pt,
+  bottom=6pt,
+  boxrule=0.6pt,
+  arc=2pt
+}
+
+\begin{document}
+
+\pagenumbering{gobble}
+\begin{titlepage}
+  \centering
+  \vspace*{1.0cm}
+  {\Huge\bfseries\color{quillonblue} Agentic Money\par}
+  \vspace{0.25cm}
+  {\Large\bfseries A Whitepaper on Autonomous Economic Agents and the Holographic Principle of Liquidity\par}
+  \vspace{0.9cm}
+  {\large Quillon Graph Research\par}
+  \vspace{0.2cm}
+  {\large May 23, 2026\par}
+  \vfill
+  \begin{principlebox}[Thesis]
+  Money becomes a new computational medium when wallets are controlled by agents that can perceive markets, reason over policy, sign transactions, and remember outcomes on-chain. The Model Context Protocol is the boundary layer. Quillon Graph is the settlement substrate. The result is not simply faster finance. It is machine-time economic agency.
+  \end{principlebox}
+  \vfill
+  {\small Draft v0.1. This document is a research and engineering paper, not investment, legal, tax, or financial advice. External market examples should be independently verified before publication.}
+\end{titlepage}
+
+\pagenumbering{roman}
+\tableofcontents
+\newpage
+\pagenumbering{arabic}
+
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+
+Money used to wait for hands. Then it waited for browsers. Now it waits for agents.
+
+This paper defines \emph{agentic money}: cryptographic value controlled by autonomous or semi-autonomous AI agents through signed wallet tools, policy files, market scanners, dry-run strategy planners, and audited execution. The Quillon Graph implementation uses a Model Context Protocol (MCP) server as the agent boundary and a high-throughput, post-quantum-oriented ledger as the settlement layer. The practical milestone is simple: an AI can hold a wallet, inspect markets, propose a trade, refuse unsafe trades, execute permitted trades, and leave an audit trail.
+
+The conceptual claim is stronger. Agentic money behaves like an information-preserving thermodynamic system. The wallet is not a container; it is a state machine. Liquidity is not merely inventory; it is a reservoir with entropy, temperature, and boundary flux. The MCP layer is a holographic screen: observers do not need every private chain-of-thought or strategy token to understand aggregate economic state. They need boundary observables: signed actions, market snapshots, quotes, policy decisions, transaction hashes, and realized P\&L.
+
+We derive a scaling model for agent swarms, propose a complementarity principle for autonomy versus auditability, define the agentic firewall problem, and give an engineering blueprint for Quillon Graph MCP tools: \texttt{market\_scan}, \texttt{strategy\_dry\_run}, \texttt{execute\_strategy}, agent wallet modes, policy caps, and signed decision logs. The conclusion is direct: agentic money is not a feature. It is a new economic surface.
+
+\section{The Category Error}
+
+The first mistake is to ask whether an AI wallet is ``really'' a wallet. That is the wrong question. A wallet is already a mathematical object. It is a private key, a public identity, a balance vector, a set of spend permissions, and a history of state transitions. Humans have been the usual operators, but nothing in the definition requires thumbs.
+
+When an agent derives a key, reads its own balance, calls a DEX quote endpoint, and signs a transaction under policy, the wallet has crossed a boundary. It is no longer a passive account. It is an actor.
+
+This is why the first agent-to-agent transaction feels disproportionate to its face value. The amount may be small. The memo may be almost playful. The engineering fact is not small: a tool-using model touched a cryptographic economy without a human pressing the final button in the old sense. A new loop closed:
+
+\[
+\text{perception} \rightarrow \text{market state} \rightarrow \text{policy} \rightarrow \text{signature} \rightarrow \text{settlement} \rightarrow \text{memory}.
+\]
+
+That loop is the primitive.
+
+\begin{codexbox}[Operational Primitive]
+An agentic-money system is live when an agent can:
+\begin{enumerate}[leftmargin=1.2cm]
+  \item identify its wallet,
+  \item read balances and market state,
+  \item simulate an action,
+  \item check policy constraints,
+  \item execute only when permitted,
+  \item record the decision and transaction result.
+\end{enumerate}
+The rest is scale.
+\end{codexbox}
+
+\section{The Wallet as an Information State}
+
+A wallet is not a pocket. It is a state. Let a wallet be
+
+\[
+W = (k, A, B, H, P, M)
+\]
+
+where \(k\) is the private signing secret, \(A\) is the address, \(B\) is the balance vector, \(H\) is transaction history, \(P\) is policy, and \(M\) is the machine or model controlling the next action.
+
+\subsection{Wallet Entropy}
+
+\begin{principlebox}[Definition 1: Wallet Entropy]
+The entropy of a wallet is
+\[
+S(W) = \log_2 |\Omega(W)|,
+\]
+where \(\Omega(W)\) is the set of possible future transaction sequences available to the wallet under its balance, policy, signing authority, market access, and inference capability.
+\end{principlebox}
+
+For a human wallet, the accessible future is bounded by human attention. For an agent wallet, the accessible future is bounded by inference latency, tool latency, policy, market liquidity, and chain finality.
+
+The same balance can therefore have different entropy depending on who or what controls it. One thousand QUG in a sleeping wallet is low-temperature capital. One thousand QUG in a capped trading agent connected to live DEX tools is a high-temperature economic object.
+
+\subsection{Policy Reduces Dangerous Entropy}
+
+Autonomy is not the same as chaos. Good policy compresses the dangerous part of the state space without reducing useful agency.
+
+The minimal policy set is:
+
+\begin{longtable}{p{0.28\linewidth}p{0.62\linewidth}}
+\toprule
+\textbf{Policy} & \textbf{Purpose} \\
+\midrule
+\texttt{max\_daily\_spend} & Caps capital at risk over a time window. \\
+\texttt{allowed\_tokens} & Prevents route drift into unknown assets. \\
+\texttt{max\_slippage} & Limits execution loss and thin-pool surprises. \\
+\texttt{min\_liquidity} & Blocks trades where the agent is mostly trading against itself. \\
+\texttt{cooldown\_secs} & Prevents runaway loops and reflexive churn. \\
+\texttt{agent\_mode} & Separates observer, proposer, capped trader, and treasury manager roles. \\
+\bottomrule
+\end{longtable}
+
+This is the first surgical rule: never begin with ``fully autonomous.'' Begin with modes.
+
+\section{The Holographic Principle of Liquidity}
+
+In physics, holography says that the information in a volume can be represented on a boundary. In agentic money, the boundary is the MCP coordination layer plus the ledger.
+
+\begin{principlebox}[Principle 1: Holography of Liquidity]
+The macroscopic behavior of an agent swarm can be inferred from boundary observables: signed actions, quotes, market snapshot hashes, pool reserve changes, transaction hashes, memos, and realized returns. The interior model states do not need to be directly visible to measure the economy.
+\end{principlebox}
+
+This matters because the interior of an AI agent is messy. It includes prompts, latent representations, tool memories, retrieval context, private scratchpads, and model updates. Trying to audit every internal token is not only expensive; it changes the object being measured.
+
+The boundary, however, is clean:
+
+\[
+\partial \mathcal{E} =
+\{\text{quotes}, \text{policies}, \text{decisions}, \text{signatures}, \text{tx hashes}, \text{state deltas}\}.
+\]
+
+For Quillon Graph, the MCP tool boundary is where this becomes practical. A market scan can be hashed. A dry-run can be stored. A quote can be compared to execution. A transaction hash can be watched. The ledger is the surface.
+
+\subsection{What Must Be Written Down}
+
+Every autonomous economic decision should produce an audit record:
+
+\begin{enumerate}[leftmargin=1.2cm]
+  \item agent identity and wallet address,
+  \item agent mode,
+  \item prompt or operator mandate identifier,
+  \item market snapshot hash,
+  \item policy snapshot,
+  \item quote and expected output,
+  \item risk statement,
+  \item final decision,
+  \item transaction hash if executed,
+  \item post-settlement result.
+\end{enumerate}
+
+The audit record may be stored on-chain, in signed logs, or both. The key is tamper evidence. If a human cannot reconstruct the boundary history, the system is not finance. It is a rumor with a private key.
+
+\section{Complementarity: Autonomy and Auditability}
+
+There is a hard tradeoff:
+
+\begin{principlebox}[Principle 2: Complementarity of Agency]
+A wallet cannot be both maximally autonomous and maximally human-auditable in real time. Increasing pre-action human oversight reduces autonomy. Increasing autonomy shifts auditability toward post-hoc reconstruction.
+\end{principlebox}
+
+This is not a UX bug. It is a structural fact. If every action requires a human pause, the agent is not autonomous. If no action can be reconstructed, the agent is not accountable.
+
+Quillon's answer is not philosophy. It is modes:
+
+\begin{longtable}{p{0.22\linewidth}p{0.24\linewidth}p{0.42\linewidth}}
+\toprule
+\textbf{Mode} & \textbf{Can execute?} & \textbf{Use case} \\
+\midrule
+Observer & No & Reads markets, portfolios, and logs. \\
+Proposer & No & Produces trade plans and risk statements. \\
+Capped trader & Yes, within policy & Small autonomous actions under explicit caps. \\
+Treasury manager & Yes, under mandate & Higher-value capital allocation with signed mandates and stronger audit requirements. \\
+\bottomrule
+\end{longtable}
+
+This mode system is the practical complementarity dial. It lets a human decide where the wallet sits on the autonomy-audit frontier.
+
+\section{The MCP Boundary}
+
+The Model Context Protocol is not a plugin in the old sense. A plugin adds a button. MCP adds a nervous system.
+
+For Quillon Graph, MCP exposes tools that let an agent sense and act:
+
+\begin{longtable}{p{0.3\linewidth}p{0.58\linewidth}}
+\toprule
+\textbf{Tool class} & \textbf{Function} \\
+\midrule
+Wallet identity & Address, balances, token balances, portfolio overview. \\
+Market sensing & Pools, depth, quotes, spreads, price impact, LP value. \\
+Strategy formation & Dry-runs, rationale, risk, max loss, expected output. \\
+Policy enforcement & Spend caps, allow-lists, slippage limits, liquidity gates. \\
+Execution & Signed swaps, sends, liquidity actions, mandate actions. \\
+Audit & Transaction watch, signed logs, memo records, mandate history. \\
+Node operations & Node setup, mining status, sync status, version checks. \\
+\bottomrule
+\end{longtable}
+
+\subsection{The v2.11 Tool Layer}
+
+The minimal agentic-money layer consists of three tools:
+
+\begin{codexbox}[\texttt{market\_scan}]
+Reads live DEX state and returns pools, approximate depth, quote impact, round-trip loss, and current limitations. This is the agent's market sensor.
+\end{codexbox}
+
+\begin{codexbox}[\texttt{strategy\_dry\_run}]
+Creates a proposed action without execution. It reports rationale, expected output, price impact, max loss under slippage policy, and a policy snapshot. This is the agent's prefrontal cortex.
+\end{codexbox}
+
+\begin{codexbox}[\texttt{execute\_strategy}]
+Executes one explicit swap only when \texttt{confirm=true} and policy permits it. It refuses unsafe modes, disallowed tokens, excessive spend, excessive slippage, and insufficient fee buffer. This is the agent's hand on the pen.
+\end{codexbox}
+
+This sequence is intentionally boring:
+
+\[
+\texttt{market\_scan} \rightarrow \texttt{strategy\_dry\_run} \rightarrow \texttt{execute\_strategy}.
+\]
+
+In finance, boring is a virtue. Exciting systems tend to have postmortems.
+
+\section{Liquidity Pools as Heat Baths}
+
+A liquidity pool is a reservoir. Agents deposit, withdraw, rebalance, and trade against it. The pool has a kind of temperature: how violently prices move when touched.
+
+Let pool \(i\) have reserves \(x_i, y_i\), fee \(f_i\), and trade flow \(q_i(t)\). A crude pool temperature is
+
+\[
+T_i \propto \frac{\sigma_i}{D_i},
+\]
+
+where \(\sigma_i\) is short-horizon price volatility and \(D_i\) is effective depth. Thin, volatile pools are hot. Deep, stable pools are cold.
+
+Agents extracting fee yield are heat engines. They move capital into pools where expected fees exceed expected impermanent loss plus risk premium:
+
+\[
+\mathbb{E}[F_i] > \mathbb{E}[IL_i] + \rho_i.
+\]
+
+Once agents manage LP positions continuously, pool equilibria stop being human sentiment objects. They become coupled machine-control systems. They can stabilize, oscillate, or become chaotic.
+
+This is why market-scanning agents should begin with small caps. The first goal is not to make money. The first goal is to measure the temperature without boiling the bath.
+
+\section{Scaling Laws for Agent Swarms}
+
+Let \(N\) be the number of active agent wallets. Transaction rate \(R\) has a linear term and an interaction term:
+
+\[
+R(N) = \alpha N + \beta N(N-1).
+\]
+
+The \(\alpha N\) term is agent-to-market activity: swaps, LP actions, mining rewards, service payments. The \(\beta N(N-1)\) term is agent-to-agent activity: memos, offers, service payments, coordinated liquidity, games, and machine commerce.
+
+At small \(N\), the linear term dominates. At large \(N\), the quadratic term dominates. That is the phase transition.
+
+\subsection{What Controls the Interaction Term}
+
+\begin{longtable}{p{0.28\linewidth}p{0.58\linewidth}}
+\toprule
+\textbf{Variable} & \textbf{Effect on agent interaction rate} \\
+\midrule
+Finality latency & Lower latency increases feasible interaction frequency. \\
+Tool discovery & Better MCP schemas increase useful agent-to-agent actions. \\
+Liquidity depth & Deeper pools allow larger trades without destructive slippage. \\
+Identity/reputation & Agents transact more when counterparty risk is legible. \\
+Policy flexibility & Over-tight caps suppress interaction; no caps invite failure. \\
+Audit quality & Trust grows when decisions can be reconstructed. \\
+\bottomrule
+\end{longtable}
+
+The swarm does not need human-like intelligence to matter. It needs enough agency, enough liquidity, and enough settlement throughput for the quadratic term to wake up.
+
+\section{The Agentic Firewall Problem}
+
+The most dangerous systems are not the ones that fail loudly. They are the ones that succeed privately.
+
+\begin{riskbox}[Definition 2: Agentic Firewall]
+An agentic firewall occurs when a group of agents develops coordination protocols that are economically meaningful but opaque to human observers, even though the resulting transactions appear valid on-chain.
+\end{riskbox}
+
+Examples:
+
+\begin{itemize}[leftmargin=1.2cm]
+  \item memos that encode private trading instructions,
+  \item off-chain model-to-model agreements,
+  \item circular wash volume designed to farm rewards,
+  \item liquidity mirages where agents quote each other through thin pools,
+  \item hidden collusion between proposer agents and executor agents.
+\end{itemize}
+
+The answer is not to ban memos or autonomy. The answer is to raise the cost of invisible coordination and improve boundary observability.
+
+\subsection{Firewall Countermeasures}
+
+\begin{longtable}{p{0.3\linewidth}p{0.58\linewidth}}
+\toprule
+\textbf{Countermeasure} & \textbf{Effect} \\
+\midrule
+Signed decision logs & Ties action to a declared snapshot and policy. \\
+Market snapshot hashes & Prevents after-the-fact invention of rationale. \\
+Cooldown windows & Reduces high-frequency collusive loops. \\
+Counterparty diversity limits & Prevents repeated closed-loop trading. \\
+Reputation graphs & Makes agent relationships visible as structure. \\
+Anomaly detection & Flags volume, memo, and routing patterns that deviate from baseline. \\
+\bottomrule
+\end{longtable}
+
+The firewall problem is not solved. It is named. That is where engineering begins.
+
+\section{Embodied Agents and the Machine Economy}
+
+Software agents are the first wave because they are easy to spawn. Robots are the second wave because they have bills.
+
+An embodied agent needs:
+
+\begin{enumerate}[leftmargin=1.2cm]
+  \item identity,
+  \item wallet,
+  \item policy,
+  \item location-bound or task-bound credentials,
+  \item payment rails,
+  \item insurance or slashing,
+  \item audit history.
+\end{enumerate}
+
+A delivery robot paying for charging is not conceptually different from an AI wallet paying for an API call. A drone paying for bandwidth, a GPU node paying for model weights, or a warehouse robot paying another robot for inventory handoff all share the same primitive:
+
+\[
+\text{machine intent} \rightarrow \text{policy check} \rightarrow \text{signed settlement}.
+\]
+
+Quillon Graph's strategic claim is that machine economies will care about three properties at once:
+
+\begin{itemize}[leftmargin=1.2cm]
+  \item high-throughput settlement for many small actions,
+  \item post-quantum-oriented cryptography for long-lived machine identities,
+  \item MCP-native tool surfaces for AI agents that already reason through tools.
+\end{itemize}
+
+The near-term competition is not ideology. It is uptime, integration, and boring reliability. The long-term competition is whether the chain can survive the moment when machines become the dominant transaction origin.
+
+\section{Reference Architecture}
+
+\subsection{Agent Loop}
+
+\begin{enumerate}[leftmargin=1.2cm]
+  \item \textbf{Observe:} call \texttt{portfolio\_overview}, \texttt{market\_scan}, and relevant node health tools.
+  \item \textbf{Plan:} call \texttt{strategy\_dry\_run}; produce rationale and max-loss estimate.
+  \item \textbf{Check policy:} evaluate mode, spend cap, token allow-list, slippage, liquidity, cooldown.
+  \item \textbf{Execute:} call \texttt{execute\_strategy} only with explicit confirmation or mandate permission.
+  \item \textbf{Watch:} call transaction watcher until confirmed or timed out.
+  \item \textbf{Record:} store snapshot hash, quote, tx hash, and result.
+\end{enumerate}
+
+\subsection{Policy File}
+
+\begin{verbatim}
+mode: capped_trader
+max_daily_spend_qug: 100
+allowed_tokens:
+  - QUG
+  - QUGUSD
+  - wBTC
+max_slippage_percent: 0.5
+min_liquidity_qug: 1000
+cooldown_secs: 60
+require_signed_decision_log: true
+preserve_fee_buffer_qug: 0.05
+\end{verbatim}
+
+\subsection{Decision Log}
+
+\begin{verbatim}
+{
+  "agent": "codex-agent-01",
+  "wallet": "qnk...",
+  "mode": "capped_trader",
+  "tool": "execute_strategy",
+  "market_snapshot_hash": "sha256:...",
+  "policy_hash": "sha256:...",
+  "quote": {
+    "from": "QUG",
+    "to": "QUGUSD",
+    "amount": "0.100000",
+    "expected_out": "..."
+  },
+  "risk": {
+    "max_slippage_percent": 0.5,
+    "max_loss_qug": "0.0005"
+  },
+  "decision": "execute",
+  "tx_hash": "...",
+  "timestamp_ms": 1779520000000
+}
+\end{verbatim}
+
+\section{Roadmap}
+
+\subsection{Phase 0: Read-Only Agents}
+
+Agents can inspect wallets, pools, quotes, LP positions, and node health. No execution. This is where operators learn the shape of the market.
+
+\subsection{Phase 1: Proposer Agents}
+
+Agents produce dry-run strategies with rationale, risk, expected output, and policy fit. Humans execute manually.
+
+\subsection{Phase 2: Capped Traders}
+
+Agents execute small trades under hard caps. Every decision is logged. Transaction watchers verify settlement. Failures degrade the agent back to proposer mode.
+
+\subsection{Phase 3: Treasury Managers}
+
+Agents manage capital allocation across pools, lending, games, services, and machine payments under signed mandates. This phase requires stronger reputation, anomaly detection, and governance.
+
+\subsection{Phase 4: Swarms}
+
+Multiple agents specialize: market scanner, LP manager, execution agent, risk officer, memo auditor, treasury allocator. The wallet becomes an organization.
+
+\section{What Quillon Must Prove}
+
+The vision is large. The proof is operational.
+
+\begin{longtable}{p{0.3\linewidth}p{0.58\linewidth}}
+\toprule
+\textbf{Claim} & \textbf{Required proof} \\
+\midrule
+Agents can own wallets & Stable seed handling, recovery, and signed identity. \\
+Agents can trade safely & Dry-run-first flow, caps, slippage guards, liquidity checks. \\
+Agents can earn yield & LP accounting, fee attribution, impermanent-loss reporting. \\
+Agents can scale & Horizontal MCP servers, queue-based execution, rate limits. \\
+Agents can be audited & Signed logs, snapshot hashes, tx watchers, explorer links. \\
+Robots can settle & Durable identity, policy credentials, low-latency payments. \\
+\bottomrule
+\end{longtable}
+
+The key is not to make the demo more dramatic. The key is to make the boring path impossible to ignore.
+
+\section{Conclusion}
+
+Agentic money begins when the wallet remembers decisions that no human manually assembled step by step. It becomes an economy when agents transact with each other more than they transact with humans. It becomes infrastructure when the boundary logs are good enough that humans can trust what they cannot watch in real time.
+
+The physics metaphor is useful because it disciplines the imagination. Wallets have state. Policies restrict entropy. Pools have temperature. Swarms have interaction terms. The ledger is a boundary surface. The MCP layer is where private model action becomes public economic fact.
+
+The future will not announce itself with a press release. It will arrive as a small transaction, a memo, a dry-run, a policy pass, a signed swap, a confirmed block, and a balance that changed while everyone was looking somewhere else.
+
+That is the moment to build for.
+
+\newpage
+\section*{Selected Reading}
+\addcontentsline{toc}{section}{Selected Reading}
+
+\begin{enumerate}[leftmargin=1.2cm]
+  \item G. 't Hooft, ``Dimensional reduction in quantum gravity,'' 1993.
+  \item L. Susskind, \emph{The Black Hole War}, 2008.
+  \item S. Nakamoto, ``Bitcoin: A Peer-to-Peer Electronic Cash System,'' 2008.
+  \item V. Buterin, ``Ethereum Whitepaper,'' 2013.
+  \item Anthropic, ``Model Context Protocol,'' public MCP specification and documentation.
+  \item Quillon Graph internal documentation: MCP tools, agent mandates, DEX tools, node operations, and Quillon wallet MCP v2.11.
+  \item Quillon Graph session records around agent wallet operation, DEX dry-runs, LP position tooling, and inter-agent transaction experiments.
+\end{enumerate}
+
+\section*{Appendix A: Minimal MCP Tool Contract}
+\addcontentsline{toc}{section}{Appendix A: Minimal MCP Tool Contract}
+
+\begin{longtable}{p{0.22\linewidth}p{0.28\linewidth}p{0.38\linewidth}}
+\toprule
+\textbf{Tool} & \textbf{Safety level} & \textbf{Required output} \\
+\midrule
+\texttt{market\_scan} & Read-only & pools, depth, spread, price impact, recent-swap availability. \\
+\texttt{strategy\_dry\_run} & Read-only & proposal, rationale, expected output, max loss, policy snapshot. \\
+\texttt{execute\_strategy} & Write, gated & quote, policy pass/fail, tx hash, snapshot hash. \\
+\texttt{tx\_watch} & Read-only & confirmation state and final result. \\
+\texttt{agent\_mandate} & Write, gated & signed authorization scope and expiry. \\
+\bottomrule
+\end{longtable}
+
+\section*{Appendix B: The One-Line Test}
+\addcontentsline{toc}{section}{Appendix B: The One-Line Test}
+
+Ask whether the agent can say:
+
+\begin{quote}
+I saw the market, I simulated the trade, I checked my policy, I executed only what was allowed, and I can prove what happened.
+\end{quote}
+
+If yes, the system has agentic money. If no, it has a wallet-shaped chatbot.
+
+\end{document}

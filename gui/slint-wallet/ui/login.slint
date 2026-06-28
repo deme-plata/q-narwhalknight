@@ -17,7 +17,7 @@ component ActionCard inherits Rectangle {
     background: selected
         ? root.accent.with-alpha(0.16)
         : (touch.has-hover ? #16243f.with-alpha(0.80)
-           : (root.featured ? #13283f.with-alpha(0.68) : #101c31.with-alpha(0.56)));
+           : (root.featured ? #13283f.with-alpha(0.68) : Theme.bg-secondary.with-alpha(0.56)));
     border-width: 1px;
     border-color: (selected || touch.has-hover)
         ? root.accent.with-alpha(0.70)
@@ -121,6 +121,10 @@ export component LoginScreen inherits Rectangle {
     in-out property <string> mnemonic-text: "";
     in-out property <string> server-url: "https://quillon.xyz";
     in-out property <string> generated-mnemonic: "";
+    in-out property <string> create-password: "";
+    in property <bool> has-locked-wallet: false;
+    in-out property <string> unlock-password: "";
+    callback unlock-wallet(string);
     in-out property <string> error-message: "";
     in-out property <bool> show-create-view: false;
     in property <bool> oauth-server-running: true;
@@ -135,7 +139,7 @@ export component LoginScreen inherits Rectangle {
     callback confirm-created();
     callback open-oauth-browser();
 
-    background: #070b16;
+    background: Theme.bg-primary;
 
     // Depth gradient: a touch of teal-navy at the top fading to near-black.
     Rectangle {
@@ -143,7 +147,7 @@ export component LoginScreen inherits Rectangle {
         y: 0;
         width: 100%;
         height: 100%;
-        background: @linear-gradient(180deg, #0a1322 0%, #080e1a 55%, #060912 100%);
+        background: @linear-gradient(180deg, Theme.bg-primary 0%, Theme.bg-primary 55%, Theme.bg-primary 100%);
     }
 
     // Cyan glow behind the logo (top-center)
@@ -154,8 +158,8 @@ export component LoginScreen inherits Rectangle {
         height: 440px;
         border-radius: 270px;
         background: @radial-gradient(circle,
-            #22d3ee.with-alpha(0.16) 0%,
-            #22d3ee.with-alpha(0.05) 55%,
+            Theme.accent-cyan.with-alpha(0.16) 0%,
+            Theme.accent-cyan.with-alpha(0.05) 55%,
             transparent 100%);
     }
 
@@ -167,7 +171,7 @@ export component LoginScreen inherits Rectangle {
         height: 380px;
         border-radius: 190px;
         background: @radial-gradient(circle,
-            #06b6d4.with-alpha(0.13) 0%,
+            Theme.accent-cyan.with-alpha(0.13) 0%,
             transparent 70%);
     }
 
@@ -180,7 +184,7 @@ export component LoginScreen inherits Rectangle {
         border-radius: 220px;
         background: @radial-gradient(circle,
             #8b5cf6.with-alpha(0.10) 0%,
-            #22d3ee.with-alpha(0.04) 55%,
+            Theme.accent-cyan.with-alpha(0.04) 55%,
             transparent 100%);
     }
 
@@ -211,18 +215,18 @@ export component LoginScreen inherits Rectangle {
                         height: 132px;
                         border-radius: 66px;
                         background: @radial-gradient(circle,
-                            #22d3ee.with-alpha(0.22) 0%,
-                            #06b6d4.with-alpha(0.10) 55%,
+                            Theme.accent-cyan.with-alpha(0.22) 0%,
+                            Theme.accent-cyan.with-alpha(0.10) 55%,
                             transparent 100%);
                         border-width: 1px;
-                        border-color: #22d3ee.with-alpha(0.28);
+                        border-color: Theme.accent-cyan.with-alpha(0.28);
                         drop-shadow-blur: 38px;
-                        drop-shadow-color: #22d3ee.with-alpha(0.35);
+                        drop-shadow-color: Theme.accent-cyan.with-alpha(0.35);
 
                         // Quillon Graph logo (white-on-transparent shield, tinted bright cyan)
                         Image {
                             source: @image-url("icons/quillon-logo.png");
-                            colorize: #22d3ee;
+                            colorize: Theme.accent-cyan;
                             width: 94px;
                             height: 94px;
                             x: (parent.width - 94px) / 2;
@@ -240,10 +244,38 @@ export component LoginScreen inherits Rectangle {
                     horizontal-alignment: center;
                 }
                 Text {
-                    text: "Quantum-Secure Wallet · Post-Quantum Signatures · Self-Custodial";
-                    color: Theme.text-secondary;
-                    font-size: Theme.font-md;
+                    text: "Quantum-Secure · Post-Quantum Signatures · Self-Custodial";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-sm;
+                    letter-spacing: 0.4px;
                     horizontal-alignment: center;
+                }
+            }
+
+            // ─────────────────────────────────────────────
+            // UNLOCK: password prompt when an encrypted wallet exists but no session
+            // ─────────────────────────────────────────────
+            if root.has-locked-wallet : Card {
+                VerticalLayout {
+                    padding: Theme.spacing-lg;
+                    spacing: Theme.spacing-md;
+                    Text {
+                        text: "Welcome back — unlock your wallet";
+                        color: Theme.text-primary;
+                        font-size: Theme.font-lg;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                    }
+                    QInput {
+                        placeholder: "Enter your wallet password";
+                        is-password: true;
+                        text <=> root.unlock-password;
+                    }
+                    QButton {
+                        label: "Unlock";
+                        button-color: Theme.accent-cyan;
+                        clicked => { root.unlock-wallet(root.unlock-password); }
+                    }
                 }
             }
 
@@ -297,6 +329,11 @@ export component LoginScreen inherits Rectangle {
                         }
                     }
 
+                    QInput {
+                        placeholder: "Set a wallet password (min 8 chars)";
+                        is-password: true;
+                        text <=> root.create-password;
+                    }
                     QButton {
                         label: "I have saved my recovery phrase";
                         button-color: Theme.accent-green;
@@ -318,7 +355,7 @@ export component LoginScreen inherits Rectangle {
                         ? "OAuth2 — opens your browser to authorize this wallet (recommended)"
                         : "OAuth2 server unavailable on port " + root.oauth-port;
                     icon-source: @image-url("icons/scan-line.svg");
-                    accent: #22d3ee;
+                    accent: Theme.accent-cyan;
                     featured: true;
                     selected: root.active-action == 2;
                     clicked => {
@@ -354,7 +391,7 @@ export component LoginScreen inherits Rectangle {
 
                         QButton {
                             label: "Open browser to authorize";
-                            button-color: #22d3ee;
+                            button-color: Theme.accent-cyan;
                             clicked => { root.open-oauth-browser(); }
                         }
 
@@ -382,7 +419,7 @@ export component LoginScreen inherits Rectangle {
                     title: "Create a new wallet";
                     description: "Generate a fresh 12-word recovery phrase and start fresh";
                     icon-source: @image-url("icons/sparkles.svg");
-                    accent: #2dd4bf;
+                    accent: Theme.accent-cyan;
                     clicked => { root.create-wallet(); }
                 }
 
@@ -428,9 +465,9 @@ export component LoginScreen inherits Rectangle {
             Rectangle {
                 height: 64px;
                 border-radius: Theme.radius-md;
-                background: #101c31.with-alpha(0.55);
+                background: Theme.bg-secondary.with-alpha(0.55);
                 border-width: 1px;
-                border-color: #22d3ee.with-alpha(0.18);
+                border-color: Theme.accent-cyan.with-alpha(0.18);
 
                 HorizontalLayout {
                     padding-left: Theme.spacing-md;
@@ -441,7 +478,7 @@ export component LoginScreen inherits Rectangle {
                         alignment: center;
                         Icon {
                             source: @image-url("icons/circle-dot.svg");
-                            icon-color: #22d3ee;
+                            icon-color: Theme.accent-cyan;
                             width: Theme.icon-md;
                             height: Theme.icon-md;
                         }

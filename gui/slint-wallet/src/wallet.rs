@@ -12,11 +12,11 @@ pub struct Wallet {
 }
 
 impl Wallet {
-    /// Create a new wallet with a random 24-word mnemonic.
+    /// Create a new wallet with a random 12-word mnemonic (matches website).
     /// Returns (wallet, mnemonic_phrase).
     pub fn create() -> Result<(Self, String)> {
         use rand::RngCore;
-        let mut entropy = [0u8; 32]; // 256 bits = 24-word mnemonic
+        let mut entropy = [0u8; 16]; // 128 bits = 12-word mnemonic (matches website + server)
         rand::thread_rng().fill_bytes(&mut entropy);
         let mnemonic = Mnemonic::from_entropy_in(bip39::Language::English, &entropy)
             .map_err(|e| anyhow!("Failed to generate mnemonic: {}", e))?;
@@ -36,7 +36,7 @@ impl Wallet {
         // Derive Ed25519 key from mnemonic STRING via SHA3-256
         // MUST match server: SHA3-256(mnemonic_text) → private key bytes
         let mut hasher = Sha3_256::new();
-        hasher.update(phrase.as_bytes());
+        hasher.update(phrase.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ").as_bytes());
         let seed: [u8; 32] = hasher.finalize().into();
 
         let signing_key = SigningKey::from_bytes(&seed);

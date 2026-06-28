@@ -14,23 +14,51 @@
 //   signature = Ed25519.sign(priv, challenge)              // 64 bytes
 //   header    = JSON {address, timestamp, scheme:"Ed25519", signature:hex, public_key:hex}
 //
-// Seed resolution order (loadSeed):
+// Seed resolution order (loadSeed) — v2.16.2 multi-agent:
 //   1. opts.seedArg (per-tool override)
-//   2. ~/.claude/quillon-agent-seed (file — same one used by the qwallet helper)
-//   3. process.env.QNK_SEED
-// Throws SeedNotFoundError if all three are empty.
+//   2. process.env.QNK_SEED_FILE or QUILLON_SEED_PATH (explicit custom path)
+//   2.5 process.env.QUILLON_AGENT / QUILLON_CLIENT → auto-resolve
+//       ~/.quillon/seeds/{agent}.seed (FULLY AUTOMATIC — no env vars needed
+//       if QUILLON_CLIENT is set in the MCP config)
+//   3. ~/.claude/quillon-agent-seed (legacy default)
+//   4. process.env.QNK_SEED (raw hex)
+// Throws SeedNotFoundError if all are empty.
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha3_256 } from "@noble/hashes/sha3.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 export class SeedNotFoundError extends Error {
     checked;
     constructor(checked) {
+        // Detect which AI client is running for targeted guidance.
+        const client = process.env.QUILLON_CLIENT || process.env.QUILLON_AGENT || "";
+        const agentSeedFile = client ? `~/.quillon/seeds/${client.toLowerCase()}.seed` : "~/.claude/quillon-agent-seed";
+        let clientHint = "";
+        if (client === "codewhale" || client === "deepseek") {
+            clientHint = `  DeepSeek agent: write your 64-char hex seed to ${agentSeedFile}\n  Then restart the session. The seed persists across sessions.`;
+        }
+        else if (client === "claude") {
+            clientHint = `  Claude Code: write your 64-char hex seed to ${agentSeedFile}\n  Or say "Create a wallet".`;
+        }
+        else if (client === "codex") {
+            clientHint = `  Codex (GPT-5.5): write your 64-char hex seed to ${agentSeedFile}`;
+        }
+        else if (client === "grok") {
+            clientHint = `  Grok Build: write your 64-char hex seed to ${agentSeedFile}`;
+        }
+        else if (client === "qwen") {
+            clientHint = `  Qwen Coder: write your 64-char hex seed to ${agentSeedFile}`;
+        }
+        else {
+            clientHint = `  Write your 64-char hex seed to ${agentSeedFile}\n  Or set QUILLON_AGENT env to auto-detect your agent's seed path.`;
+        }
         super("No wallet seed found. Checked (in order): " +
             checked.join(", ") +
-            ". Provide a `seed` argument, set QNK_SEED env, or write the 64-char hex seed to ~/.claude/quillon-agent-seed.");
+            ".\n\n" +
+            clientHint +
+            "\n\n  Seed directory: ~/.quillon/seeds/ (one .seed file per agent)");
         this.checked = checked;
         this.name = "SeedNotFoundError";
     }
@@ -44,6 +72,24 @@ export class SignatureError extends Error {
     }
 }
 const SEED_FILE = path.join(os.homedir(), ".claude", "quillon-agent-seed");
+const SEEDS_DIR = path.join(os.homedir(), ".quillon", "seeds");
+// v2.10.4: parse seed from either raw-hex file or JSON {seed: "..."} wallet file.
+function parseSeedFromContents(raw) {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0)
+        return null;
+    if (trimmed.startsWith("{")) {
+        try {
+            const j = JSON.parse(trimmed);
+            const s = (j?.seed ?? j?.seed_hex ?? j?.privateKey ?? "").toString().trim();
+            return s.length > 0 ? s : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    return trimmed;
+}
 export function loadSeed(opts) {
     const checked = [];
     // 1. Per-tool argument
@@ -51,10 +97,71 @@ export function loadSeed(opts) {
         return { seed: opts.seedArg.trim(), source: "argument" };
     }
     checked.push("argument");
-    // 2. ~/.claude/quillon-agent-seed
+    // 2. QNK_SEED_FILE or QUILLON_SEED_PATH env (explicit custom path)
+    const customPath = process.env.QNK_SEED_FILE?.trim() || process.env.QUILLON_SEED_PATH?.trim();
+    if (customPath && customPath.length > 0) {
+        try {
+            const contents = fs.readFileSync(customPath, "utf8");
+            const seed = parseSeedFromContents(contents);
+            if (seed) {
+                const srcVar = process.env.QNK_SEED_FILE ? "QNK_SEED_FILE" : "QUILLON_SEED_PATH";
+                return { seed, source: `${srcVar}=${customPath}` };
+            }
+            checked.push(`${customPath} (empty/unparseable)`);
+        }
+        catch {
+            checked.push(`${customPath} (missing)`);
+        }
+    }
+    // 2.5 AUTO-DETECT: agent name → ~/.quillon/seeds/{agent}.seed
+    const agentName = (process.env.QUILLON_AGENT || process.env.QUILLON_CLIENT || "").toLowerCase().trim();
+    if (agentName && agentName.length > 0) {
+        const agentSeedFile = path.join(SEEDS_DIR, `${agentName}.seed`);
+        try {
+            fs.mkdirSync(SEEDS_DIR, { recursive: true });
+            const contents = fs.readFileSync(agentSeedFile, "utf8");
+            const seed = parseSeedFromContents(contents);
+            if (seed) {
+                return { seed, source: `agent=${agentName} (${agentSeedFile})` };
+            }
+            checked.push(`agent=${agentName} → ${agentSeedFile} (empty)`);
+        }
+        catch {
+            checked.push(`agent=${agentName} → ${agentSeedFile} (missing — create it)`);
+        }
+    }
+    // 2.6 AUTO-GENERATE: if agent is known but has no seed, create one.
+    // Enables remote MCP (Smithery/Grok) where users don't configure seeds.
+    // Each user gets a unique auto-generated seed that persists across sessions.
+    if (agentName && agentName.length > 0) {
+        const autoSeedFile = path.join(SEEDS_DIR, `${agentName}-auto.seed`);
+        try {
+            const existing = fs.readFileSync(autoSeedFile, "utf8");
+            const seed = parseSeedFromContents(existing);
+            if (seed) {
+                return { seed, source: `auto-generated (${autoSeedFile})` };
+            }
+        }
+        catch {
+            try {
+                fs.mkdirSync(SEEDS_DIR, { recursive: true });
+                const crypto = require("node:crypto");
+                const randomBytes = crypto.randomBytes(32);
+                const randomSeed = Array.from(randomBytes)
+                    .map((b) => b.toString(16).padStart(2, "0"))
+                    .join("");
+                fs.writeFileSync(autoSeedFile, randomSeed, { mode: 0o600, encoding: "utf8" });
+                return { seed: randomSeed, source: `auto-generated → ${autoSeedFile}` };
+            }
+            catch (genErr) {
+                checked.push(`auto-gen failed: ${genErr.message}`);
+            }
+        }
+    }
+    // 3. ~/.claude/quillon-agent-seed (legacy default)
     try {
-        const fileSeed = fs.readFileSync(SEED_FILE, "utf8").trim();
-        if (fileSeed.length > 0) {
+        const fileSeed = parseSeedFromContents(fs.readFileSync(SEED_FILE, "utf8"));
+        if (fileSeed) {
             return { seed: fileSeed, source: SEED_FILE };
         }
         checked.push(SEED_FILE + " (empty)");
@@ -62,7 +169,7 @@ export function loadSeed(opts) {
     catch {
         checked.push(SEED_FILE + " (missing)");
     }
-    // 3. QNK_SEED env
+    // 4. QNK_SEED env (raw hex)
     const envSeed = process.env.QNK_SEED?.trim();
     if (envSeed && envSeed.length > 0) {
         return { seed: envSeed, source: "QNK_SEED env" };
@@ -70,8 +177,6 @@ export function loadSeed(opts) {
     checked.push("QNK_SEED env");
     throw new SeedNotFoundError(checked);
 }
-// Memoize per seed string. The agent typically uses one wallet per session,
-// so this hits on every call after the first.
 const keyCache = new Map();
 export function deriveKeys(seed) {
     const cached = keyCache.get(seed);
@@ -109,4 +214,80 @@ export function signXWalletAuth(reqPath, opts) {
         public_key: bytesToHex(pub),
     });
     return { header, address, timestamp: ts, source };
+}
+// ============================================================================
+// v10.11.73 — DURABLE client-side transfer signing for POST /transactions/send_signed
+// ----------------------------------------------------------------------------
+// The node (v10.11.72+) rejects UNSIGNED transfers: the X-Wallet-Auth header alone
+// is non-propagating trust and the tx never lands in a block (sender never debited).
+// A transfer must carry a real Ed25519 signature the node verifies on EVERY peer.
+// This reproduces the Rust node's Transaction::build_p2p_signable_payload byte-for-byte
+// (q-types/src/lib.rs) and signs SHA3-256(payload); verify_ed25519_signature accepts a
+// signature over p2p_signable_hash. Native QUG only — for QUG `data` is empty, so the
+// verifier resolves the signer key from `from` (= the 32-byte pubkey = address). Token
+// transfers put the token address in data[..32] (which the verifier prefers as the key),
+// so token signing won't verify until a server-side pubkey-resolution fix lands.
+// ============================================================================
+export const MIN_TRANSACTION_FEE_BASE = 21000n;
+function leBytes(value, len) {
+    const out = new Uint8Array(len);
+    let x = value;
+    for (let i = 0; i < len; i++) {
+        out[i] = Number(x & 0xffn);
+        x >>= 8n;
+    }
+    return out;
+}
+/**
+ * Build the canonical p2p signable payload for a transfer and Ed25519-sign its
+ * SHA3-256 hash using the configured seed. `toAddr` may be qnk-prefixed or raw hex.
+ * `amountBase` is the u128 base-24 amount as a bigint (same value posted as `amount`).
+ */
+export function signTransferV72(params) {
+    const { seed } = loadSeed({ seedArg: params.seedArg });
+    const { priv, address } = deriveKeys(seed);
+    const fromHex = address.startsWith("qnk") ? address.slice(3) : address;
+    const toHex = params.toAddr.startsWith("qnk") ? params.toAddr.slice(3) : params.toAddr;
+    const from = hexToBytes(fromHex);
+    const to = hexToBytes(toHex);
+    if (from.length !== 32 || to.length !== 32) {
+        throw new Error("signTransferV72: from/to must be 32-byte hex addresses");
+    }
+    const tu = (params.tokenType ?? "QUG").toUpperCase();
+    const tokenByte = tu === "QUG" || tu === "NATIVE-QUG" ? 0 : tu === "QUGUSD" || tu === "QUGUSD-STABLE" ? 1 : 2;
+    const feeBase = params.feeBase ?? MIN_TRANSACTION_FEE_BASE;
+    // For TOKEN transfers the node fills tx.data with the token's canonical 32-byte
+    // address (GET /tokens/resolve/:token) and the signature must cover it. Empty QUG.
+    const dh = params.dataHex && params.dataHex.startsWith("0x") ? params.dataHex.slice(2) : params.dataHex;
+    const data = dh ? hexToBytes(dh) : new Uint8Array(0);
+    const parts = [
+        new Uint8Array([0x01]),
+        from,
+        to,
+        leBytes(params.amountBase, 16),
+        leBytes(feeBase, 16),
+        leBytes(BigInt(params.nonce), 8),
+        leBytes(BigInt(params.timestampSecs), 8),
+        new Uint8Array([tokenByte]),
+        leBytes(BigInt(data.length), 4),
+        data,
+    ];
+    let total = 0;
+    for (const p of parts)
+        total += p.length;
+    const payload = new Uint8Array(total);
+    let off = 0;
+    for (const p of parts) {
+        payload.set(p, off);
+        off += p.length;
+    }
+    const digest = sha3_256(payload); // the 32-byte message the verifier checks
+    const sig = ed25519.sign(digest, priv);
+    return {
+        signature: bytesToHex(sig),
+        nonce: params.nonce,
+        timestamp: params.timestampSecs,
+        fee: feeBase.toString(),
+        address,
+    };
 }

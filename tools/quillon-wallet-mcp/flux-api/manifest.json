@@ -1,0 +1,44 @@
+{
+  "_meta": {
+    "title": "Quillon Wallet API — flux-api manifest (v0)",
+    "purpose": "Additive drift-guard. Extracted from the WORKING quillon-wallet-mcp (src/index.ts). Feeds flux-api known_patterns to emit OpenAPI 3.1 + typed clients + a WS event surface. The MCP itself is NOT modified.",
+    "generated": "2026-06-16 by rocky",
+    "next": "attach HTTP method + request/response schemas per path from the MCP tool definitions; then define the SSE/WS event enum (balance/block/tx) as discriminated unions."
+  },
+  "base_url": "https://quillon.xyz/api/v1",
+  "endpoints": [
+    { "path": "/status", "group": "node" },
+    { "path": "/version", "group": "node" },
+    { "path": "/node/status", "group": "node" },
+    { "path": "/engine/pulse", "group": "node" },
+    { "path": "/blocks/{id}", "group": "chain" },
+    { "path": "/transactions/send_signed", "group": "tx", "method": "POST" },
+    { "path": "/transactions/{hash}", "group": "tx" },
+    { "path": "/wallet/balance", "group": "wallet" },
+    { "path": "/integrity/balance-root", "group": "wallet" },
+    { "path": "/dex/pools", "group": "dex" },
+    { "path": "/dex/supported-tokens", "group": "dex" },
+    { "path": "/liquidity/add", "group": "dex", "method": "POST" },
+    { "path": "/contracts/deploy", "group": "vm", "method": "POST" },
+    { "path": "/agent/panel", "group": "agent" },
+    { "path": "/agent/submit", "group": "agent", "method": "POST" },
+    { "path": "/agent/submit-batch", "group": "agent", "method": "POST" },
+    { "path": "/agent/score-tx-dry", "group": "agent", "method": "POST" },
+    { "path": "/bitcoin/deposit/address", "group": "btc" },
+    { "path": "/bitcoin/deposit/bridge-status", "group": "btc" },
+    { "path": "/bitcoin/deposits", "group": "btc" },
+    { "path": "/bitcoin/withdraw", "group": "btc", "method": "POST" },
+    { "path": "/qshare/bootstrap_pool", "group": "qshare", "method": "POST" },
+    { "path": "/qshare/try_buyback_signed", "group": "qshare", "method": "POST" },
+    { "path": "/qshare/try_mint_signed", "group": "qshare", "method": "POST" },
+    { "path": "/crown-ash/{world}", "group": "game" },
+    { "path": "/crown-ash/{action}", "group": "game", "method": "POST" },
+    { "path": "/payments", "group": "payments" }
+  ],
+  "planned_events": [
+    { "name": "BalanceUpdate", "note": "per-wallet balance change — drives live balance, fixes slow SSE" },
+    { "name": "NewBlock", "note": "tip advance — explorer + DEX copilot live combos" },
+    { "name": "TxConfirmed", "note": "settlement of a submitted tx" },
+    { "name": "DexSwap", "note": "pool swap event for live DEX feed" }
+  ]
+}

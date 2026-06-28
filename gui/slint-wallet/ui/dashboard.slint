@@ -126,7 +126,7 @@ export component DashboardScreen inherits Rectangle {
         // label/value plus an explanatory line when the balance is zero, which
         // told users nothing useful before.
         GradientCard {
-            card-gradient: @linear-gradient(135deg, #1a2744, #0f172a);
+            card-gradient: Theme.is-dark ? @linear-gradient(135deg, Theme.bg-card, #0f172a) : @linear-gradient(135deg, #ffffff, #e8eef7);
             height: root.qug-balance == "0.00" || root.qug-balance == "0.0000" ? 96px : 80px;
 
             HorizontalLayout {

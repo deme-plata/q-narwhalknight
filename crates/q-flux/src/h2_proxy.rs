@@ -392,6 +392,28 @@ async fn handle_h2_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    if req_path == "/mcp/grok"
+        || req_path.starts_with("/mcp/grok/")
+        || req_path.starts_with("/mcp/grok?")
+        || req_path.starts_with("/oauth/grok/")
+    {
+        let body_bytes = match collect_body(body, body_limit).await {
+            Ok(b) => b,
+            Err(_) => {
+                h2_metrics.h2_stream_closed();
+                return error_response(413, "Request body too large");
+            }
+        };
+        let resp = forward_grok_mcp_h2(&parts, body_bytes, client_addr).await;
+        let status = resp.status().as_u16();
+        let latency = req_start.elapsed();
+        metrics.response_status(status);
+        metrics.record_latency(latency);
+        log_access(access_logger, client_addr, req_method.as_str(), &req_path, status, 0, 0, latency, user_agent.as_deref(), None, Some("grok-mcp"));
+        h2_metrics.h2_stream_closed();
+        return resp;
+    }
+
     // 1. Static file routing
     if let static_serve::RouteResult::ServeFile(file_resp) =
         static_serve::route(&req_path, static_config)
@@ -604,6 +626,70 @@ async fn handle_h2_request(
             h2_metrics.h2_stream_closed();
             error_response(502, "Bad Gateway")
         }
+    }
+}
+
+fn rewrite_grok_mcp_h2_path(path: &str) -> String {
+    if path == "/mcp/grok/health" {
+        "/health".to_string()
+    } else if let Some(rest) = path.strip_prefix("/mcp/grok") {
+        if rest.is_empty() {
+            "/mcp".to_string()
+        } else if rest.starts_with('?') {
+            format!("/mcp{}", rest)
+        } else {
+            rest.to_string()
+        }
+    } else {
+        path.to_string()
+    }
+}
+
+async fn forward_grok_mcp_h2(
+    parts: &hyper::http::request::Parts,
+    body: Bytes,
+    client_addr: SocketAddr,
+) -> Response<H2Body> {
+    let original_path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = rewrite_grok_mcp_h2_path(original_path);
+    let url = format!("http://127.0.0.1:8787{}", path);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut rb = client.request(method, url).body(body.to_vec());
+    for (k, v) in &parts.headers {
+        let name = k.as_str();
+        if matches!(name, "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "te" | "host") {
+            continue;
+        }
+        rb = rb.header(name, v);
+    }
+    rb = rb.header("x-forwarded-for", client_addr.ip().to_string());
+    rb = rb.header("x-forwarded-proto", "https");
+    rb = rb.header("host", "127.0.0.1:8787");
+
+    match rb.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            match resp.bytes().await {
+                Ok(bytes) => {
+                    let mut builder = Response::builder().status(status);
+                    for (k, v) in headers.iter() {
+                        let name = k.as_str();
+                        if matches!(name, "connection" | "transfer-encoding" | "keep-alive" | "proxy-connection" | "upgrade") {
+                            continue;
+                        }
+                        builder = builder.header(k, v);
+                    }
+                    builder.body(Either::Left(Full::new(bytes))).unwrap_or_else(|_| error_response(500, "MCP proxy error"))
+                }
+                Err(_) => error_response(502, "MCP upstream read error"),
+            }
+        }
+        Err(_) => error_response(502, "MCP upstream unavailable"),
     }
 }
 
