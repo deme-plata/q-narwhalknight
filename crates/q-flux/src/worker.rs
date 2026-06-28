@@ -890,8 +890,8 @@ async fn worker_loop(
             } else {
                 // Plain HTTP — read request, check for ACME challenges, then redirect
                 let mut tcp_stream = tcp_stream;
-                let mut peek_buf = [0u8; 1024];
-                let (host, path) = match tokio::time::timeout(
+                let mut peek_buf = [0u8; 8192];
+                let (host, path, peeked) = match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     tokio::io::AsyncReadExt::read(&mut tcp_stream, &mut peek_buf),
                 ).await {
@@ -900,9 +900,9 @@ async fn worker_loop(
                             .unwrap_or_else(|| client_addr.ip().to_string());
                         let p = extract_request_path(&peek_buf[..n])
                             .unwrap_or_default();
-                        (h, p)
+                        (h, p, n)
                     }
-                    _ => (client_addr.ip().to_string(), String::new()),
+                    _ => (client_addr.ip().to_string(), String::new(), 0usize),
                 };
 
                 // Issue #021: Serve ACME HTTP-01 challenges on port 80
@@ -968,26 +968,12 @@ async fn worker_loop(
                             );
                             let _ = tcp_stream.write_all(response.as_bytes()).await;
                             let _ = tcp_stream.write_all(&contents).await;
-                        } else if path.starts_with("/api/") {
-                            // API request — forward to upstream
-                            let upstream_url = format!("http://127.0.0.1:8080{}", path);
-                            match reqwest::get(&upstream_url).await {
-                                Ok(resp) => {
-                                    let status = resp.status().as_u16();
-                                    let body = resp.bytes().await.unwrap_or_default();
-                                    let response = format!(
-                                        "HTTP/1.1 {} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                                        status, body.len()
-                                    );
-                                    let _ = tcp_stream.write_all(response.as_bytes()).await;
-                                    let _ = tcp_stream.write_all(&body).await;
-                                }
-                                Err(_) => {
-                                    let _ = tcp_stream.write_all(
-                                        b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                                    ).await;
-                                }
-                            }
+                        } else if path.starts_with("/api/") || path.starts_with("/v1/") {
+                            // API request — forward to the node PRESERVING method, headers, body.
+                            // The old code did reqwest::get() unconditionally, turning every onion
+                            // POST (wallet create / send / swap) into a GET -> node replied 405.
+                            // Onion users are on plain HTTP/:80, so this is their only API path.
+                            forward_onion_api_request(&mut tcp_stream, &peek_buf[..peeked], &path).await;
                         } else {
                             // SPA fallback — serve index.html
                             let index = format!("{}/index.html", static_root);
@@ -1220,6 +1206,126 @@ fn extract_request_path(data: &[u8]) -> Option<String> {
         req.path.map(|p| p.to_string())
     } else {
         None
+    }
+}
+
+/// Forward an onion (plain-HTTP/:80) `/api` or `/v1` request to the node at
+/// 127.0.0.1:8080, PRESERVING the original method, headers and body, and write
+/// the node's response back to the Tor circuit.
+///
+/// Why this exists: Tor hidden services are plain HTTP (the circuit provides
+/// encryption), so onion clients are served on q-flux's :80 listener. The old
+/// onion handler forwarded `/api/*` with `reqwest::get()` unconditionally —
+/// dropping the method, headers (incl. `X-Wallet-Auth`) and body — so every
+/// onion POST (wallet create, send, swap) hit the node's POST-only routes as a
+/// GET and came back 405. `initial` is whatever was already read off the socket
+/// (request line + headers + possibly part/all of the body).
+async fn forward_onion_api_request(
+    stream: &mut tokio::net::TcpStream,
+    initial: &[u8],
+    path: &str,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // 1. Accumulate bytes until we have the full header block (\r\n\r\n).
+    let mut buf: Vec<u8> = initial.to_vec();
+    let header_end = loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if buf.len() > 64 * 1024 {
+            let _ = stream
+                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            return;
+        }
+        let mut tmp = [0u8; 4096];
+        match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut tmp)).await {
+            Ok(Ok(m)) if m > 0 => buf.extend_from_slice(&tmp[..m]),
+            _ => break buf.len(),
+        }
+    };
+
+    // 2. Parse method + headers from the header block.
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    let _ = req.parse(&buf);
+    let method = req.method.unwrap_or("GET").to_string();
+    let mut content_length: usize = 0;
+    let mut fwd_headers: Vec<(String, Vec<u8>)> = Vec::new();
+    for h in req.headers.iter() {
+        if h.name.is_empty() {
+            continue;
+        }
+        let name = h.name.to_ascii_lowercase();
+        if name == "content-length" {
+            content_length = std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+        }
+        // Drop hop-by-hop / host / length / encoding-negotiation headers; forward
+        // the rest (Content-Type, X-Wallet-Auth, Accept, etc.).
+        if matches!(
+            name.as_str(),
+            "host" | "connection" | "keep-alive" | "proxy-authenticate"
+                | "proxy-authorization" | "te" | "trailer" | "transfer-encoding"
+                | "upgrade" | "content-length" | "accept-encoding"
+        ) {
+            continue;
+        }
+        fwd_headers.push((h.name.to_string(), h.value.to_vec()));
+    }
+
+    // 3. Read the body up to Content-Length (some/all may already be in `buf`).
+    let mut body: Vec<u8> = buf[header_end.min(buf.len())..].to_vec();
+    while body.len() < content_length {
+        let mut tmp = [0u8; 8192];
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut tmp)).await {
+            Ok(Ok(m)) if m > 0 => body.extend_from_slice(&tmp[..m]),
+            _ => break,
+        }
+    }
+    if content_length > 0 && body.len() > content_length {
+        body.truncate(content_length);
+    }
+
+    // 4. Forward to the node with the original method/headers/body.
+    let url = format!("http://127.0.0.1:8080{}", path);
+    let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let client = reqwest::Client::new();
+    let mut rb = client.request(m, &url);
+    for (k, v) in fwd_headers {
+        rb = rb.header(k, v);
+    }
+    if !body.is_empty() {
+        rb = rb.body(body);
+    }
+    match rb.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let ct = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/json")
+                .to_string();
+            let rbody = resp.bytes().await.unwrap_or_default();
+            let head = format!(
+                "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("OK"),
+                ct,
+                rbody.len()
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&rbody).await;
+        }
+        Err(_) => {
+            let _ = stream
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+        }
     }
 }
 
