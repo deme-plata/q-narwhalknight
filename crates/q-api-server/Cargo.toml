@@ -1,6 +1,6 @@
 [package]
 name = "q-api-server"
-version.workspace = true
+version = "10.11.74"  # v10.11.74: custom-token swap decimal fix (overrides workspace 10.11.72 for the release binary)
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

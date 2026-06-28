@@ -12163,6 +12163,55 @@ fn sanitize_token_symbol(symbol: &str) -> Result<String, String> {
 }
 
 /// Execute token swap through liquidity pools
+/// v10.11.74: On-ledger custom-token swap amounts are 1:1 in the 24-dec UNIVERSAL
+/// scale that `token_balances` are stored in — the same scale `get_token_balance`
+/// reports and the balance check at the top of `execute_swap` compares against.
+/// A token's *metadata* `decimals` is a DISPLAY hint only and MUST NOT scale the
+/// on-ledger debit/credit. Returns the 24-dec base amount unchanged.
+///
+/// Regression guard for the v5.5.4 "2*decimals" bug (`amount * 10^(2d-24)`), which
+/// zeroed sellers (over-debit → saturating_sub) and over-credited buyers (unbacked
+/// mint) for every token with decimals > 12 (CULTURE/PACI/SCALPEL/AGORA/FLOWC…).
+#[inline]
+fn custom_token_swap_base_amount(amount_24dec: u128, _token_metadata_decimals: u8) -> u128 {
+    amount_24dec
+}
+
+#[cfg(test)]
+mod swap_decimal_regression_tests {
+    use super::custom_token_swap_base_amount;
+    const E24: u128 = 1_000_000_000_000_000_000_000_000; // 10^24
+
+    #[test]
+    fn custom_token_amount_is_identity_for_all_decimals() {
+        let amount = 4941u128 * E24;
+        for dec in [0u8, 6, 8, 9, 12, 18, 24] {
+            assert_eq!(
+                custom_token_swap_base_amount(amount, dec), amount,
+                "metadata decimals {dec} must NOT scale the 24-dec on-ledger amount"
+            );
+        }
+    }
+
+    #[test]
+    fn sell_does_not_zero_seller_balance() {
+        // Reproduces the CULTURE incident: 920,000 held, sell 4,941 → 915,059 (NOT 0).
+        let bal = 920_000u128 * E24;
+        let debit = custom_token_swap_base_amount(4_941u128 * E24, 24);
+        assert_eq!(bal.saturating_sub(debit), 915_059u128 * E24);
+        assert_ne!(bal.saturating_sub(debit), 0, "seller balance must never be zeroed by a partial sell");
+    }
+
+    #[test]
+    fn buy_credit_is_not_inflated() {
+        // A buy of ~141 tokens must credit ~141, not 141 * 10^24 (the old over-mint).
+        let amm_out = 141u128 * E24;
+        let credit = custom_token_swap_base_amount(amm_out, 24);
+        assert_eq!(credit, amm_out);
+        assert!(credit < amm_out.saturating_mul(2), "credit must not be scaled up");
+    }
+}
+
 pub async fn execute_swap(
     State(state): State<Arc<AppState>>,
     wallet_auth: AuthenticatedWallet, // ✅ ADD AUTHENTICATION
@@ -13705,27 +13754,31 @@ pub async fn execute_swap(
                     let from_key = (wallet_addr, from_token_addr);
                     let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
 
-                    // v5.5.4: Convert request.amount_in from 24-decimal to 2*decimals format.
-                    // Balances are stored in 2*decimals format (due to contracts_api double-conversion).
-                    // Frontend sends amount_in in 24-decimal. Must match formats for correct debit.
-                    // Use actual_from_decimals (from contract metadata) instead of pool.tokenX_decimals.
-                    let from_decimals = actual_from_decimals;
-                    let target_exp = 2u32 * from_decimals as u32;
-                    let debit_amount: u128 = if target_exp < 24 {
-                        (request.amount_in as u128) / 10u128.pow(24 - target_exp)
-                    } else if target_exp > 24 {
-                        (request.amount_in as u128).saturating_mul(10u128.pow(target_exp - 24))
-                    } else {
-                        request.amount_in as u128
-                    };
-
+                    // v10.11.74 FIX: custom-token balances are stored in 24-decimal
+                    // universal scale — identical to QUGUSD and index-fund tokens (see
+                    // those branches), to what get_token_balance reports, and to what the
+                    // balance check at the top of execute_swap (handlers.rs:~12448) compares
+                    // against. request.amount_in arrives in 24-decimal. So the debit is 1:1.
+                    //
+                    // The previous v5.5.4 "2*decimals" conversion was based on a FALSE premise
+                    // (it claimed balances were stored as display*10^(2*decimals) from a
+                    // contracts_api double-conversion). For any token with decimals > 12 it
+                    // multiplied the debit by 10^(2d-24), so saturating_sub ZEROED the seller's
+                    // entire balance on every swap (CULTURE/PACI/SCALPEL/AGORA/FLOWC… all 24-dec).
+                    // The balance CHECK was already 1:1, so check and debit disagreed.
+                    let debit_amount: u128 = custom_token_swap_base_amount(request.amount_in as u128, actual_from_decimals);
+                    if debit_amount > old_balance {
+                        // Tripwire: the balance check above guarantees old_balance(+tolerance)
+                        // >= amount_in, so this is unreachable unless a scale mismatch returns.
+                        // Fail loud rather than silently saturating to zero.
+                        error!("🔴 [SWAP v10.11.74] custom-token debit {} > balance {} for token {} — scale bug? clamping to balance",
+                            debit_amount, old_balance, request.from_token);
+                    }
                     let new_balance = old_balance.saturating_sub(debit_amount);
                     token_balances.insert(from_key, new_balance);
-                    let display_divisor = 10f64.powi(target_exp as i32);
-                    info!("💸 [SWAP v4.3.0] Deducted {} {} from user (was: {}, now: {}, decimals={}, target_exp={})",
-                        debit_amount as f64 / display_divisor, request.from_token,
-                        old_balance as f64 / display_divisor, new_balance as f64 / display_divisor,
-                        from_decimals, target_exp);
+                    info!("💸 [SWAP v10.11.74] Deducted {} {} from user (was: {}, now: {}; 24-dec 1:1)",
+                        debit_amount as f64 / 1e24, request.from_token,
+                        old_balance as f64 / 1e24, new_balance as f64 / 1e24);
 
                     // Persist to storage
                     drop(token_balances);
@@ -13882,28 +13935,18 @@ pub async fn execute_swap(
                     let to_key = (wallet_addr, to_token_addr);
                     let old_balance = token_balances.get(&to_key).copied().unwrap_or(0);
 
-                    // v5.5.4: Convert final_amount_out from 24-decimal to 2*decimals format.
-                    // Minted balances (from contracts_api.rs) are stored as display * 10^(2*decimals)
-                    // due to double-conversion. Swap outputs are in 24-decimal. We must match formats.
-                    // For 8-decimal tokens: 24-dec → 16-dec, divide by 10^8.
-                    // Use actual_to_decimals (from contract metadata) instead of pool.tokenX_decimals.
-                    let to_decimals = actual_to_decimals;
-                    let target_exp = 2u32 * to_decimals as u32;
-                    let credit_amount: u128 = if target_exp < 24 {
-                        (final_amount_out as u128) / 10u128.pow(24 - target_exp)
-                    } else if target_exp > 24 {
-                        (final_amount_out as u128).saturating_mul(10u128.pow(target_exp - 24))
-                    } else {
-                        final_amount_out as u128
-                    };
-
+                    // v10.11.74 FIX: 24-dec universal scale, 1:1 — mirror of the debit-side
+                    // fix and identical to the QUGUSD/index-fund credit branches above.
+                    // final_amount_out is in 24-decimal (the bridge branch states this
+                    // explicitly). The old "2*decimals" conversion OVER-CREDITED buyers by
+                    // 10^(2d-24) for decimals>12 tokens = an unbacked mint / supply-conservation
+                    // break. Credit exactly the AMM output.
+                    let credit_amount: u128 = custom_token_swap_base_amount(final_amount_out as u128, actual_to_decimals);
                     let new_balance = old_balance.saturating_add(credit_amount);
                     token_balances.insert(to_key, new_balance);
-                    let display_divisor = 10f64.powi(target_exp as i32);
-                    info!("💰 [SWAP v4.3.0] Credited {} {} to user (was: {}, now: {}, decimals={}, target_exp={})",
-                        credit_amount as f64 / display_divisor, request.to_token,
-                        old_balance as f64 / display_divisor, new_balance as f64 / display_divisor,
-                        to_decimals, target_exp);
+                    info!("💰 [SWAP v10.11.74] Credited {} {} to user (was: {}, now: {}; 24-dec 1:1)",
+                        credit_amount as f64 / 1e24, request.to_token,
+                        old_balance as f64 / 1e24, new_balance as f64 / 1e24);
 
                     // Persist to storage
                     drop(token_balances);
@@ -14456,10 +14499,10 @@ pub async fn execute_swap(
         // v5.5.4: Token balances for custom tokens are stored in 10^(2*decimals) format
         // (due to double-conversion in contracts_api). QUG/QUGUSD use 24-decimal (1e24).
         // Use actual contract decimals (resolved above) instead of pool.tokenX_decimals.
-        let from_decimals_sse = actual_from_decimals as u32;
-        let to_decimals_sse = actual_to_decimals as u32;
-        let from_divisor: f64 = 10f64.powi((2 * from_decimals_sse) as i32);
-        let to_divisor: f64 = 10f64.powi((2 * to_decimals_sse) as i32);
+        // v10.11.74 FIX: token balances are stored in 24-dec universal scale (see the
+        // debit/credit fix above), so the SSE display divisor is 1e24 — not 10^(2*decimals).
+        let from_divisor: f64 = 1e24;
+        let to_divisor: f64 = 1e24;
 
         // v5.1.3: Read POST-SWAP balances from HashMap (already updated by debit/credit code above).
         // These ARE the new balances. Approximate old values by reversing the conversion.
@@ -14498,24 +14541,10 @@ pub async fn execute_swap(
             (from_bal, to_bal)
         };
 
-        // Approximate pre-swap balances by reversing the debit/credit
-        // debit_amount was in 10^(2*from_dec) format, credit_amount in 10^(2*to_dec)
-        let from_target_exp = 2 * from_decimals_sse;
-        let to_target_exp = 2 * to_decimals_sse;
-        let debit_approx: u128 = if from_target_exp < 24 {
-            (request.amount_in as u128) / 10u128.pow(24 - from_target_exp)
-        } else if from_target_exp > 24 {
-            (request.amount_in as u128).saturating_mul(10u128.pow(from_target_exp - 24))
-        } else {
-            request.amount_in as u128
-        };
-        let credit_approx: u128 = if to_target_exp < 24 {
-            (final_amount_out as u128) / 10u128.pow(24 - to_target_exp)
-        } else if to_target_exp > 24 {
-            (final_amount_out as u128).saturating_mul(10u128.pow(to_target_exp - 24))
-        } else {
-            final_amount_out as u128
-        };
+        // v10.11.74 FIX: reverse the ACTUAL 1:1 debit/credit (24-dec universal scale).
+        // (Was 10^(2*decimals) — same false premise as the balance path; see above.)
+        let debit_approx: u128 = request.amount_in as u128;
+        let credit_approx: u128 = final_amount_out as u128;
         let old_from_balance = new_from_balance.saturating_add(debit_approx);
         let old_to_balance = new_to_balance.saturating_sub(credit_approx);
 
