@@ -166,29 +166,37 @@ pub static MAINNET_UPGRADES: Lazy<HashMap<Upgrade, UpgradeConfig>> = Lazy::new(|
         min_version: "5.1.0".to_string(),
     });
 
-    // Balance state root enforcement - bumped to 20,000,000 to allow shadow-mode soak (was 18,600,000)
-    // Shadow mode must prove root agreement across all nodes before enforcement activates.
+    // Balance state root enforcement — PUSHED FAR OUT to 50,000,000 (operator directive
+    // 2026-07-02: only Dilithium5/HybridSignaturesV1 activates near-term). The prior
+    // 20,000,000 was mandatory and only ~25h from tip (~19.70M @ 3.33 blk/s), which — if a
+    // new binary is not deployed first — would enforce a mandatory header change on the
+    // sole producer with no soak window (halt/fork risk). 50,000,000 is ~months away,
+    // leaving room to prove balance-root agreement before it is ever revisited. Re-set to a
+    // near height ONLY after a deliberate shadow-mode soak decision.
     upgrades.insert(Upgrade::BalanceRootV1, UpgradeConfig {
-        activation_height: 20_000_000, // ~15 days from tip ~17.67M; shadow soak first
+        activation_height: 50_000_000,
         description: "Enforce balance state root in block headers".to_string(),
         mandatory: true,
         min_version: "10.6.0".to_string(),
     });
 
-    // Hybrid Ed25519 + Dilithium5 producer-side gate.
-    // PQC-002: activation scheduled for ~2026-07-01 00:00 UTC.
-    //   Mapping: tip was 19,419,502 at 2026-06-28 15:00 UTC; at the observed
-    //   ~1.3 blk/s, 2026-07-01 lands near height 19,700,000. CONFIRM against the
-    //   live tip before cutting the release — and DO NOT let this height arrive
-    //   until the whole producing fleet runs this binary with a PERSISTENT
-    //   validator keypair AND every verifier has the producer's pinned Dilithium
-    //   pubkey (Q_PRODUCER_DILITHIUM_PUBKEY_HEX), or post-activation blocks will
-    //   be rejected (chain stall). Soak the transition on Alpha first.
-    // At/after this height: producers emit Hybrid Ed25519+Dilithium5 over the
-    // canonical block hash (PQC-001/003) and verifiers REQUIRE it (PQC-004).
+    // Hybrid Ed25519 + Dilithium5 producer-side gate. THE ONLY near-term mainnet
+    // activation — everything else below is pushed far into the future (operator
+    // directive 2026-07-02: "only dilithium5 activates now").
+    // PQC-002: value is 19_700_000, which is EXACTLY the height the currently-deployed
+    //   v10.11.74 binary already enforces (it logs "PENDING at 19700000") — i.e. the
+    //   point where the sole producer transitions to emitting Hybrid Ed25519+Dilithium5.
+    //   Keeping SOURCE == deployed value means a rebuild is CONTINUOUS with the live
+    //   chain: blocks < 19.7M stay Ed25519-only (not required); blocks >= 19.7M already
+    //   carry hybrid sigs (v74 produces them from this height), so re-verifying them on a
+    //   rebuild PASSES — no retroactive fork. (The prior 19_470_000 was WRONG: it sits
+    //   below where v74 produces hybrid, so it would demand hybrid on Ed25519-only blocks
+    //   → hard fork on resync.) Sole self-verifying producer; Dilithium key self-registers.
+    // At/after this height: producer emits Hybrid Ed25519+Dilithium5 over the
+    // canonical block hash (PQC-001/003) and the node REQUIRES it (PQC-004).
     upgrades.insert(Upgrade::HybridSignaturesV1, UpgradeConfig {
         activation_height: 19_700_000,
-        description: "Hybrid Ed25519+Dilithium5 block signatures enforced (≈2026-07-01)".to_string(),
+        description: "Hybrid Ed25519+Dilithium5 block signatures enforced (solo, ~2026-07-02)".to_string(),
         mandatory: true,
         min_version: "10.11.75".to_string(),
     });
@@ -460,14 +468,19 @@ mod tests {
     #[test]
     fn test_hybrid_signatures_activation_on_mainnet() {
         // PQC-002: HybridSignaturesV1 activates on mainnet at height 19_700_000
-        // (~2026-07-01). Below it, producers fall back to Phase0Ed25519; at/above
-        // it, Hybrid Ed25519+Dilithium5 over the canonical hash is REQUIRED.
+        // (~2026-07-02, matches deployed v10.11.74). Below it, producers fall back to
+        // Phase0Ed25519; at/above it, Hybrid Ed25519+Dilithium5 over the canonical hash
+        // is REQUIRED.
         let mainnet = UpgradeGate::new(true);
         assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 0));
         assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 17_700_000));
         assert!(!mainnet.is_active(Upgrade::HybridSignaturesV1, 19_699_999));
         assert!(mainnet.is_active(Upgrade::HybridSignaturesV1, 19_700_000));
         assert!(mainnet.is_active(Upgrade::HybridSignaturesV1, u64::MAX - 1));
+        // BalanceRootV1 pushed far out (50M) — must NOT be active near tip (~19.7M/20M).
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV1, 20_000_000));
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV1, 49_999_999));
+        assert!(mainnet.is_active(Upgrade::BalanceRootV1, 50_000_000));
 
         // Testnet activates immediately so canary nodes exercise the path.
         let testnet = UpgradeGate::new(false);
@@ -502,9 +515,9 @@ mod tests {
         // Don't accidentally couple them — operators should be able to
         // activate v1 enforcement without flipping v2, and vice versa.
         let mainnet = UpgradeGate::new(true);
-        // BalanceRootV1 has a real activation height (20,000,000); V2 is u64::MAX.
-        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 20_000_000));
+        // BalanceRootV1 has a real activation height (50,000,000); V2 is u64::MAX.
+        assert!(!mainnet.is_active(Upgrade::BalanceRootV2, 50_000_000));
         // But BalanceRootV1 *is* active at that height.
-        assert!(mainnet.is_active(Upgrade::BalanceRootV1, 20_000_000));
+        assert!(mainnet.is_active(Upgrade::BalanceRootV1, 50_000_000));
     }
 }
