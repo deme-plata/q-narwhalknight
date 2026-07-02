@@ -277,6 +277,17 @@ impl BalanceConsensusEngine {
         let block_hash_hex = hex::encode(&block_hash);
         let persistent_key = format!("processed_balance_block:{}", &block_hash_hex);
 
+        // 🔐 DS-1 (replay protection, non-tx / local-producer apply path). Mirrors the
+        // _tx gate. OFF unless Q_REPLAY_PROTECTION_HEIGHT is set (default u64::MAX =
+        // ZERO behavioral change). This path applies LOCALLY-PRODUCED blocks
+        // (block_production_v2), which is where a re-broadcast (replayed) tx is included
+        // by the sole producer — so it MUST be gated too, not only the _tx receive path.
+        let (rp_active, rp_enforce) = {
+            let h = std::env::var("Q_REPLAY_PROTECTION_HEIGHT").ok()
+                .and_then(|s| s.parse::<u64>().ok()).unwrap_or(u64::MAX);
+            (h != u64::MAX, h != u64::MAX && block.header.height >= h)
+        };
+
         // Check persistent store FIRST (survives restart)
         match storage.get_processed_block_flag(&persistent_key).await {
             Ok(true) => {
@@ -416,6 +427,31 @@ impl BalanceConsensusEngine {
                     continue;
                 }
 
+                // 🔐 DS-1: seen-tx replay guard (local-producer apply path). A tx.id may
+                // apply at most once — closes V1 when the replayed tx is included by the
+                // local producer. Uses the manifest-CF flag store (get/set_processed_block_flag).
+                let ds1_seen_key = if rp_active {
+                    Some(format!("applied_tx_{}", hex::encode(&block_tx.id)))
+                } else { None };
+                if rp_enforce {
+                    if let Some(ref sk) = ds1_seen_key {
+                        if let Ok(true) = storage.get_processed_block_flag(sk).await {
+                            let id_hex = hex::encode(&block_tx.id);
+                            warn!("🛡️ [DS-1 REPLAY-REJECT] tx {} already applied — replay skipped at height {} (no balance change)",
+                                  &id_hex[..16.min(id_hex.len())], block.header.height);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: None,
+                            });
+                            continue;
+                        }
+                    }
+                }
+
                 // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
                 // v10.10.4: QSHARE added — routes to token_balances like QUGUSD (reserved address)
                 let token_addr = match block_tx.token_type {
@@ -527,6 +563,10 @@ impl BalanceConsensusEngine {
                     info!("💸 [TRANSFER] Processed transfer at height {}: {} → {} ({} QUG)",
                            block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
                 }
+                // 🔐 DS-1: mark this transfer's tx.id applied (idempotency for replay guard).
+                if let Some(sk) = ds1_seen_key {
+                    let _ = storage.set_processed_block_flag(&sk).await;
+                }
             }
         }
 
@@ -538,6 +578,75 @@ impl BalanceConsensusEngine {
             stats.total_rewards = stats.total_rewards.saturating_add(
                 updates.iter().map(|u| u.amount).sum::<u128>()
             );
+        }
+
+        // ── MINT-CONSERVATION INVARIANT (2026-06-24 phantom-supply remediation) ──
+        // Covers the Transfer (send) + coinbase paths handled by THIS engine:
+        //   (1) every non-coinbase transfer must conserve value per token (net == 0),
+        //   (2) coinbase mint (MiningReward + DevelopmentFee) must not exceed the
+        //       deterministic schedule reward for this height.
+        // NOTE: swap/CDP/contract txs are applied by StateProcessor and are NOT in
+        // `updates` here — the same invariant must be added at that layer to cover
+        // the DEX/CDP mint vectors. This guard catches the transfer double-spend and
+        // coinbase over-mint. OBSERVE = warn only; ENFORCE = reject (disarmed by default).
+        {
+            let obs_h = q_types::upgrades::upgrades::MINT_CONSERVATION_OBSERVE.activation_height;
+            let enf_h = q_types::upgrades::upgrades::MINT_CONSERVATION_ENFORCE.activation_height;
+            let height = block.header.height;
+            if height >= obs_h {
+                let mut net: std::collections::HashMap<Option<[u8; 32]>, i128> =
+                    std::collections::HashMap::new();
+                let mut coinbase_minted: u128 = 0;
+                for u in &updates {
+                    match u.reason {
+                        ChangeReason::TransferReceived => {
+                            *net.entry(u.token_address).or_default() += u.amount as i128;
+                        }
+                        ChangeReason::TransferSent => {
+                            *net.entry(u.token_address).or_default() -= u.amount as i128;
+                        }
+                        ChangeReason::MiningReward | ChangeReason::DevelopmentFee => {
+                            coinbase_minted = coinbase_minted.saturating_add(u.amount);
+                        }
+                        ChangeReason::TransferFailed => {} // shadow record, no balance change
+                    }
+                }
+                let mut violations: Vec<String> = Vec::new();
+                for (tok, n) in &net {
+                    if *n != 0 {
+                        violations.push(format!("transfer token={:?} net={} (!=0)", tok, n));
+                    }
+                }
+                // Loose absolute coinbase ceiling (observe-only): QUG uses 24 internal
+                // decimals, legitimate block reward is tens of QUG. A 100k-QUG/block
+                // ceiling cleanly separates honest coinbase from the exploit shape
+                // (148e9 QUG/tx). The schedule-exact check belongs in process_coinbase
+                // (A3); this guard only needs to flag gross over-mint without reading
+                // total_supply in the hot apply path.
+                const QUG_SANE_PER_BLOCK_COINBASE_BASE: u128 = 100_000u128 * 1_000_000_000_000_000_000_000_000u128; // 100k * 10^24
+                if coinbase_minted > QUG_SANE_PER_BLOCK_COINBASE_BASE {
+                    violations.push(format!(
+                        "coinbase_minted={} > sane_ceiling={} (base units)",
+                        coinbase_minted, QUG_SANE_PER_BLOCK_COINBASE_BASE
+                    ));
+                }
+                if !violations.is_empty() {
+                    let enforcing = height >= enf_h;
+                    error!(
+                        "🚨 [CONSERVATION] height={} {} — {}",
+                        height,
+                        if enforcing { "ENFORCING → REJECT" } else { "OBSERVE (warn only)" },
+                        violations.join("; ")
+                    );
+                    if enforcing {
+                        return Err(BalanceConsensusError::BatchOperation(format!(
+                            "mint-conservation violation at height {}: {}",
+                            height,
+                            violations.join("; ")
+                        )));
+                    }
+                }
+            }
         }
 
         // v10.3.2: Mark block as processed PERSISTENTLY (survives restart)
@@ -724,6 +833,19 @@ impl BalanceConsensusEngine {
         let block_hash_hex = hex::encode(&block_hash);
         let persistent_key = format!("processed_balance_block:{}", &block_hash_hex);
 
+        // 🔐 DS-1 (replay/mint protection, 2026-07-02). OFF unless the operator sets
+        // Q_REPLAY_PROTECTION_HEIGHT (default u64::MAX → ZERO behavioral change, so the
+        // binary is a safe no-op until opted in). When set: idempotency markers are
+        // WRITTEN whenever engaged (warming coverage); replays / duplicate-height
+        // coinbase are REJECTED only at heights >= the value (height-gated so historical
+        // blocks still validate identically on resync). Markers live in the existing
+        // "manifest" CF and are written via this same QTransaction (atomic with the debit).
+        let (rp_active, rp_enforce) = {
+            let h = std::env::var("Q_REPLAY_PROTECTION_HEIGHT").ok()
+                .and_then(|s| s.parse::<u64>().ok()).unwrap_or(u64::MAX);
+            (h != u64::MAX, h != u64::MAX && block.header.height >= h)
+        };
+
         // Check persistent store FIRST (survives restart)
         match tx.get("manifest", persistent_key.as_bytes()).await {
             Ok(Some(_)) => {
@@ -777,6 +899,25 @@ impl BalanceConsensusEngine {
 
                 // Skip if already processed (check processed_blocks cache)
                 // Note: The block hash check happens at the block level, not per-tx
+
+                // 🔐 DS-1: per-height coinbase uniqueness — only ONE block may credit
+                // coinbase rewards at a given height. Closes the DAG same-height
+                // coinbase MINT (a different-proposer block at an already-credited
+                // height re-crediting a coinbase). Same-block coinbases (dev fee +
+                // miner + PPLNS) still all apply because they share this block_hash.
+                if rp_active {
+                    let ch_key = format!("coinbase_h_{}", block.header.height);
+                    match tx.get("manifest", ch_key.as_bytes()).await {
+                        Ok(Some(existing)) if existing.as_slice() != &block_hash[..] => {
+                            if rp_enforce {
+                                warn!("🛡️ [DS-1 COINBASE-DUP] height {} already credited by a different block — skipping coinbase mint (no balance change)", block.header.height);
+                                continue;
+                            }
+                        }
+                        Ok(None) => { let _ = tx.put("manifest", ch_key.as_bytes(), &block_hash[..]).await; }
+                        _ => {}
+                    }
+                }
 
                 // Apply the mining reward to the miner's balance
                 self.add_balance_tx(tx, &miner_address, reward_amount).await
@@ -841,6 +982,33 @@ impl BalanceConsensusEngine {
                 // Skip if amount is 0
                 if transfer_amount == 0 {
                     continue;
+                }
+
+                // 🔐 DS-1: seen-tx replay guard — a tx.id may be applied AT MOST ONCE.
+                // Closes V1 (gossip re-broadcast of a confirmed transfer re-debiting the
+                // sender) AND the DAG same-height transfer-respend (same tx.id in two
+                // blocks). No nonce lockstep / no false rejection: each legit tx has a
+                // unique id. Marker written after a successful apply below.
+                let ds1_seen_key = if rp_active {
+                    Some(format!("applied_tx_{}", hex::encode(&block_tx.id)))
+                } else { None };
+                if rp_enforce {
+                    if let Some(ref sk) = ds1_seen_key {
+                        if let Ok(Some(_)) = tx.get("manifest", sk.as_bytes()).await {
+                            let id_hex = hex::encode(&block_tx.id);
+                            warn!("🛡️ [DS-1 REPLAY-REJECT] tx {} already applied — replay skipped at height {} (no balance change)",
+                                  &id_hex[..16.min(id_hex.len())], block.header.height);
+                            updates.push(BalanceUpdate {
+                                address: from_address.clone(),
+                                amount: transfer_amount,
+                                reason: ChangeReason::TransferFailed,
+                                block_height: block.header.height,
+                                solution_index: idx,
+                                token_address: None,
+                            });
+                            continue;
+                        }
+                    }
                 }
 
                 // v10.2.0: Determine if this is a token transfer (QUGUSD or Custom)
@@ -953,6 +1121,12 @@ impl BalanceConsensusEngine {
                     });
                     info!("💸 [TRANSFER TX v3.5.17] Processed transfer at height {}: {} → {} ({} QUG)",
                            block.header.height, &from_address[..16], &to_address[..16], transfer_amount);
+                }
+                // 🔐 DS-1: mark this transfer's tx.id as applied (idempotency for the
+                // replay guard above). Written whenever DS-1 is engaged so markers are
+                // warm before the enforcement height. Atomic with the debit in this tx.
+                if let Some(sk) = ds1_seen_key {
+                    let _ = tx.put("manifest", sk.as_bytes(), b"1").await;
                 }
             }
         }
