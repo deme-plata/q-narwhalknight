@@ -1,0 +1,763 @@
+/* Animated Border Component Styles - 3-Layer System */
+
+.animated-border-container {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ═══ Layer 1: Full frame BEHIND content (atmosphere) ═══ */
+.border-frame {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.border-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  transition: opacity 2s ease-in-out, filter 2s ease-in-out;
+  animation: frameGlow 4s ease-in-out infinite;
+}
+
+.border-frame-current { opacity: 1; }
+.border-frame-current.fading-out { opacity: 0; }
+.border-frame-next { opacity: 0; }
+.border-frame-next.fading-in { opacity: 1; }
+
+/* ═══ Layer 2: Content (interactive UI) ═══ */
+.animated-border-container > .border-content {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  padding: 6% 8% 17% 8%;
+  box-sizing: border-box;
+  overflow: auto;
+  isolation: isolate; /* contain child stacking contexts */
+}
+
+/* ═══ Layer 3: Corner details ON TOP of content ═══ */
+.border-frame-corners {
+  position: absolute;
+  inset: 0;
+  z-index: 9990;
+  pointer-events: none;
+
+  /* CSS mask: only reveal corners + top/bottom center decorations */
+  -webkit-mask-image:
+    /* 4 corners - radial gradients */
+    radial-gradient(ellipse 30% 30% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 30% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* top center emblem */
+    radial-gradient(ellipse 20% 18% at 50% 0%, black 50%, transparent 100%),
+    /* bottom center emblem */
+    radial-gradient(ellipse 20% 22% at 50% 100%, black 50%, transparent 100%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 30% 30% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 30% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 20% 18% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 20% 22% at 50% 100%, black 50%, transparent 100%);
+  mask-composite: add;
+}
+
+.border-frame-corners.fading-out {
+  opacity: 0;
+  transition: opacity 2s ease-in-out;
+}
+
+.border-frame-corners img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  animation: frameGlow 4s ease-in-out infinite;
+}
+
+/* ═══ Animations ═══ */
+@keyframes frameGlow {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.12); }
+}
+
+/* Transaction success pulse - uses current theme colors, no theme switch */
+@keyframes transactionPulse {
+  0% { filter: brightness(1) saturate(1); }
+  15% { filter: brightness(1.8) saturate(1.6); }
+  30% { filter: brightness(1.2) saturate(1.3); }
+  50% { filter: brightness(1.7) saturate(1.5); }
+  70% { filter: brightness(1.1) saturate(1.2); }
+  85% { filter: brightness(1.5) saturate(1.4); }
+  100% { filter: brightness(1) saturate(1); }
+}
+
+.transaction-pulse .border-frame img,
+.transaction-pulse .border-frame-corners img {
+  animation: transactionPulse 2.5s ease-in-out !important;
+}
+
+/* ═══ Performance mode ═══ */
+.performance-mode .border-frame img,
+.performance-mode .border-frame-corners img {
+  animation: none !important;
+  transition: none !important;
+}
+
+.performance-mode .border-glow {
+  display: none !important;
+}
+
+.performance-mode .border-frame:hover img {
+  filter: brightness(1.05) !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Theme-specific content padding - pushes UI below frame banners
+   Each theme's top offset is tuned to clear its top border artwork
+   ══════════════════════════════════════════════════════════════════ */
+
+/* Neon Cyber - extra top padding to clear frame ornament */
+[data-theme="neon"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Frost Crystal - extra top padding to clear thick ice frame ornament */
+[data-theme="frost"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Aurora - extra top padding to clear frame ornament */
+[data-theme="aurora"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Predator - extra top padding to clear frame ornament */
+[data-theme="predator"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Abyssal Teal - extra top padding to clear thick frame ornament */
+[data-theme="abyssal"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Hellfire - extra top padding to clear frame ornament */
+[data-theme="hellfire"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Sovereign Gold - extra top padding to clear frame ornament */
+[data-theme="sovereign"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Inferno - extra top padding to clear thick frame ornament */
+[data-theme="inferno"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Metallic Pro - extra top padding to clear frame ornament */
+[data-theme="metallic"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Cosmic Void - extra top padding to clear frame ornament */
+[data-theme="cosmic"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Flower Power - extra top padding to clear frame ornament */
+[data-theme="flowerpower"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Cozy Wizard - extra top padding to clear frame ornament */
+[data-theme="cozywizard"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Neon Cyberpunk - extra top padding to clear frame ornament */
+[data-theme="cyberpunk"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Gothic Elegance - extra top padding to clear frame ornament */
+[data-theme="gothic"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Ornate - extra padding on ALL sides to clear thick obsidian borders */
+[data-theme="ornate"] .animated-border-container > .border-content {
+  padding: calc(10% + 20px) 11% 12% 11%;
+}
+
+/* Carbon Fiber - extra top padding to clear medallion ornament */
+[data-theme="carbonfiber"] .animated-border-container > .border-content {
+  padding: calc(6% + 40px) 8% 17% 8%;
+}
+
+/* Edge (Frameless) - no frame, content fills entire screen */
+[data-theme="frameless"] .animated-border-container > .border-content {
+  padding: 0 !important;
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+}
+[data-theme="frameless"] .border-frame,
+[data-theme="frameless"] .border-frame-corners {
+  display: none !important;
+}
+[data-theme="frameless"] .animated-border-container {
+  border-radius: 0 !important;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   Theme-specific corner masks
+   ══════════════════════════════════════════════════════════════════ */
+
+/* ═══ Inferno - larger top corner masks for alien heads ═══ */
+[data-theme="inferno"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - LARGER to reveal alien heads */
+    radial-gradient(ellipse 42% 42% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 42% 42% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center emblem (triangle) */
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center emblem (skull) */
+    radial-gradient(ellipse 22% 28% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar connecting heads to triangle */
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 42% 42% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 42% 42% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 28% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  mask-composite: add;
+}
+
+/* ═══ Frost Crystal - larger top for ice crystals ═══ */
+[data-theme="frost"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - larger to show ice crystal wings */
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center crystal crown - wider */
+    radial-gradient(ellipse 28% 24% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center orb */
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar - ice crystal chain */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 28% 24% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Predator - biomechanical corner overlay ═══ */
+[data-theme="predator"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Corner gems - slightly larger */
+    radial-gradient(ellipse 32% 32% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 32% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 38% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 38% at 100% 100%, black 50%, transparent 100%),
+    /* Top center ornament */
+    radial-gradient(ellipse 22% 20% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center ornament */
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 32% 32% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 32% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 38% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 38% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 20% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  mask-composite: add;
+}
+
+/* ═══ Neon Cyber - angular tech corners with neon line across top ═══ */
+[data-theme="neon"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - angular tech panels */
+    radial-gradient(ellipse 35% 35% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 35% 35% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center chevron/crest */
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center orb */
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top neon bar connecting across */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 35% 35% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 35% 35% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Hellfire - demon skull at top, horns at corners ═══ */
+[data-theme="hellfire"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - demon horns */
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    /* Top center demon skull */
+    radial-gradient(ellipse 26% 24% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center skull */
+    radial-gradient(ellipse 22% 28% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar connecting horns to skull */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 26% 24% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 28% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Aurora - orbital rings at top, tech panels at corners ═══ */
+[data-theme="aurora"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - tech panel arrays */
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center orbital rings/orb - wider to show full rings */
+    radial-gradient(ellipse 28% 26% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center status bar */
+    radial-gradient(ellipse 24% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar connecting panels */
+    linear-gradient(to bottom, black 0%, black 4%, transparent 7%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 28% 26% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 4%, transparent 7%);
+  mask-composite: add;
+}
+
+/* ═══ Sovereign Gold - crown/crystal at top, ornate gold corners ═══ */
+[data-theme="sovereign"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - ornate gold scrollwork */
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    /* Top center crystal crown */
+    radial-gradient(ellipse 24% 24% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center pendant */
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar - gold filigree */
+    linear-gradient(to bottom, black 0%, black 4%, transparent 7%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 24% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 4%, transparent 7%);
+  mask-composite: add;
+}
+
+/* ═══ Cosmic Void - black hole at top, void tendrils at corners ═══ */
+[data-theme="cosmic"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - void tendrils */
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center black hole */
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center void orb */
+    radial-gradient(ellipse 20% 24% at 50% 100%, black 50%, transparent 100%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 20% 24% at 50% 100%, black 50%, transparent 100%);
+  mask-composite: add;
+}
+
+/* ═══ Abyssal Teal - deep sea eye at top, organic corners ═══ */
+[data-theme="abyssal"] .border-frame-corners {
+  -webkit-mask-image:
+    radial-gradient(ellipse 32% 32% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 32% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 20% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 32% 32% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 32% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 20% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  mask-composite: add;
+}
+
+/* ═══ Alien Tech - organic corners with head crest ═══ */
+[data-theme="alien"] .border-frame-corners {
+  -webkit-mask-image:
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%);
+  mask-composite: add;
+}
+
+/* ═══ Flower Power - floral bouquets at corners, vine border ═══ */
+[data-theme="flowerpower"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - large floral bouquets */
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners - floral clusters */
+    radial-gradient(ellipse 38% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 42% at 100% 100%, black 50%, transparent 100%),
+    /* Top center - vine arch with flowers */
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center - gold gem pendant */
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge - vine garland connecting bouquets */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 42% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Cozy Wizard - potion bottles at corners, smoky edges ═══ */
+[data-theme="cozywizard"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - potion bottles + herbs */
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners - more potion bottles */
+    radial-gradient(ellipse 36% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 42% at 100% 100%, black 50%, transparent 100%),
+    /* Top center - smoke/herb cluster */
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center - alchemist tools */
+    radial-gradient(ellipse 28% 28% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge - smoke trail */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 9%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 42% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 28% 28% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 9%);
+  mask-composite: add;
+}
+
+/* ═══ Neon Cyberpunk - angular neon panels, circuit-board edges ═══ */
+[data-theme="cyberpunk"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - angular neon panels */
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center neon crest */
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center display */
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top neon strip */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 36% 36% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 36% 36% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 24% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Gothic Elegance - ornate arches, gargoyle corners, rose window top ═══ */
+[data-theme="gothic"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - gothic spire/gargoyle details */
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners - stone buttress details */
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    /* Top center rose window / cathedral arch */
+    radial-gradient(ellipse 26% 24% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center gothic pendant */
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge - gothic tracery connecting spires */
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 38% 38% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 38% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 32% 42% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 26% 24% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 26% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 5%, transparent 8%);
+  mask-composite: add;
+}
+
+/* ═══ Ornate - thick obsidian borders on ALL sides, geometric medallion, angular corners ═══ */
+[data-theme="ornate"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - angular obsidian brackets */
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners - heavy stone brackets */
+    radial-gradient(ellipse 38% 44% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 44% at 100% 100%, black 50%, transparent 100%),
+    /* Top center - geometric triangle medallion */
+    radial-gradient(ellipse 16% 20% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center - base keystone */
+    radial-gradient(ellipse 18% 18% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar - thick obsidian rail */
+    linear-gradient(to bottom, black 0%, black 7.5%, transparent 11%),
+    /* Bottom edge bar - heavy stone base */
+    linear-gradient(to top, black 0%, black 7%, transparent 10%),
+    /* Left edge bar - thick stone pillar */
+    linear-gradient(to right, black 0%, black 7%, transparent 10%),
+    /* Right edge bar - thick stone pillar */
+    linear-gradient(to left, black 0%, black 7%, transparent 10%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 40% 40% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 40% 40% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 44% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 38% 44% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 16% 20% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 18% 18% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 7.5%, transparent 11%),
+    linear-gradient(to top, black 0%, black 7%, transparent 10%),
+    linear-gradient(to right, black 0%, black 7%, transparent 10%),
+    linear-gradient(to left, black 0%, black 7%, transparent 10%);
+  mask-composite: add;
+}
+
+/* ═══ Carbon Fiber - metallic corners with top medallion ═══ */
+[data-theme="carbonfiber"] .border-frame-corners {
+  -webkit-mask-image:
+    /* Top corners - metallic panel brackets */
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    /* Bottom corners */
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    /* Top center medallion */
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    /* Bottom center emblem */
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    /* Top edge bar - metallic rail */
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  -webkit-mask-composite: source-over;
+
+  mask-image:
+    radial-gradient(ellipse 34% 34% at 0% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 34% 34% at 100% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 0% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 30% 40% at 100% 100%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 22% at 50% 0%, black 50%, transparent 100%),
+    radial-gradient(ellipse 22% 24% at 50% 100%, black 50%, transparent 100%),
+    linear-gradient(to bottom, black 0%, black 4.5%, transparent 7%);
+  mask-composite: add;
+}
+
+/* Carbon Fiber - subtle red/chrome pulse on frame */
+@keyframes carbonPulse {
+  0%, 100% { filter: brightness(1) saturate(1.05) drop-shadow(0 0 6px rgba(220, 38, 38, 0.08)); }
+  50% { filter: brightness(1.12) saturate(1.25) drop-shadow(0 0 14px rgba(220, 38, 38, 0.2)); }
+}
+
+[data-theme="carbonfiber"] .border-frame img,
+[data-theme="carbonfiber"] .border-frame-corners img {
+  animation: carbonPulse 5s ease-in-out infinite !important;
+}
+
+/* Ornate - dark obsidian with gold gleam animation */
+@keyframes ornateShimmer {
+  0%, 100% {
+    filter: brightness(1) saturate(1.1) drop-shadow(0 0 8px rgba(201, 169, 78, 0.15));
+  }
+  20% {
+    filter: brightness(1.25) saturate(1.4) sepia(0.1) drop-shadow(0 0 18px rgba(201, 169, 78, 0.35));
+  }
+  40% {
+    filter: brightness(1.05) saturate(1.15) drop-shadow(0 0 10px rgba(201, 169, 78, 0.15));
+  }
+  65% {
+    filter: brightness(1.3) saturate(1.45) sepia(0.12) drop-shadow(0 0 22px rgba(201, 169, 78, 0.4));
+  }
+  80% {
+    filter: brightness(1.08) saturate(1.2) drop-shadow(0 0 12px rgba(201, 169, 78, 0.2));
+  }
+}
+
+[data-theme="ornate"] .border-frame img,
+[data-theme="ornate"] .border-frame-corners img {
+  animation: ornateShimmer 5s ease-in-out infinite !important;
+}
+
+/* Ornate - gold inner glow along the frame edges */
+[data-theme="ornate"] .border-glow {
+  display: block !important;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    /* Top edge warm gold glow */
+    radial-gradient(ellipse 100% 25% at 50% 0%, rgba(201, 169, 78, 0.1) 0%, transparent 70%),
+    /* Bottom edge gold glow */
+    radial-gradient(ellipse 100% 20% at 50% 100%, rgba(201, 169, 78, 0.07) 0%, transparent 70%),
+    /* Left edge gold glow */
+    radial-gradient(ellipse 15% 80% at 0% 50%, rgba(201, 169, 78, 0.06) 0%, transparent 70%),
+    /* Right edge gold glow */
+    radial-gradient(ellipse 15% 80% at 100% 50%, rgba(201, 169, 78, 0.06) 0%, transparent 70%),
+    /* Center medallion spotlight */
+    radial-gradient(ellipse 12% 15% at 50% 2%, rgba(201, 169, 78, 0.12) 0%, transparent 80%);
+  animation: ornateGlowPulse 6s ease-in-out infinite;
+}
+
+@keyframes ornateGlowPulse {
+  0%, 100% { opacity: 0.5; }
+  35% { opacity: 1; }
+  65% { opacity: 0.8; }
+}
+
+/* Glow overlay - disabled */
+.border-glow {
+  display: none;
+}
+
+/* ═══ Responsive ═══ */
+/* !important ensures responsive rules override theme-specific padding */
+@media (max-width: 1024px) {
+  .animated-border-container > .border-content {
+    padding: 12vh 5vw 7vh 5vw !important;
+  }
+}
+
+@media (max-width: 900px) and (min-width: 769px) {
+  .animated-border-container > .border-content {
+    padding: 10vh 4vw 5vh 4vw !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .border-frame,
+  .border-frame-corners,
+  .border-glow {
+    display: none;
+  }
+  .animated-border-container > .border-content {
+    padding: 0 !important;
+  }
+}
+
+@media (pointer: coarse) {
+  .border-frame,
+  .border-frame-corners,
+  .border-glow {
+    display: none;
+  }
+  .animated-border-container > .border-content {
+    padding: 0 !important;
+  }
+}

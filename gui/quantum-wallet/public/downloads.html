@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quillon Graph — Downloads</title>
+<style>
+  :root{ --bg:#0a0a14; --panel:#140f1e; --amber:#fbbf24; --emerald:#34d399; --orange:#fb923c; --cyan:#22d3ee; --violet:#a78bfa; --ink:#e2e8f0; --muted:#94a3b8; --line:rgba(251,191,36,.18); }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#1a1330,#0a0a14 60%);color:var(--ink);font:15px/1.6 -apple-system,"Segoe UI",Inter,system-ui,sans-serif;min-height:100vh}
+  .wrap{max-width:860px;margin:0 auto;padding:48px 22px 80px}
+  .top{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+  .logo{font-size:26px;font-weight:800;letter-spacing:-.5px}
+  .logo b{color:var(--amber)}
+  .pill{font:600 11px/1 ui-monospace,monospace;padding:5px 9px;border-radius:20px;background:rgba(52,211,153,.16);color:var(--emerald);border:1px solid rgba(52,211,153,.3)}
+  .sub{color:var(--muted);margin:0 0 34px;font-size:15px}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.01));border:1px solid var(--line);border-radius:18px;padding:20px 22px;margin:0 0 18px}
+  .ch{display:flex;align-items:flex-start;gap:14px;margin-bottom:14px}
+  .ic{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex:none;font-size:20px}
+  .ic.node{background:rgba(52,211,153,.14);border:1px solid rgba(52,211,153,.3)}
+  .ic.miner{background:rgba(251,146,60,.14);border:1px solid rgba(251,146,60,.3)}
+  .ic.mcp{background:rgba(34,211,238,.14);border:1px solid rgba(34,211,238,.3)}
+  .ic.wallet{background:rgba(167,139,250,.14);border:1px solid rgba(167,139,250,.3)}
+  .ct h2{margin:0 0 2px;font-size:18px}
+  .ct .d{color:var(--muted);font-size:13.5px}
+  .ver{font:600 11px/1 ui-monospace,monospace;padding:3px 7px;border-radius:6px;background:rgba(52,211,153,.18);color:var(--emerald);margin-left:8px;vertical-align:middle}
+  .cmd{display:flex;align-items:center;gap:10px;background:#05050b;border:1px solid rgba(255,255,255,.08);border-radius:11px;padding:11px 13px;margin-top:6px}
+  .cmd code{font:13px/1.4 ui-monospace,SFMono-Regular,monospace;color:#d7e3ff;flex:1;overflow-x:auto;white-space:nowrap}
+  .cmd button{flex:none;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:var(--muted);border-radius:8px;padding:6px 10px;font-size:12px;cursor:pointer;transition:.15s}
+  .cmd button:hover{color:#fff;border-color:rgba(255,255,255,.3)}
+  .cmd button.ok{color:var(--emerald);border-color:rgba(52,211,153,.4)}
+  .alts{margin-top:10px;font-size:12.5px;color:var(--muted)}
+  .alts a{color:var(--cyan);text-decoration:none}.alts a:hover{text-decoration:underline}
+  .meta{font:11px/1 ui-monospace,monospace;color:#64748b;margin-top:8px}
+  footer{color:#64748b;font-size:12.5px;margin-top:30px;text-align:center}
+  footer a{color:var(--amber);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><div class="logo">Quillon<b>Graph</b></div><span class="pill">node v10.11.59</span></div>
+  <p class="sub">Run a node, mine QUG, or wire an AI agent into your wallet. Everything is a single static binary — no build step.</p>
+
+  <!-- NODE -->
+  <div class="card">
+    <div class="ch">
+      <div class="ic node">🖥️</div>
+      <div class="ct"><h2>Quillon Node<span class="ver">v10.11.59</span></h2><div class="d">Standalone <code>q-api-server</code> — runs a full node, RPC API, and built-in miner. Linux x86-64.</div></div>
+    </div>
+    <div class="cmd"><code id="c-node">wget https://quillon.xyz/downloads/q-api-server-v10.11.59 &amp;&amp; chmod +x q-api-server-v10.11.59</code><button onclick="cp('c-node',this)">Copy</button></div>
+    <div class="cmd" style="margin-top:8px"><code id="c-noderun">./q-api-server-v10.11.59 --port 8080</code><button onclick="cp('c-noderun',this)">Copy</button></div>
+    <div class="meta">~117 MB · glibc ≥ 2.35 · v10.11.59 = hotpath + broadcast-fix + bank web-approve</div>
+  </div>
+
+  <!-- MINER -->
+  <div class="card">
+    <div class="ch">
+      <div class="ic miner">⛏️</div>
+      <div class="ct"><h2>q-miner</h2><div class="d">Standalone CPU/GPU miner. Point it at quillon.xyz and earn QUG.</div></div>
+    </div>
+    <div class="cmd"><code id="c-miner">wget https://quillon.xyz/downloads/q-miner-linux-x64 &amp;&amp; chmod +x q-miner-linux-x64</code><button onclick="cp('c-miner',this)">Copy</button></div>
+    <div class="alts">Other builds:
+      <a href="/downloads/q-miner-linux-arm64">linux-arm64</a> ·
+      <a href="/downloads/q-miner-windows-x64.exe">windows-x64</a> ·
+      <a href="/downloads/q-miner-macos-x64">macos-x64</a> ·
+      <a href="/downloads/q-miner-macos-arm64">macos-arm64</a>
+    </div>
+  </div>
+
+  <!-- MCP -->
+  <div class="card">
+    <div class="ch">
+      <div class="ic mcp">🤖</div>
+      <div class="ct"><h2>Quillon Wallet MCP</h2><div class="d">AI-agent wallet — auto-installs for Claude Code, Cursor, Codex, Qwen Coder, Grok Build. Then just say "create a wallet" / "start mining".</div></div>
+    </div>
+    <div class="cmd"><code id="c-mcp">curl -fsSL https://quillon.xyz/setup-ai.sh | bash</code><button onclick="cp('c-mcp',this)">Copy</button></div>
+    <div class="alts">Windows (PowerShell): <a href="/setup-ai.ps1">irm https://quillon.xyz/setup-ai.ps1 | iex</a></div>
+  </div>
+
+  <!-- WALLET -->
+  <div class="card">
+    <div class="ch">
+      <div class="ic wallet">👛</div>
+      <div class="ct"><h2>Slint Desktop Wallet</h2><div class="d">Native desktop wallet with built-in auto-updater. Linux & Windows.</div></div>
+    </div>
+    <div class="cmd"><code id="c-slint">wget https://quillon.xyz/downloads/slint-wallet-linux-x64 &amp;&amp; chmod +x slint-wallet-linux-x64</code><button onclick="cp('c-slint',this)">Copy</button></div>
+    <div class="alts">Windows: <a href="/downloads/slint-wallet-windows-x64.exe">slint-wallet-windows-x64.exe</a></div>
+  </div>
+
+  <footer>Use <a href="https://quillon.xyz">quillon.xyz</a> (HTTPS, behind the load balancer) for mining + RPC — not :8080 direct. · Quillon Graph</footer>
+</div>
+<script>
+  function cp(id, btn){
+    const t = document.getElementById(id).innerText;
+    navigator.clipboard.writeText(t).then(()=>{ btn.textContent='Copied'; btn.classList.add('ok'); setTimeout(()=>{ btn.textContent='Copy'; btn.classList.remove('ok'); },1600); });
+  }
+</script>
+</body>
+</html>

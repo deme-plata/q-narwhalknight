@@ -1,0 +1,761 @@
+/* Swap Success Modal - Quantum-themed celebration */
+
+@keyframes fadeInScale {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes quantumRing {
+  0% {
+    transform: scale(0.5);
+    opacity: 0;
+  }
+  50% {
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.5);
+    opacity: 0;
+  }
+}
+
+@keyframes particleFloat {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-100px) scale(0);
+    opacity: 0;
+  }
+}
+
+@keyframes checkmarkDraw {
+  0% {
+    stroke-dashoffset: 100;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes circleGrow {
+  0% {
+    stroke-dashoffset: 166;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes swapArrow {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(10px);
+  }
+}
+
+@keyframes trailFlow {
+  0% {
+    opacity: 0;
+    transform: translateX(-20px) scale(0.5);
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(20px) scale(0.5);
+  }
+}
+
+@keyframes holographicShift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes titleGlow {
+  0%, 100% {
+    opacity: 0.3;
+    filter: blur(20px);
+  }
+  50% {
+    opacity: 0.6;
+    filter: blur(30px);
+  }
+}
+
+/* Overlay */
+.swap-success-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeInScale 0.3s ease-out;
+  padding: 20px;
+}
+
+/* Modal container */
+.swap-success-modal {
+  position: relative;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  border-radius: 32px;
+  padding: 60px 40px;
+  max-width: 600px;
+  width: 100%;
+  overflow: hidden;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  box-shadow:
+    0 0 80px rgba(34, 211, 238, 0.3),
+    0 0 40px rgba(168, 85, 247, 0.2),
+    0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: fadeInScale 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.swap-success-modal::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  background: linear-gradient(135deg, #22d3ee, #a855f7, #ec4899, #22d3ee);
+  border-radius: 32px;
+  z-index: -1;
+  opacity: 0.6;
+  animation: holographicShift 3s ease-in-out infinite;
+  background-size: 200% 200%;
+}
+
+/* Particle effects */
+.particle-container {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.quantum-particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  background: radial-gradient(circle, #22d3ee, transparent);
+  border-radius: 50%;
+  animation: particleFloat 2s ease-out infinite;
+  box-shadow: 0 0 10px #22d3ee;
+}
+
+/* Quantum rings */
+.quantum-rings {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.quantum-ring {
+  position: absolute;
+  width: 200px;
+  height: 200px;
+  border: 2px solid;
+  border-radius: 50%;
+  top: -100px;
+  left: -100px;
+  animation: quantumRing 2s ease-out infinite;
+}
+
+.quantum-ring.ring-1 {
+  border-color: rgba(34, 211, 238, 0.6);
+  animation-delay: 0s;
+}
+
+.quantum-ring.ring-2 {
+  border-color: rgba(168, 85, 247, 0.6);
+  animation-delay: 0.4s;
+}
+
+.quantum-ring.ring-3 {
+  border-color: rgba(236, 72, 153, 0.6);
+  animation-delay: 0.8s;
+}
+
+/* Success icon */
+.success-icon-wrapper {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto 30px;
+  opacity: 0;
+  transform: scale(0.5) rotate(-180deg);
+  transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.success-icon-wrapper.show {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.success-icon-bg {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.3), transparent);
+  border-radius: 50%;
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+.success-checkmark {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  filter: drop-shadow(0 0 20px rgba(34, 211, 238, 0.8));
+}
+
+.checkmark-circle {
+  stroke: #22d3ee;
+  stroke-width: 3;
+  stroke-dasharray: 166;
+  stroke-dashoffset: 166;
+  animation: circleGrow 0.6s cubic-bezier(0.65, 0, 0.45, 1) 0.2s forwards;
+}
+
+.checkmark-check {
+  stroke: #22d3ee;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-dasharray: 48;
+  stroke-dashoffset: 48;
+  animation: checkmarkDraw 0.4s cubic-bezier(0.65, 0, 0.45, 1) 0.8s forwards;
+}
+
+/* Content */
+.success-content {
+  position: relative;
+  z-index: 1;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: all 0.5s ease-out 0.3s;
+}
+
+.success-content.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Title */
+.success-title {
+  position: relative;
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.title-text {
+  font-size: 36px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #22d3ee, #a855f7, #ec4899);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: inline-block;
+  position: relative;
+  z-index: 1;
+}
+
+.title-glow {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #22d3ee, #a855f7, #ec4899);
+  filter: blur(40px);
+  opacity: 0.4;
+  animation: titleGlow 2s ease-in-out infinite;
+}
+
+.success-subtitle {
+  text-align: center;
+  color: #94a3b8;
+  font-size: 16px;
+  margin-bottom: 40px;
+}
+
+/* Swap details */
+.swap-details {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 30px;
+  padding: 30px;
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 20px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+}
+
+.token-display {
+  position: relative;
+  flex: 1;
+  text-align: center;
+  padding: 20px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(168, 85, 247, 0.1));
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  overflow: hidden;
+}
+
+.token-display::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.token-display:hover::before {
+  opacity: 1;
+}
+
+.token-amount {
+  font-size: 28px;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 8px;
+  text-shadow: 0 0 20px rgba(34, 211, 238, 0.5);
+}
+
+.token-symbol {
+  font-size: 14px;
+  font-weight: 600;
+  color: #22d3ee;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.token-glow {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 80%;
+  height: 4px;
+  background: linear-gradient(90deg, transparent, #22d3ee, transparent);
+  filter: blur(4px);
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+/* Swap arrow */
+.swap-arrow-container {
+  position: relative;
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.swap-arrow {
+  width: 40px;
+  height: 40px;
+  color: #22d3ee;
+  animation: swapArrow 1.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.8));
+}
+
+.arrow-trail {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #22d3ee, transparent);
+  transform: translateY(-50%);
+  animation: trailFlow 1.5s ease-in-out infinite;
+}
+
+.arrow-trail.trail-1 {
+  animation-delay: 0s;
+}
+
+.arrow-trail.trail-2 {
+  animation-delay: 0.3s;
+}
+
+.arrow-trail.trail-3 {
+  animation-delay: 0.6s;
+}
+
+/* Transaction hash */
+.transaction-hash {
+  text-align: center;
+  margin-bottom: 25px;
+  padding: 15px;
+  background: rgba(15, 23, 42, 0.4);
+  border-radius: 12px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+}
+
+.hash-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.hash-value {
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  color: #22d3ee;
+  font-weight: 600;
+}
+
+/* Security badge */
+.security-badge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 20px;
+  margin-bottom: 30px;
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(168, 85, 247, 0.1));
+  border-radius: 16px;
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  overflow: hidden;
+}
+
+.badge-icon {
+  font-size: 32px;
+  filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.6));
+}
+
+.badge-text {
+  flex: 1;
+}
+
+.badge-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #ffffff;
+  margin-bottom: 4px;
+}
+
+.badge-subtitle {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.badge-shimmer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Action buttons */
+.success-actions {
+  display: flex;
+  gap: 15px;
+}
+
+.action-button {
+  position: relative;
+  flex: 1;
+  padding: 16px 24px;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  overflow: hidden;
+  transition: all 0.3s;
+}
+
+.action-button.secondary {
+  background: rgba(71, 85, 105, 0.4);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.action-button.secondary:hover {
+  background: rgba(71, 85, 105, 0.6);
+  border-color: rgba(148, 163, 184, 0.5);
+  transform: translateY(-2px);
+}
+
+.action-button.primary {
+  background: linear-gradient(135deg, #22d3ee, #a855f7);
+  color: #ffffff;
+  border: 1px solid transparent;
+}
+
+.action-button.primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px rgba(34, 211, 238, 0.4);
+}
+
+.button-text {
+  position: relative;
+  z-index: 1;
+}
+
+.button-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, rgba(255, 255, 255, 0.3), transparent);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.action-button:hover .button-glow {
+  opacity: 1;
+}
+
+/* Close button */
+.close-button {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  background: rgba(71, 85, 105, 0.4);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 10px;
+  color: #e2e8f0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s;
+  z-index: 10;
+}
+
+.close-button:hover {
+  background: rgba(71, 85, 105, 0.6);
+  border-color: rgba(148, 163, 184, 0.5);
+  transform: rotate(90deg);
+}
+
+.close-button svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* Holographic overlay */
+.holographic-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    135deg,
+    rgba(34, 211, 238, 0.1) 0%,
+    rgba(168, 85, 247, 0.1) 25%,
+    rgba(236, 72, 153, 0.1) 50%,
+    rgba(168, 85, 247, 0.1) 75%,
+    rgba(34, 211, 238, 0.1) 100%
+  );
+  background-size: 200% 200%;
+  animation: holographicShift 4s ease-in-out infinite;
+  pointer-events: none;
+  opacity: 0.3;
+  mix-blend-mode: overlay;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .swap-success-modal {
+    padding: 40px 24px;
+  }
+
+  .title-text {
+    font-size: 28px;
+  }
+
+  .swap-details {
+    flex-direction: column;
+    gap: 15px;
+    padding: 20px;
+  }
+
+  .swap-arrow-container {
+    transform: rotate(90deg);
+    width: 40px;
+    height: 40px;
+  }
+
+  .success-actions {
+    flex-direction: column;
+  }
+
+  .token-amount {
+    font-size: 24px;
+  }
+}
+
+/* ============================================
+   PERFORMANCE MODE EXEMPTION v2.4.2
+   Keep SwapSuccessModal animations beautiful
+   even when performance mode is enabled
+   ============================================ */
+
+/* Re-enable animations for SwapSuccessModal components */
+.performance-mode .swap-success-overlay,
+.performance-mode .swap-success-overlay *,
+.performance-mode .swap-success-overlay *::before,
+.performance-mode .swap-success-overlay *::after {
+  animation-duration: inherit !important;
+  animation-name: inherit !important;
+}
+
+/* Overlay fade in */
+.performance-mode .swap-success-overlay {
+  animation: fadeInScale 0.3s ease-out !important;
+}
+
+/* Modal entrance animation */
+.performance-mode .swap-success-modal {
+  animation: fadeInScale 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+/* Holographic border shift */
+.performance-mode .swap-success-modal::before {
+  animation: holographicShift 3s ease-in-out infinite !important;
+}
+
+/* Quantum particle effects */
+.performance-mode .quantum-particle {
+  animation: particleFloat 2s ease-out infinite !important;
+  display: block !important;
+}
+
+/* Quantum rings - expanding circles */
+.performance-mode .quantum-ring {
+  animation: quantumRing 2s ease-out infinite !important;
+  display: block !important;
+}
+
+.performance-mode .quantum-ring.ring-1 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0s !important;
+}
+
+.performance-mode .quantum-ring.ring-2 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0.4s !important;
+}
+
+.performance-mode .quantum-ring.ring-3 {
+  animation: quantumRing 2s ease-out infinite !important;
+  animation-delay: 0.8s !important;
+}
+
+/* Success icon background pulse */
+.performance-mode .success-icon-bg {
+  animation: pulseGlow 2s ease-in-out infinite !important;
+}
+
+/* Checkmark SVG animations */
+.performance-mode .checkmark-circle {
+  animation: circleGrow 0.6s cubic-bezier(0.65, 0, 0.45, 1) 0.2s forwards !important;
+}
+
+.performance-mode .checkmark-check {
+  animation: checkmarkDraw 0.4s cubic-bezier(0.65, 0, 0.45, 1) 0.8s forwards !important;
+}
+
+/* Title glow animation */
+.performance-mode .title-glow {
+  animation: titleGlow 2s ease-in-out infinite !important;
+}
+
+/* Token glow pulses */
+.performance-mode .token-glow {
+  animation: pulseGlow 2s ease-in-out infinite !important;
+}
+
+/* Swap arrow motion */
+.performance-mode .swap-arrow {
+  animation: swapArrow 1.5s ease-in-out infinite !important;
+}
+
+/* Arrow trail flow effect */
+.performance-mode .arrow-trail {
+  animation: trailFlow 1.5s ease-in-out infinite !important;
+}
+
+.performance-mode .arrow-trail.trail-1 {
+  animation-delay: 0s !important;
+}
+
+.performance-mode .arrow-trail.trail-2 {
+  animation-delay: 0.3s !important;
+}
+
+.performance-mode .arrow-trail.trail-3 {
+  animation-delay: 0.6s !important;
+}
+
+/* Security badge shimmer */
+.performance-mode .badge-shimmer {
+  animation: shimmer 3s ease-in-out infinite !important;
+  display: block !important;
+}
+
+/* Holographic overlay effect */
+.performance-mode .swap-success-overlay .holographic-overlay {
+  animation: holographicShift 4s ease-in-out infinite !important;
+  display: block !important;
+}
+
+/* Particle container - ensure visible */
+.performance-mode .swap-success-overlay .particle-container {
+  display: block !important;
+}
+
+/* Keep transitions for interactive elements */
+.performance-mode .action-button {
+  transition: all 0.3s !important;
+}
+
+.performance-mode .close-button {
+  transition: all 0.3s !important;
+}
+
+.performance-mode .token-display::before {
+  transition: opacity 0.3s !important;
+}
+
+.performance-mode .button-glow {
+  transition: opacity 0.3s !important;
+}
