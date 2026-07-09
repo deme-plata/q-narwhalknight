@@ -810,7 +810,18 @@ async fn merge_p2p_response(
     // Capture BEFORE wallet bootstrap runs — used for QUGUSD gating below.
     let bootstrap_was_done_before_this_sync = app_state.bootstrap_wallet_sync_done
         .load(std::sync::atomic::Ordering::SeqCst);
-    if !response.wallet_balances.is_empty() {
+    // v10.11.52 (CLAUDE.md Rule 3): the authoritative genesis node never imports peer
+    // wallet balances over P2P either — its RocksDB is the network ground truth. This is
+    // the defense-in-depth twin of the HTTP-path guard in merge_http_snapshot; together
+    // they stop a divergent peer from ever moving a customer balance on the genesis node.
+    let authoritative_standalone = std::env::var("Q_AUTHORITATIVE_STANDALONE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if authoritative_standalone && !response.wallet_balances.is_empty() {
+        warn!("🛡️ [STATE SYNC] Authoritative node — SKIPPING P2P import of {} peer wallet balances \
+               (genesis balances are ground truth). CLAUDE.md Rule 3.",
+              response.wallet_balances.len());
+    } else if !response.wallet_balances.is_empty() {
         let already_done = bootstrap_was_done_before_this_sync;
         // v10.7.2: also treat checkpoint-applied nodes as "already done"
         let checkpoint_applied = app_state.storage_engine.is_checkpoint_applied().await;
@@ -1178,7 +1189,7 @@ async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
     let bootstrap_peers: &[&str] = &[
         "http://89.149.241.126:8080",   // Epsilon — authoritative 10Gbit supernode, most complete balance state
         "http://185.182.185.227:8080",  // Beta
-        "http://109.205.176.60:8080",   // Gamma
+        "http://109.205.176.60:8808",   // Gamma (API port 8808)
         "http://161.35.219.10:8080",    // Alpha
     ];
 
@@ -1618,7 +1629,23 @@ async fn merge_http_snapshot(app_state: &Arc<AppState>, snapshot: &FullStateSnap
     // ---- BFT finality records: AUTHORITATIVE overwrite ----
     // Finality records have 2f+1 Bracha READY signatures — they override block-derived balances.
     // Applied AFTER the disabled wallet_balances section so they always take precedence.
-    if !snapshot.finality_records.is_empty() {
+    //
+    // v10.11.52 (CLAUDE.md Rule 3): the authoritative genesis node (Epsilon,
+    // Q_AUTHORITATIVE_STANDALONE=true) has run since genesis and its RocksDB balances ARE
+    // the network ground truth. It must NEVER overwrite them from a peer snapshot — doing so
+    // is exactly how a divergent peer (e.g. a checkpoint-bootstrapped Beta) made customer
+    // balances "bounce" between the two states across restarts. On this node, skip importing
+    // peer finality records entirely; we only ever export ours.
+    let authoritative_standalone = std::env::var("Q_AUTHORITATIVE_STANDALONE")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if authoritative_standalone && !snapshot.finality_records.is_empty() {
+        warn!(
+            "🛡️ [STATE SYNC HTTP] Authoritative node — SKIPPING {} peer finality records \
+             (our genesis balances are ground truth; never overwrite from a peer). CLAUDE.md Rule 3.",
+            snapshot.finality_records.len()
+        );
+    } else if !snapshot.finality_records.is_empty() {
         info!("🔐 [STATE SYNC HTTP] Applying {} BFT-finalized balance records from peer",
               snapshot.finality_records.len());
         // v10.11.23 MEM-LEAK/FREEZE FIX: finality records are authoritative,

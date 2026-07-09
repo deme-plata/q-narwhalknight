@@ -11,13 +11,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::handlers::parse_wallet_address;
 use q_storage::BalanceStorage; // v10.1.2: For get_balance() in loan collateral check
 use crate::privacy_proof_generator::apply_privacy_proofs; // v3.4.16: Auto privacy by default
 use crate::streaming::StreamEvent;
 use crate::AppState;
+use crate::wallet_auth::AuthenticatedWallet; // v10.11.59: web founder approval via Ed25519 X-Wallet-Auth
 use chrono::Utc;
 use q_quillon_bank::{AssetType, QuillonBankSystem};
 use q_types::{ApiResponse, DeliveryMethod, EmailMessage, Transaction};
@@ -47,6 +48,7 @@ pub fn create_public_routes() -> Router<Arc<AppState>> {
         .route("/stablecoin/collateral", get(get_collateral_status))
         .route("/stablecoin/peg", get(get_peg_status))
         .route("/lending/applications", get(get_loan_applications))
+        .route("/lending/approve-web", post(approve_loan_web))
         .route("/lending/apply", post(apply_loan))
         .route("/lending/payback", post(payback_loan))
         .route("/lending/at-risk", get(get_loans_at_risk))
@@ -784,6 +786,35 @@ async fn get_loan_applications(
     Ok(Json(ApiResponse::success(
         serde_json::json!({"applications": applications}),
     )))
+}
+
+// v10.11.59 (bank-admin-401 fix): web admin loan approval via Ed25519 X-Wallet-Auth.
+// The founder approves loans from the browser admin tab using their normal wallet
+// signature, verified by the AuthenticatedWallet extractor (SHA3-256 challenge over
+// addr|timestamp|path|body_hash, 5-min replay window). No AEGIS-QL key needed in the
+// browser. Gated: the authenticated wallet MUST equal the founder wallet, then we
+// delegate to the existing approve_loan logic. The AEGIS-QL CLI path is untouched.
+pub async fn approve_loan_web(
+    auth: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<serde_json::Value>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let founder_bytes = match hex::decode(crate::aegis_auth_middleware::FOUNDER_WALLET) {
+        Ok(b) if b.len() == 32 => b,
+        _ => {
+            error!("approve_loan_web: FOUNDER_WALLET constant is malformed");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    if &auth.address[..] != &founder_bytes[..] {
+        warn!(
+            "approve_loan_web: non-founder wallet {} rejected for loan approval",
+            hex::encode(&auth.address[..8])
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    info!("approve_loan_web: founder authenticated via Ed25519 X-Wallet-Auth, approving");
+    approve_loan(State(state), Json(request)).await
 }
 
 pub async fn approve_loan(

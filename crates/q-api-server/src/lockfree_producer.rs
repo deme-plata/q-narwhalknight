@@ -325,7 +325,7 @@ impl LockFreeProducer {
                         }
                     };
                     if let Some(ref b) = block {
-                        info!(
+                        debug!(
                             "✅ Producer #{}: Created block at height {}",
                             producer_id, b.header.height
                         );
@@ -623,7 +623,7 @@ impl LockFreeProducer {
                         }
                     };
                     if let Some(ref b) = block {
-                        info!(
+                        debug!(
                             "✅ Producer #{}: Created block at height {}",
                             producer_id, b.header.height
                         );
@@ -1294,6 +1294,18 @@ pub struct LockFreeProducerPool {
     /// in the pool each have their own height tracking. This global counter ensures
     /// no producer in the pool produces at a height that any other producer already produced.
     pool_last_produced_height: AtomicU64,
+
+    /// 🩹 v10.11.55: DURABLE-POINTER STALL TRACKING (contiguity-hole healer).
+    /// `get_highest_contiguous_block()` returns the optimistic in-memory height_cache,
+    /// which can run AHEAD of the durable contiguous pointer (`qblock:latest`) when a
+    /// height is skipped from durable save. Once that happens block_writer's
+    /// "only height==pointer+1 extends" logic can never cross the hole, so the durable
+    /// pointer freezes forever while the cache keeps climbing — the production freeze.
+    /// These two counters let `sync_from_storage` notice a STUCK durable pointer (across
+    /// several syncs, so we don't react to transient catch-up lag) and rewind production
+    /// to the durable tip so the missing heights re-produce and scan-forward heals the chain.
+    db_pointer_stall_height: AtomicU64,
+    db_pointer_stall_count: AtomicU64,
 }
 
 impl LockFreeProducerPool {
@@ -1334,6 +1346,8 @@ impl LockFreeProducerPool {
             production_in_progress: AtomicBool::new(false),
             production_in_progress_since: AtomicU64::new(0),
             pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
+            db_pointer_stall_height: AtomicU64::new(0), // v10.11.55: contiguity-hole healer
+            db_pointer_stall_count: AtomicU64::new(0),
         }
     }
 
@@ -1384,6 +1398,8 @@ impl LockFreeProducerPool {
             production_in_progress: AtomicBool::new(false),
             production_in_progress_since: AtomicU64::new(0),
             pool_last_produced_height: AtomicU64::new(0), // v2.3.15-beta: Pool-level duplicate prevention
+            db_pointer_stall_height: AtomicU64::new(0), // v10.11.55: contiguity-hole healer
+            db_pointer_stall_count: AtomicU64::new(0),
         })
     }
 
@@ -1438,7 +1454,7 @@ impl LockFreeProducerPool {
     /// ✅ v1.1.30-beta: FIX - Only ONE producer should produce per round to prevent double rewards!
     ///    The bug was: both producers could produce at the same height, causing 2x mining rewards.
     pub async fn produce_blocks(&self) -> Vec<(usize, QBlock)> {
-        info!("🔍 [PRODUCE_BLOCKS] ENTERED — num_producers={}, pool_last_produced={}",
+        debug!("🔍 [PRODUCE_BLOCKS] ENTERED — num_producers={}, pool_last_produced={}",
               self.num_producers, self.pool_last_produced_height.load(Ordering::SeqCst));
 
         // v10.2.9: Zombie flag detection — if stuck >120s, force-clear
@@ -1458,7 +1474,7 @@ impl LockFreeProducerPool {
         if self.production_in_progress.compare_exchange(
             false, true, Ordering::SeqCst, Ordering::SeqCst
         ).is_err() {
-            info!("❌ [PRODUCE_BLOCKS] EXIT: RACE PREVENTION — another call in progress");
+            debug!("❌ [PRODUCE_BLOCKS] EXIT: RACE PREVENTION — another call in progress");
             return Vec::new();
         }
 
@@ -1496,7 +1512,7 @@ impl LockFreeProducerPool {
             // ✅ v1.0.13-beta: Handle Result type from should_produce()
             match producer.should_produce().await {
                 Ok(true) => {
-                    info!("🔍 [PRODUCE_BLOCKS] Producer #{} says YES — calling produce_block()...", producer_id);
+                    debug!("🔍 [PRODUCE_BLOCKS] Producer #{} says YES — calling produce_block()...", producer_id);
                     // Produce block (async via channel)
                     if let Some(block) = producer.produce_block().await {
                         let block_height = block.header.height;
@@ -1517,7 +1533,7 @@ impl LockFreeProducerPool {
                         // Update pool height BEFORE adding block
                         self.pool_last_produced_height.store(block_height, Ordering::SeqCst);
 
-                        info!(
+                        debug!(
                             "🎉 Lock-free producer #{} created block at height {} (pool_height updated)",
                             producer_id, block_height
                         );
@@ -1525,7 +1541,7 @@ impl LockFreeProducerPool {
                         // ✅ v1.1.30-beta CRITICAL FIX: Only ONE block per round!
                         break;
                     } else {
-                        info!("⚠️ [PRODUCE_BLOCKS] Producer #{} returned None from produce_block() — see EXIT reason in producer logs", producer_id);
+                        debug!("⚠️ [PRODUCE_BLOCKS] Producer #{} returned None from produce_block() — see EXIT reason in producer logs", producer_id);
                     }
                 }
                 Ok(false) => {
@@ -1846,7 +1862,7 @@ impl LockFreeProducerPool {
         storage: &Arc<q_storage::QStorage>,
     ) -> anyhow::Result<()> {
         let sync_start = std::time::Instant::now();
-        info!(
+        debug!(
             "🔄 [LOCK-FREE SYNC v1.0.2] Synchronizing all {} producers with blockchain state...",
             self.num_producers
         );
@@ -1877,7 +1893,7 @@ impl LockFreeProducerPool {
         // because it runs on an unblocked worker thread.
         let storage_query_start = std::time::Instant::now();
         let storage_clone = Arc::clone(storage);
-        let highest_height = match timeout(Duration::from_secs(5), tokio::task::spawn_blocking({
+        let mut highest_height = match timeout(Duration::from_secs(5), tokio::task::spawn_blocking({
             let storage_ref = Arc::clone(&storage_clone);
             move || {
                 tokio::runtime::Handle::current().block_on(storage_ref.get_highest_contiguous_block())
@@ -1930,14 +1946,94 @@ impl LockFreeProducerPool {
         );
 
         if highest_height == 0 {
-            info!("📝 [LOCK-FREE SYNC] No blocks in storage yet - producers at genesis");
+            debug!("📝 [LOCK-FREE SYNC] No blocks in storage yet - producers at genesis");
             return Ok(());
         }
 
-        info!(
+        debug!(
             "🔍 [LOCK-FREE SYNC] Found highest block at height {} in storage",
             highest_height
         );
+
+        // 🩹 v10.11.55: DURABLE-POINTER STALL CLAMP — heal a permanent contiguity hole.
+        //
+        // `highest_height` above is the optimistic in-memory height_cache. It can run AHEAD
+        // of the durable contiguous pointer `db_pointer` (qblock:latest) when a height was
+        // skipped from durable save (lock-contention -> save_qblock timeout -> producer
+        // advanced current_height past the unsaved height). Once that hole exists,
+        // block_writer's "only height==pointer+1 extends" + bounded 500-block scan-forward
+        // can never cross it, so the durable pointer FREEZES while the cache keeps climbing.
+        // Reads then slow with the growing gap until get_highest_contiguous_block trips its
+        // 5s wrapper -> full production freeze.
+        //
+        // FIX: if the durable pointer has been STUCK (unchanged) across STALL_SYNCS
+        // consecutive syncs while the cache ran > STALL_GAP ahead, treat it as a hole:
+        // rewind the producer's sync target to the durable pointer and reset the cache down
+        // to it, so the node re-produces the never-saved heights and scan-forward heals the
+        // chain. The existing v7.3.4 POOL-STALL-FIX below then resets pool_last_produced_height
+        // so the pool dedup allows the re-production.
+        //
+        // BALANCE SAFETY (Rule 1): we act ONLY after the pointer is demonstrably stuck for
+        // several syncs (not transient catch-up lag, where the pointer keeps advancing).
+        // Heights between pointer and cache were never durably saved, so their coinbase/tx
+        // balances were never applied — re-producing them cannot double-credit. The max-wins
+        // guard in save_wallet_balances is a further backstop against any lowering.
+        const STALL_GAP: u64 = 50; // cache must exceed durable pointer by at least this
+        const STALL_SYNCS: u64 = 3; // ...for this many consecutive syncs before we rewind
+        if db_pointer > 0 && highest_height > db_pointer + STALL_GAP {
+            let prev = self.db_pointer_stall_height.swap(db_pointer, Ordering::SeqCst);
+            let stalls = if prev == db_pointer {
+                self.db_pointer_stall_count.fetch_add(1, Ordering::SeqCst) + 1
+            } else {
+                // pointer moved since last check -> healthy progress, reset the counter
+                self.db_pointer_stall_count.store(0, Ordering::SeqCst);
+                0
+            };
+            if stalls >= STALL_SYNCS {
+                warn!(
+                    "🩹 [DURABLE-CLAMP v10.11.55] qblock:latest STUCK at {} for {} syncs while \
+                     height_cache={} (gap {}). Attempting verified durable pointer advance before \
+                     falling back to production rewind.",
+                    db_pointer, stalls, highest_height, highest_height - db_pointer
+                );
+                match storage.tick_contiguity_advance().await {
+                    Ok((from, to)) if to > from => {
+                        warn!(
+                            "🩹 [DURABLE-CLAMP v10.11.56] Advanced durable qblock:latest {} → {} \
+                             instead of rewinding optimistic height_cache",
+                            from, to
+                        );
+                        self.db_pointer_stall_count.store(0, Ordering::SeqCst);
+                    }
+                    Ok((from, to)) => {
+                        warn!(
+                            "🩹 [DURABLE-CLAMP v10.11.56] Durable pointer could not advance ({} → {}); \
+                             falling back to rewind for a real contiguity gap",
+                            from, to
+                        );
+                        // Correct the lying cache at its source so get_highest_contiguous_block stops
+                        // returning a height above the durable contiguous chain.
+                        storage.update_height_cache(db_pointer).await;
+                        self.db_pointer_stall_count.store(0, Ordering::SeqCst);
+                        highest_height = db_pointer;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "🩹 [DURABLE-CLAMP v10.11.56] Durable pointer advance failed: {}; \
+                             falling back to rewind",
+                            e
+                        );
+                        storage.update_height_cache(db_pointer).await;
+                        self.db_pointer_stall_count.store(0, Ordering::SeqCst);
+                        highest_height = db_pointer;
+                    }
+                }
+            }
+        } else {
+            // Healthy: pointer is keeping pace (or genuinely caught up). Clear stall tracking.
+            self.db_pointer_stall_count.store(0, Ordering::SeqCst);
+            self.db_pointer_stall_height.store(db_pointer, Ordering::SeqCst);
+        }
 
         // v7.3.4: Handle decompression errors gracefully instead of propagating.
         // If the block can't be deserialized/decompressed, fall through to height-only mode
@@ -1980,7 +2076,7 @@ impl LockFreeProducerPool {
                 let new_difficulty = latest_block.header.total_difficulty;
                 let new_dag_round = latest_block.header.dag_round;
 
-                info!(
+                debug!(
                     "   Latest block metadata: height={}, hash={}",
                     new_height,
                     hex::encode(&new_hash[..8])
@@ -2018,7 +2114,7 @@ impl LockFreeProducerPool {
                         // Note: Producers will converge naturally through normal block production
                         // No need to force synchronization - that's what caused the deadlock!
                     } else {
-                        info!(
+                        debug!(
                             "✅ [SYNC-CONSENSUS] All {} producers at height {}",
                             count, consensus_height
                         );
@@ -2040,7 +2136,7 @@ impl LockFreeProducerPool {
                     self.pool_last_produced_height.store(new_height, Ordering::SeqCst);
                 }
 
-                info!(
+                debug!(
                     "✅ [LOCK-FREE SYNC] All producers synchronized to height {} (ZERO LOCKS!)",
                     new_height
                 );
@@ -2077,7 +2173,7 @@ impl LockFreeProducerPool {
                     self.pool_last_produced_height.store(highest_height, Ordering::SeqCst);
                 }
 
-                info!("✅ [LOCK-FREE SYNC] All producers synchronized to height {} (height-only mode)", highest_height);
+                debug!("✅ [LOCK-FREE SYNC] All producers synchronized to height {} (height-only mode)", highest_height);
             }
         }
 
@@ -2088,7 +2184,7 @@ impl LockFreeProducerPool {
             sync_total_duration
         );
         if sync_total_duration.as_millis() > 100 {
-            warn!(
+            debug!(
                 "⚠️  [SLOW-SYNC] sync_from_storage took {:?} (>100ms threshold)",
                 sync_total_duration
             );
@@ -2129,12 +2225,21 @@ impl LockFreeProducerPool {
             return Ok(()); // No producers
         };
 
-        // Only advance forward
-        if new_height > current_height {
-            info!(
-                "📈 [HEIGHT ADVANCE] Network block at {}, advancing producers from {}",
-                new_height, current_height
-            );
+        // Advance forward, or refresh all producers at the same height. The same-height
+        // case matters after local production: the winning producer may already be at
+        // `new_height`, while the other producers still need the new hash/difficulty.
+        if new_height >= current_height {
+            if new_height > current_height {
+                debug!(
+                    "📈 [HEIGHT ADVANCE] Network block at {}, advancing producers from {}",
+                    new_height, current_height
+                );
+            } else {
+                debug!(
+                    "📊 [HEIGHT ADVANCE] Height {} already current on first producer; refreshing all producers",
+                    new_height
+                );
+            }
 
             // Update all producers via their command channels
             for (i, handle) in self.producers.iter().enumerate() {
@@ -2151,7 +2256,7 @@ impl LockFreeProducerPool {
                 }
             }
 
-            info!(
+            debug!(
                 "✅ [HEIGHT ADVANCE] All {} producers advanced to height {}",
                 self.producers.len(),
                 new_height
@@ -2162,8 +2267,6 @@ impl LockFreeProducerPool {
                 current_height, new_height
             );
             // For reorgs, trigger full resync (TODO: implement reorg handling)
-        } else {
-            debug!("📊 [HEIGHT ADVANCE] Height {} already current", new_height);
         }
 
         Ok(())
@@ -2301,7 +2404,7 @@ impl LockFreeProducerPool {
         let producer_index = producer_id % self.num_producers;
         self.producers[producer_index].advance_height(block_hash);
 
-        info!("✅ [v1.0.8-beta FIX] Pool: Producer #{} height advance command sent AFTER storage confirmation",
+        debug!("✅ [v1.0.8-beta FIX] Pool: Producer #{} height advance command sent AFTER storage confirmation",
               producer_id);
     }
 

@@ -649,6 +649,17 @@ impl IpfsBackupSystem {
 
     /// Start automatic hourly backups
     pub async fn start_auto_backup(self: Arc<Self>) {
+        // v10.11.76 OOM FIX: gated behind Q_ENABLE_BACKUP (default OFF).
+        // create_incremental_backup -> export_blocks_range() serializes the ENTIRE
+        // (last_backup_height, current_height] range into ONE Vec<u8>. On a fresh
+        // checkpoint-bootstrapped node last_backup_height~=1, so the first backup
+        // tries to export ~14M blocks -> 1 GiB alloc -> OOM abort (crashed every
+        // fresh Windows node within an hour, 2026-07-05). Only archive/bootstrap
+        // operators with the RAM headroom should enable it.
+        if !std::env::var("Q_ENABLE_BACKUP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+            info!("📦 [BACKUP] auto-backup disabled (set Q_ENABLE_BACKUP=1 to enable)");
+            return;
+        }
         info!("📦 [BACKUP] Starting automatic hourly backup system");
 
         let backup_system = self.clone();

@@ -45,7 +45,7 @@ use crate::AppState;
 
 /// Server configuration
 const ALPHA_URL: &str = "http://161.35.219.10:8080";
-const GAMMA_URL: &str = "http://109.205.176.60:8080";
+const GAMMA_URL: &str = "http://109.205.176.60:8808";
 const DELTA_URL: &str = "http://5.79.79.158:8080";
 const EPSILON_URL: &str = "http://89.149.241.126:8080";
 const GAMMA_IP: &str = "109.205.176.60";

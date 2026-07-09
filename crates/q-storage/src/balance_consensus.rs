@@ -2089,6 +2089,15 @@ pub fn replay_block_state_changes(
         return;
     }
 
+    // v10.11.76 (2026-07-04): A reserved-token (QUGUSD / QSHARE) transfer travels as
+    // tx_type=TokenTransfer since the 2026-06-24 "A2" UI change (previously Transfer, so it
+    // matched the `== Transfer` skip below). balance_consensus already credits these reserved
+    // tokens to token_balances via its `token_type` routing, so ALSO running them through
+    // StateProcessor::process_token_transfer here credits the recipient a SECOND time
+    // (StateApplicator applies incrementally) — the "send QUGUSD, recipient receives 2×"
+    // phantom-mint. Skip reserved-token transfers here, exactly like the vault/stablecoin skip.
+    // (helper `is_reserved_token_transfer` is module-level, below, so it is unit-testable.)
+
     // Count non-coinbase/non-transfer transactions to avoid unnecessary setup
     // v8.7.4: Also skip StableMint/StableBurn/VaultLiquidate — these are propagated in blocks
     // for record-keeping, but the actual vault state updates happen via CollateralVault
@@ -2096,6 +2105,10 @@ pub fn replay_block_state_changes(
     // StateProcessor would double-credit QUGUSD to token_balances, causing balance inflation.
     let rich_tx_count = block.transactions.iter().filter(|tx| {
         if tx.is_coinbase() || tx.effective_tx_type() == TransactionType::Transfer {
+            return false;
+        }
+        // v10.11.76: reserved-token transfers are handled by balance_consensus — skip.
+        if is_reserved_token_transfer(tx) {
             return false;
         }
         // Skip vault/stablecoin types — handled by CollateralVault path
@@ -2127,6 +2140,17 @@ pub fn replay_block_state_changes(
 
         // Skip coinbase and basic transfers — already handled by balance consensus
         if block_tx.is_coinbase() || tx_type == TransactionType::Transfer {
+            continue;
+        }
+
+        // v10.11.76: Skip reserved-token (QUGUSD / QSHARE) transfers — balance_consensus
+        // already credits them via token_type routing. Processing them through StateProcessor
+        // here double-credits the recipient (the "recipient receives 2× QUGUSD" bug).
+        if is_reserved_token_transfer(block_tx) {
+            debug!(
+                "🪙 [STATE REPLAY v10.11.76] Skipping reserved-token transfer at h={} (handled by balance consensus)",
+                block.header.height
+            );
             continue;
         }
 
@@ -2197,6 +2221,24 @@ pub fn replay_block_state_changes(
             let _ = db.put_cf(&cf, watermark_key, &block.header.height.to_le_bytes());
         }
     }
+}
+
+/// v10.11.76 (2026-07-04): true when `tx` is a transfer of a RESERVED token
+/// (QUGUSD / QSHARE). Since the 2026-06-24 "A2" UI change these travel as
+/// tx_type=TokenTransfer with the reserved token address in tx.data[0..32].
+/// balance_consensus credits them via `token_type` routing, so any generic
+/// token/custom path (StateProcessor replay, the mempool custom-token branch)
+/// must skip them or the recipient is credited twice — the "send QUGUSD,
+/// recipient receives 2×" phantom-mint.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn is_reserved_token_transfer(tx: &q_types::Transaction) -> bool {
+    tx.effective_tx_type() == q_types::TransactionType::TokenTransfer
+        && tx.data.len() >= 32
+        && {
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&tx.data[0..32]);
+            addr == q_types::QUGUSD_TOKEN_ADDRESS || addr == q_types::QSHARE_TOKEN_ADDRESS
+        }
 }
 
 /// v8.9.1: After replay_block_state_changes(), extract updated token balances

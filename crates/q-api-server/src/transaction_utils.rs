@@ -31,6 +31,32 @@ use dashmap::DashMap;
 /// 2026-05-22 after the v10.11.11 restart. Fix: lazy-load on first access,
 /// write-through on each increment. RocksDB CF "manifest" key
 /// "nonce_<32-byte-address-raw>" -> u64 LE.
+///
+/// 🛡 Phase 0 (2026-07-08) HARD SINGLE-INSTANCE REQUIREMENT: this struct is
+/// assumed to be the ONE sole nonce-assignment authority server-wide. The
+/// in-memory `nonces: DashMap` (below) is per-process state; RocksDB
+/// persistence makes it durable across THIS process's restarts, but does
+/// NOT make it safe to share across multiple concurrently-running
+/// q-api-server processes/pods pointed at the same or different DBs. If
+/// q-api-server is ever horizontally scaled (multiple processes/pods, each
+/// constructing its own `NonceTracker`), each instance's `nonces` map can
+/// disagree with the others about "the next expected nonce" for a wallet
+/// whose prior send was assigned/confirmed by a sibling instance — and the
+/// Phase 0 mempool nonce-vs-chain-state check (see
+/// `q_narwhal_core::production_mempool::NonceSource`, wired via
+/// `set_nonce_source` in main.rs when Q_ENFORCE_MEMPOOL_NONCE=1) would then
+/// start false-rejecting legitimate transfers with NO compile-time signal
+/// and no obvious runtime error — just silent, deterministic rejection of
+/// otherwise-valid sends, exactly the class of bug this same round's BUG 1
+/// fix (send_transaction_signed's nonce-advance ordering) had to unwind.
+/// Scaling q-api-server horizontally requires either (a) a single shared/
+/// external nonce authority (e.g. a dedicated service or a DB-backed
+/// compare-and-swap keyed on wallet address, replacing this DashMap), or
+/// (b) sharding wallets deterministically across instances so each wallet's
+/// nonce is always assigned by exactly one instance. Neither is implemented
+/// here — this comment exists so that decision isn't made silently by a
+/// future infra change. Out of scope for this round: building the
+/// distributed nonce store itself.
 #[derive(Debug, Default)]
 pub struct NonceTracker {
     /// wallet_address -> next_expected_nonce
@@ -38,25 +64,33 @@ pub struct NonceTracker {
     /// Persistence handle (set via `set_storage` after construction).
     /// When None, NonceTracker behaves as the pre-v10.11.12 in-memory-only
     /// version (still useful for tests / non-RocksDB callers).
+    #[cfg(not(target_os = "windows"))]
     storage: parking_lot::Mutex<Option<Arc<rocksdb::DB>>>,
 }
 
+#[cfg(not(target_os = "windows"))]
 const NONCE_KEY_PREFIX: &[u8] = b"nonce_";
 
 impl NonceTracker {
     pub fn new() -> Self {
-        Self {
-            nonces: DashMap::new(),
-            storage: parking_lot::Mutex::new(None),
-        }
+        Self::default()
     }
 
     /// v10.11.12: attach a RocksDB handle so nonce updates survive restart.
     /// Must be called once during boot, before any get_and_increment hits.
+    #[cfg(not(target_os = "windows"))]
     pub fn set_storage(&self, db: Arc<rocksdb::DB>) {
         *self.storage.lock() = Some(db);
     }
 
+    /// Windows (sled backend): nonce persistence is not wired — nonces are
+    /// in-memory only (pre-v10.11.12 semantics; reset on restart). Accepts
+    /// the sled shim's `Arc<()>` raw-DB stand-in (`RocksDBKV::db()`) so boot
+    /// code is platform-uniform.
+    #[cfg(target_os = "windows")]
+    pub fn set_storage(&self, _db: Arc<()>) {}
+
+    #[cfg(not(target_os = "windows"))]
     fn nonce_key(wallet: &Address) -> Vec<u8> {
         let mut k = Vec::with_capacity(NONCE_KEY_PREFIX.len() + 32);
         k.extend_from_slice(NONCE_KEY_PREFIX);
@@ -66,12 +100,14 @@ impl NonceTracker {
 
     /// Clone the storage Arc out of the mutex so callers can use it without
     /// holding the guard. Returns None if storage isn't set.
+    #[cfg(not(target_os = "windows"))]
     fn db_clone(&self) -> Option<Arc<rocksdb::DB>> {
         self.storage.lock().as_ref().cloned()
     }
 
     /// Lazy load: if wallet not in the in-memory DashMap, try to read from
     /// RocksDB. Returns the persisted value (or 0 if no persisted entry).
+    #[cfg(not(target_os = "windows"))]
     fn load_persisted(&self, wallet: &Address) -> u64 {
         let Some(db) = self.db_clone() else { return 0 };
         let key = Self::nonce_key(wallet);
@@ -87,6 +123,13 @@ impl NonceTracker {
         }
     }
 
+    /// Windows (sled backend): no persisted nonces.
+    #[cfg(target_os = "windows")]
+    fn load_persisted(&self, _wallet: &Address) -> u64 {
+        0
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn persist(&self, wallet: &Address, nonce: u64) {
         let Some(db) = self.db_clone() else { return };
         let key = Self::nonce_key(wallet);
@@ -106,6 +149,10 @@ impl NonceTracker {
             );
         }
     }
+
+    /// Windows (sled backend): no-op — nonces are in-memory only.
+    #[cfg(target_os = "windows")]
+    fn persist(&self, _wallet: &Address, _nonce: u64) {}
 
     /// Ensure the in-memory entry reflects max(in-memory, persisted).
     /// Called by every accessor before reading so we don't hand out stale
@@ -172,6 +219,20 @@ impl NonceTracker {
     pub fn set_nonce(&self, wallet: &Address, nonce: u64) {
         self.nonces.insert(*wallet, nonce);
         self.persist(wallet, nonce);
+    }
+}
+
+/// 🛡 Phase 0 (2026-07-08): wire this NonceTracker as the mempool's
+/// authoritative nonce source. `q-narwhal-core` cannot depend on
+/// `q-api-server` (would be a dependency cycle — q-api-server already
+/// depends on q-narwhal-core), so `NonceSource` is defined in
+/// q-narwhal-core::production_mempool and implemented here, the same shape
+/// as the existing `set_production_mempool` wiring pattern. Forwards
+/// directly to the already-existing `validate_nonce` (identical signature),
+/// so this is pure plumbing — no new nonce-comparison logic.
+impl q_narwhal_core::production_mempool::NonceSource for NonceTracker {
+    fn validate_nonce(&self, wallet: &Address, submitted_nonce: u64) -> Result<(), u64> {
+        NonceTracker::validate_nonce(self, wallet, submitted_nonce)
     }
 }
 
@@ -302,13 +363,49 @@ pub fn compute_transaction_id(tx: &Transaction) -> TxHash {
 }
 
 /// Transaction submission result
+///
+/// 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): `queued_for_block` used to be
+/// the ONLY signal callers had for "was this genuinely admitted to the
+/// mempool", and it lied: `submit_transaction` mapped BOTH a genuine
+/// `add_transaction` `Ok(true)` AND every `Ok(false)` rejection reason
+/// (blocked wallet, duplicate, nonce conflict, failed validation, fee too
+/// low, capacity eviction) to `queued_for_block: true` — the `Ok(false)`
+/// branch's own old comment literally said "Still counts as queued". A
+/// caller (`handlers.rs::send_transaction_signed`) that gated a nonce-advance
+/// on `queued_for_block` therefore burned the sender's nonce even when the
+/// mempool never admitted the transaction — silent transaction loss.
+///
+/// `mempool_admitted` is the new, honest field: true ONLY when
+/// `ProductionMempool::add_transaction_detailed` returned
+/// `AdmissionResult::Admitted` (genuinely inserted into
+/// `pending_transactions`). `queued_for_block` is kept (same field, same
+/// name) for backward source-compat with existing callers/JSON consumers,
+/// but is now DEFINED to equal `mempool_admitted` — it no longer has a
+/// separate "counts as queued anyway" meaning. `rejection_reason` is set
+/// whenever admission did not happen, so callers/API consumers can
+/// distinguish "duplicate, harmless" from "rejected, nonce must not advance"
+/// without re-deriving it themselves.
 #[derive(Debug, Clone)]
 pub struct TransactionSubmissionResult {
     pub tx_id: TxHash,
     pub tx_id_hex: String,
     pub status: TxStatus,
     pub broadcast_success: bool,
+    /// True only when the mempool genuinely admitted this transaction
+    /// (`AdmissionResult::Admitted`). This is now the SAME value as
+    /// `mempool_admitted` — see the struct doc comment above for why the
+    /// old "true on every Ok(false) too" behavior was a bug.
     pub queued_for_block: bool,
+    /// 🛡 Phase 0 Round-2 BUG-A FIX: the authoritative "was this genuinely
+    /// admitted" signal. Callers that gate anything security-relevant
+    /// (e.g. nonce advancement) on submission outcome MUST read this field,
+    /// not just check for the absence of an error.
+    pub mempool_admitted: bool,
+    /// Present iff `mempool_admitted` is false AND a production mempool was
+    /// configured (i.e. rejection actually happened, as opposed to "no
+    /// mempool wired up at all"). Human-readable via `RejectReason`'s
+    /// `Display` impl.
+    pub rejection_reason: Option<String>,
 }
 
 /// Submit a transaction to the mempool and broadcast to network
@@ -333,25 +430,34 @@ pub async fn submit_transaction(
     );
 
     // 2. Add to production mempool for block inclusion
-    let queued_for_block = if let Some(mempool) = production_mempool {
+    //
+    // 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): use `add_transaction_detailed`
+    // instead of `add_transaction` so genuine admission (`AdmissionResult::
+    // Admitted`) can be told apart from EVERY rejection reason
+    // (`AdmissionResult::Rejected(reason)`) — previously this call site used
+    // the plain boolean `add_transaction`, whose `false` meant "any one of
+    // ~8 different rejection reasons", and then (bug, now fixed at the call
+    // site below in send_transaction_signed) got treated as "queued anyway".
+    use q_narwhal_core::production_mempool::AdmissionResult;
+    let (mempool_admitted, rejection_reason): (bool, Option<String>) = if let Some(mempool) = production_mempool {
         // announced_by = None means this is a local transaction from our API
-        match mempool.add_transaction(tx.clone(), None).await {
-            Ok(added) => {
-                if added {
-                    tracing::debug!(
-                        "📦 Transaction {} queued for block production",
-                        &tx_id_hex[..16]
-                    );
-                    // Update status to InMempool
-                    tx_status.insert(tx_id, TxStatus::InMempool);
-                    true
-                } else {
-                    tracing::debug!(
-                        "📋 Transaction {} already in mempool (duplicate)",
-                        &tx_id_hex[..16]
-                    );
-                    true // Still counts as queued
-                }
+        match mempool.add_transaction_detailed(tx.clone(), None).await {
+            Ok(AdmissionResult::Admitted) => {
+                tracing::debug!(
+                    "📦 Transaction {} queued for block production",
+                    &tx_id_hex[..16]
+                );
+                // Update status to InMempool
+                tx_status.insert(tx_id, TxStatus::InMempool);
+                (true, None)
+            }
+            Ok(AdmissionResult::Rejected(reason)) => {
+                tracing::warn!(
+                    "🛡 [BUG-A FIX] Transaction {} REJECTED by mempool (nonce will NOT be advanced): {}",
+                    &tx_id_hex[..16],
+                    reason
+                );
+                (false, Some(reason.to_string()))
             }
             Err(e) => {
                 tracing::warn!(
@@ -359,7 +465,7 @@ pub async fn submit_transaction(
                     &tx_id_hex[..16],
                     e
                 );
-                false
+                (false, Some(format!("internal error: {}", e)))
             }
         }
     } else {
@@ -367,8 +473,11 @@ pub async fn submit_transaction(
             "📋 No production mempool available, tx {} stays in tx_pool",
             &tx_id_hex[..16]
         );
-        false
+        (false, None)
     };
+    // Kept for backward source-compat — see TransactionSubmissionResult's doc
+    // comment. No longer has a separate meaning from `mempool_admitted`.
+    let queued_for_block = mempool_admitted;
 
     // 3. Broadcast to P2P network via gossipsub
     let broadcast_success = if let Some(libp2p) = libp2p_discovery {
@@ -458,6 +567,8 @@ pub async fn submit_transaction(
         },
         broadcast_success,
         queued_for_block,
+        mempool_admitted,
+        rejection_reason,
     }
 }
 

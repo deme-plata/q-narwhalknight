@@ -1,6 +1,6 @@
 [package]
 name = "q-api-server"
-version = "10.11.74"  # v10.11.74: custom-token swap decimal fix (overrides workspace 10.11.72 for the release binary)
+version = "10.11.80"  # v10.11.80: TUI/status height display fix (net height = gossip fetch_max ⊔ turbo-sync peer registry; fresh nodes no longer show Net Height 0 / low-peer garbage). Prior: v10.11.74 custom-token swap decimal fix (overrides workspace 10.11.72 for the release binary)
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -26,7 +26,8 @@ libc = "0.2"
 
 # v10.11.12: NonceTracker persistence — direct rocksdb access from
 # transaction_utils.rs so post-restart sends don't collide on stale nonces.
-rocksdb = { workspace = true }
+# (Windows uses the sled backend; nonces stay in-memory there — see the
+# cfg(not(target_os = "windows")) target section below)
 
 # Ring buffer for TUI log layer
 ringbuf = "0.3"
@@ -248,6 +249,11 @@ q-consensus-guard = { path = "../q-consensus-guard" }
 q-kernel-io = { path = "../q-kernel-io" }
 q-benchmarks = { path = "../q-benchmarks" }
 tokio-uring = "0.4"
+
+# v10.11.12: NonceTracker persistence (transaction_utils.rs). RocksDB is not
+# available on Windows (sled backend there) — Windows keeps nonces in-memory.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+rocksdb = { workspace = true }
 
 # v6.4.0: jemalloc only on unix (doesn't cross-compile to Windows with MinGW)
 [target.'cfg(unix)'.dependencies]

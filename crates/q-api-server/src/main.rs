@@ -1009,31 +1009,50 @@ async fn update_tui_metrics(
         (dag_size, vertices, anchors)
     };
 
-    // Get system metrics (non-async)
-    #[cfg(target_os = "linux")]
+    // Get system metrics (non-async) -- CROSS-PLATFORM.
+    // v10.11.76 TUI-METRICS FIX: this was #[cfg(target_os = "linux")] only, and
+    // #[cfg(not(linux))] hardcoded (0.0, 0.0, 8.0, 0.0, 500.0) -- so on Windows the
+    // TUI always showed CPU 0%, RAM 0.0/8.0 GB, Disk 0/500 GB. sysinfo is fully
+    // cross-platform, so collect real values on every OS. A persistent System (not
+    // a fresh one each tick) is required for a real CPU reading: sysinfo derives
+    // cpu usage as a delta between refreshes, so a brand-new System always reads 0%.
     let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = {
         use sysinfo::{Disks, System};
-        let mut sys = System::new_all();
-        sys.refresh_all();
+        static SYS: std::sync::OnceLock<std::sync::Mutex<System>> = std::sync::OnceLock::new();
+        let sys_cell = SYS.get_or_init(|| std::sync::Mutex::new(System::new_all()));
+        let (cpu, ram_used, ram_tot) = if let Ok(mut sys) = sys_cell.lock() {
+            sys.refresh_cpu();
+            sys.refresh_memory();
+            let cpu = sys.global_cpu_info().cpu_usage();
+            let ram_used = sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+            let ram_tot = sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
+            (cpu, ram_used, ram_tot)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
 
-        let cpu = sys.global_cpu_info().cpu_usage();
-        let ram_used = sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
-        let ram_tot = sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
-
+        // Pick the disk that actually hosts the DB (Q_DB_PATH), not just the first
+        // enumerated volume -- on Windows that would otherwise be an arbitrary drive.
+        let db_path = std::env::var("Q_DB_PATH").unwrap_or_else(|_| ".".to_string());
         let disks = Disks::new_with_refreshed_list();
-        let (disk_used, disk_tot) = if let Some(disk) = disks.iter().next() {
+        let chosen = disks
+            .iter()
+            .filter(|d| {
+                let mp = d.mount_point().to_string_lossy().to_string();
+                !mp.is_empty() && db_path.to_lowercase().starts_with(&mp.to_lowercase())
+            })
+            .max_by_key(|d| d.mount_point().to_string_lossy().len())
+            .or_else(|| disks.iter().next());
+        let (disk_used, disk_tot) = if let Some(disk) = chosen {
             let total = disk.total_space() as f64 / (1024.0 * 1024.0 * 1024.0);
             let available = disk.available_space() as f64 / (1024.0 * 1024.0 * 1024.0);
-            (total - available, total)
+            ((total - available).max(0.0), total)
         } else {
-            (0.0, 500.0)
+            (0.0, 0.0)
         };
 
         (cpu, ram_used, ram_tot, disk_used, disk_tot)
     };
-
-    #[cfg(not(target_os = "linux"))]
-    let (cpu_usage, ram_usage, ram_total, disk_usage, disk_total) = (0.0, 0.0, 8.0, 0.0, 500.0);
 
     // Collect mining statistics (tokio RwLock — requires .await)
     let (mining_enabled, active_miners, total_hashrate, blocks_mined) =
@@ -1054,10 +1073,11 @@ async fn update_tui_metrics(
             (false, 0, 0.0, 0)
         };
 
-    // Network height (atomic, lock-free)
-    let network_height = app_state
-        .highest_network_height
-        .load(std::sync::atomic::Ordering::Relaxed);
+    // Network height for display.
+    // v10.11.80 TUI-HEIGHT FIX: use the aggregated view (gossip atomic ⊔ TurboSync
+    // peer registry) — the raw atomic alone showed "Net Height: 1.8M" / "0" on
+    // fresh nodes while they were actively pulling packs from a 20M+ peer.
+    let network_height = app_state.network_max_height_view().await;
 
     // Last mining solution time
     let last_solution_ts = app_state
@@ -8004,6 +8024,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // Update state with initialized consensus components
     state.production_mempool = production_mempool;
     state.dag_knight = dag_knight.clone();
+
+    // 🛡 Phase 0 (2026-07-08): wire the mempool's nonce-vs-chain-state check
+    // (Patch 2a/2b, q-narwhal-core::production_mempool::NonceSource) to the
+    // SAME NonceTracker instance state.nonce_tracker already uses for
+    // server-assigned nonces (handlers.rs get_and_increment call sites).
+    // Reusing this exact instance is required: a second independent
+    // NonceTracker would be a divided-brain nonce source and could cause
+    // legitimate server-issued sends to self-reject.
+    //
+    // Gated behind Q_ENFORCE_MEMPOOL_NONCE=1 (default OFF — zero behavioral
+    // change unless opted in) so it can be disabled instantly without a
+    // recompile if it misfires against legitimate traffic, matching DS-1's
+    // Q_REPLAY_PROTECTION_HEIGHT rollout style.
+    if std::env::var("Q_ENFORCE_MEMPOOL_NONCE").ok().as_deref() == Some("1") {
+        if let Some(ref mempool_ref) = state.production_mempool {
+            info!("🛡 [PHASE0] Wiring nonce_tracker into production_mempool as NonceSource (Q_ENFORCE_MEMPOOL_NONCE=1)...");
+            mempool_ref.set_nonce_source(state.nonce_tracker.clone()).await;
+            info!("✅ Mempool nonce-vs-chain-state enforcement ACTIVE (admission + block-pack re-check)");
+        }
+    } else {
+        info!("ℹ️  Mempool nonce-vs-chain-state enforcement DISABLED (set Q_ENFORCE_MEMPOOL_NONCE=1 to enable)");
+    }
 
     // ⚔️  v1.0.3-beta: Wire DAG-Knight consensus into block producer pool for dag_parents population
     if let Some(ref dag_knight_ref) = dag_knight {
@@ -15176,7 +15218,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             .map(|v| v == "true" || v == "1")
                                             .unwrap_or(false);
                                         if !authoritative_standalone {
-                                            app_state_gossip.highest_network_height.store(
+                                            // v10.11.80 TUI-HEIGHT FIX: fetch_max, not store. A plain
+                                            // store made this last-writer-wins: any LOW-height peer's
+                                            // announcement (e.g. another fresh node at 1.8M) clobbered
+                                            // the real 20M+ view seconds after it landed, so fresh nodes
+                                            // flickered between garbage "Net Height" values. Announced
+                                            // heights may only RAISE the view (the absurd-height sanity
+                                            // check above still rejects poisoning); the HEIGHT DECAY /
+                                            // HEIGHT CLAMP maintenance task keeps its explicit downward
+                                            // stores for stale or absurd values.
+                                            app_state_gossip.highest_network_height.fetch_max(
                                                 announcement.highest_block,
                                                 std::sync::atomic::Ordering::SeqCst,
                                             );

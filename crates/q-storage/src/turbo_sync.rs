@@ -6598,7 +6598,13 @@ impl TurboSyncManager {
             let state = kalman.get_state();
             if state.confidence > 0.4 {
                 let kalman_concurrency = state.optimal_concurrency();
-                let bounded = kalman_concurrency.clamp(4, self.config.parallel_streams * 2);
+                // v10.11.76 CLAMP-PANIC FIX: clamp(min,max) panics when min>max.
+                // With Q_TURBO_PARALLEL_STREAMS=1 (memory-tight nodes) max=2 < the
+                // hardcoded min=4 -> "min > max" panic once Kalman gains confidence
+                // (~70% synced). Lower bound must not exceed the upper bound.
+                let hi = (self.config.parallel_streams * 2).max(1);
+                let lo = 4.min(hi);
+                let bounded = kalman_concurrency.clamp(lo, hi);
                 // v8.4.4: Apply env cap on top of Kalman
                 // v8.5.4: Also apply throttle mode cap
                 let capped = bounded.min(effective_max_concurrency);

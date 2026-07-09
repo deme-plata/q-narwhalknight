@@ -73,6 +73,33 @@ pub mod upgrades {
     };
 
     // =========================================================================
+    // MINT-CONSERVATION INVARIANT (2026-06-24 — phantom-supply remediation)
+    // =========================================================================
+    //
+    // Per-block value-conservation guard in BalanceConsensusEngine. Two-stage:
+    //  - OBSERVE: log a loud warn on any conservation violation, change nothing.
+    //  - ENFORCE: refuse to apply a block that violates conservation.
+    //
+    // Rollout: ship OBSERVE active (height 0) to gather phantom-mint data with zero
+    // risk; only after logs confirm zero false positives on healthy blocks, set
+    // ENFORCE to (current_tip + 20_000) and redeploy. A false reject halts block
+    // production, so ENFORCE stays u64::MAX until explicitly armed by the operator.
+
+    /// Conservation invariant — observe-only (warn, no behavior change).
+    pub const MINT_CONSERVATION_OBSERVE: NetworkUpgrade = NetworkUpgrade {
+        name: "mint_conservation_observe",
+        activation_height: 0, // Active from genesis: warn-only, safe.
+        description: "Per-block value-conservation invariant (observe/log only)",
+    };
+
+    /// Conservation invariant — enforcing (reject non-conserving block apply).
+    pub const MINT_CONSERVATION_ENFORCE: NetworkUpgrade = NetworkUpgrade {
+        name: "mint_conservation_enforce",
+        activation_height: u64::MAX, // DISARMED. Set to tip+20_000 when ready.
+        description: "Reject block apply that mints beyond coinbase / breaks transfer conservation",
+    };
+
+    // =========================================================================
     // CRITICAL SECURITY FIXES (v2.3.1-beta)
     // =========================================================================
 

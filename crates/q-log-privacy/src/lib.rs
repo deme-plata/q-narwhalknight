@@ -55,14 +55,14 @@ fn privacy() -> u8 {
 pub fn mask_addr(addr: &str) -> String {
     match privacy() {
         LEVEL_FULL => {
-            let clean = addr.trim_start_matches("0x");
+            let clean = addr.trim_start_matches("0x").trim_start_matches("qnk");
             if clean.len() <= 12 {
                 return "qnk***".to_string();
             }
             format!("qnk{}…{}", &clean[..4], &clean[clean.len() - 4..])
         }
         LEVEL_PARTIAL => {
-            let clean = addr.trim_start_matches("0x");
+            let clean = addr.trim_start_matches("0x").trim_start_matches("qnk");
             if clean.len() <= 14 {
                 return format!("{}…", &clean[..clean.len().min(8)]);
             }

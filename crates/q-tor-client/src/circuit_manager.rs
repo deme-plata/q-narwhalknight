@@ -15,6 +15,14 @@ use tokio::time::sleep;
 use tokio_socks::tcp::Socks5Stream;
 use tracing::{debug, info, warn};
 
+// 🔐 Q3 (whitepaper §8.3): hybrid X25519+Kyber-1024 KEM for circuit-level key agreement.
+use crate::quantum_resistant::{PQAlgorithm, PQKeyPair};
+
+/// Circuit-level KEM algorithm: hybrid X25519 + Kyber-1024 (NIST Level 5).
+/// Dilithium5 (above) AUTHENTICATES the circuit; this KEM AGREES the circuit's
+/// shared encryption key — together they form the post-quantum "circuit-level TLS".
+const CIRCUIT_KEM_ALG: PQAlgorithm = PQAlgorithm::HybridX25519Kyber1024;
+
 // ============================================================================
 // v3.7.4: DILITHIUM5 CIRCUIT AUTHENTICATION (NIST Level 5 Post-Quantum)
 // ============================================================================
@@ -85,16 +93,20 @@ impl CircuitAuthKey {
 }
 
 /// Circuit authentication handshake message
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CircuitAuthHandshake {
     /// Dilithium5 public key (2,592 bytes)
     pub public_key: Vec<u8>,
     /// Circuit nonce (for replay protection)
     pub nonce: [u8; 32],
-    /// Signed challenge: sign(nonce || circuit_id || timestamp)
+    /// Signed challenge: sign(nonce || circuit_id || timestamp || kem_public_key)
     pub signature: Vec<u8>,
     /// Timestamp (Unix seconds)
     pub timestamp: u64,
+    /// Q3: initiator's hybrid X25519+Kyber-1024 KEM public key for circuit key agreement.
+    /// Empty = legacy auth-only handshake (no key agreement). The Dilithium5 signature
+    /// covers this field, so a MITM cannot substitute its own KEM key.
+    pub kem_public_key: Vec<u8>,
 }
 
 /// Manages dedicated Tor circuits for Q-NarwhalKnight
@@ -155,6 +167,23 @@ impl CircuitManager {
     /// Create new circuit manager
     pub async fn new(socks_proxy: SocketAddr, circuit_count: usize) -> Result<Self> {
         Self::new_with_phase(socks_proxy, circuit_count, Phase::Phase0).await
+    }
+
+    /// Test-only constructor: builds a manager with a real Dilithium5 auth key but NO
+    /// network/QRNG/circuit setup (so unit tests can exercise the auth + KEM handshake
+    /// without a running Tor daemon).
+    #[cfg(test)]
+    pub(crate) fn new_test(socks_proxy: SocketAddr) -> Self {
+        Self {
+            socks_proxy,
+            circuits: HashMap::new(),
+            circuit_count: 0,
+            latency_target: Duration::from_millis(300),
+            last_rotation: Instant::now(),
+            qrng: None,
+            current_phase: Phase::Phase0,
+            auth_key: CircuitAuthKey::generate(),
+        }
     }
 
     /// Create new circuit manager with specific phase
@@ -306,9 +335,30 @@ impl CircuitManager {
         Ok(circuit_info)
     }
 
-    /// Create a circuit authentication handshake message
-    /// Used when establishing authenticated circuits with peers
+    /// Create a circuit authentication handshake message (auth-only, no key agreement).
+    /// Byte-identical to the pre-Q3 behaviour: `kem_public_key` is empty, so the signed
+    /// challenge is unchanged.
     pub fn create_auth_handshake(&self, circuit_id: u64) -> CircuitAuthHandshake {
+        self.build_auth_handshake(circuit_id, Vec::new())
+    }
+
+    /// Q3: like `create_auth_handshake`, but also offers a hybrid X25519+Kyber-1024 KEM
+    /// public key for circuit-level key agreement. Returns the handshake message PLUS the
+    /// ephemeral KEM keypair — the initiator keeps the keypair and feeds the responder's
+    /// ciphertext into [`complete_kem`] to derive the shared circuit key.
+    pub fn create_auth_handshake_kem(
+        &self,
+        circuit_id: u64,
+    ) -> Result<(CircuitAuthHandshake, PQKeyPair)> {
+        let kem = PQKeyPair::generate(CIRCUIT_KEM_ALG)?;
+        let handshake = self.build_auth_handshake(circuit_id, kem.public_key().to_vec());
+        Ok((handshake, kem))
+    }
+
+    /// Shared builder: signs `nonce || circuit_id || timestamp || kem_public_key`.
+    /// When `kem_public_key` is empty the trailing bytes are nothing, so legacy
+    /// auth-only handshakes sign exactly the same challenge as before.
+    fn build_auth_handshake(&self, circuit_id: u64, kem_public_key: Vec<u8>) -> CircuitAuthHandshake {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -318,18 +368,19 @@ impl CircuitManager {
         let mut nonce = [0u8; 32];
         rand::thread_rng().fill(&mut nonce);
 
-        // Create challenge message: nonce || circuit_id || timestamp
-        let mut challenge = Vec::with_capacity(48);
+        // Challenge: nonce || circuit_id || timestamp || kem_public_key
+        let mut challenge = Vec::with_capacity(48 + kem_public_key.len());
         challenge.extend_from_slice(&nonce);
         challenge.extend_from_slice(&circuit_id.to_le_bytes());
         challenge.extend_from_slice(&timestamp.to_le_bytes());
+        challenge.extend_from_slice(&kem_public_key);
 
         // Sign the challenge with Dilithium5
         let signature = self.auth_key.sign_challenge(&challenge);
 
         info!(
-            "🔐 [DILITHIUM5] Created auth handshake for circuit {} (sig: {} bytes)",
-            circuit_id, signature.len()
+            "🔐 [DILITHIUM5] Created auth handshake for circuit {} (sig: {} bytes, kem: {} bytes)",
+            circuit_id, signature.len(), kem_public_key.len()
         );
 
         CircuitAuthHandshake {
@@ -337,6 +388,7 @@ impl CircuitManager {
             nonce,
             signature,
             timestamp,
+            kem_public_key,
         }
     }
 
@@ -356,11 +408,12 @@ impl CircuitManager {
             return Err(anyhow!("Circuit auth handshake expired"));
         }
 
-        // Reconstruct challenge
-        let mut challenge = Vec::with_capacity(48);
+        // Reconstruct challenge (must include kem_public_key — empty for legacy handshakes)
+        let mut challenge = Vec::with_capacity(48 + handshake.kem_public_key.len());
         challenge.extend_from_slice(&handshake.nonce);
         challenge.extend_from_slice(&circuit_id.to_le_bytes());
         challenge.extend_from_slice(&handshake.timestamp.to_le_bytes());
+        challenge.extend_from_slice(&handshake.kem_public_key);
 
         // Verify Dilithium5 signature
         let recovered = CircuitAuthKey::verify_signature(&handshake.signature, &handshake.public_key)?;
@@ -380,6 +433,40 @@ impl CircuitManager {
         );
 
         Ok(fingerprint)
+    }
+
+    /// Q3 (responder): after [`verify_auth_handshake`] succeeds, encapsulate to the peer's
+    /// authenticated KEM public key. Returns `(ciphertext, circuit_key)` — send `ciphertext`
+    /// back to the initiator; `circuit_key` (32 bytes) is the shared circuit-level key.
+    pub fn respond_kem(handshake: &CircuitAuthHandshake) -> Result<(Vec<u8>, [u8; 32])> {
+        if handshake.kem_public_key.is_empty() {
+            return Err(anyhow!("peer offered no circuit KEM key (legacy auth-only handshake)"));
+        }
+        // encapsulate_to only uses the algorithm + peer key; the keypair's own keys are unused.
+        let responder = PQKeyPair::generate(CIRCUIT_KEM_ALG)?;
+        let (ciphertext, shared) = responder.encapsulate_to(&handshake.kem_public_key)?;
+        let key = Self::kem_secret_to_key(shared)?;
+        info!("🔐 [HYBRID-KEM] Circuit key agreed (responder), ct={} bytes", ciphertext.len());
+        Ok((ciphertext, key))
+    }
+
+    /// Q3 (initiator): complete key agreement with the responder's ciphertext, using the
+    /// ephemeral keypair returned by [`create_auth_handshake_kem`]. Returns the same
+    /// 32-byte `circuit_key` the responder derived.
+    pub fn complete_kem(ephemeral_kem: &PQKeyPair, ciphertext: &[u8]) -> Result<[u8; 32]> {
+        let shared = ephemeral_kem.decapsulate(ciphertext)?;
+        let key = Self::kem_secret_to_key(shared)?;
+        info!("🔐 [HYBRID-KEM] Circuit key agreed (initiator)");
+        Ok(key)
+    }
+
+    fn kem_secret_to_key(shared: Vec<u8>) -> Result<[u8; 32]> {
+        if shared.len() != 32 {
+            return Err(anyhow!("unexpected KEM shared-secret length {}", shared.len()));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&shared);
+        Ok(key)
     }
 
     /// Get the node's circuit auth public key for peer discovery
@@ -503,6 +590,24 @@ impl CircuitManager {
             .get(&CircuitType::Gossip)
             .map(|circuits| circuits.iter().map(|c| &c.id).collect())
             .unwrap_or_default()
+    }
+
+    /// All onion peer addresses associated with circuits (Dandelion/Tor stem targets).
+    pub fn known_onion_targets(&self) -> Vec<String> {
+        self.circuits
+            .values()
+            .flatten()
+            .filter_map(|c| c.peer_onion.clone())
+            .collect()
+    }
+
+    /// The onion peer address bound to a specific circuit, if any.
+    pub fn onion_for_circuit(&self, circuit_id: u64) -> Option<String> {
+        self.circuits
+            .values()
+            .flatten()
+            .find(|c| c.id == circuit_id)
+            .and_then(|c| c.peer_onion.clone())
     }
 
     /// Rotate all circuits
@@ -828,6 +933,8 @@ mod tests {
                 latency_ms: Some(100),
                 peer_onion: None,
                 quantum_nonce: [0u8; 12],
+                auth_fingerprint: [0u8; 32],
+                pq_authenticated: false,
             }],
         );
 
@@ -841,6 +948,8 @@ mod tests {
                 latency_ms: Some(200),
                 peer_onion: None,
                 quantum_nonce: [0u8; 12],
+                auth_fingerprint: [0u8; 32],
+                pq_authenticated: false,
             }],
         );
 
@@ -894,5 +1003,38 @@ mod tests {
                 last_rotation: Instant::now(),
             }
         }
+    }
+
+    /// Q3: a circuit handshake's hybrid X25519+Kyber-1024 KEM lets initiator and
+    /// responder agree the SAME non-zero circuit key (the post-quantum circuit-level key).
+    #[test]
+    fn test_circuit_hybrid_kem_key_agreement() {
+        // Initiator generates an ephemeral KEM keypair and advertises its public key in
+        // the handshake (as `create_auth_handshake_kem` does, minus the Dilithium signing).
+        let ephemeral = PQKeyPair::generate(CIRCUIT_KEM_ALG).unwrap();
+        let handshake = CircuitAuthHandshake {
+            public_key: Vec::new(),
+            nonce: [0u8; 32],
+            signature: Vec::new(),
+            timestamp: 0,
+            kem_public_key: ephemeral.public_key().to_vec(),
+        };
+
+        // Responder encapsulates to the advertised KEM key; initiator completes.
+        let (ciphertext, key_responder) = CircuitManager::respond_kem(&handshake).unwrap();
+        let key_initiator = CircuitManager::complete_kem(&ephemeral, &ciphertext).unwrap();
+
+        assert_eq!(key_initiator, key_responder, "circuit keys must match");
+        assert_ne!(key_initiator, [0u8; 32], "circuit key must not be the zero placeholder");
+
+        // A legacy (no-KEM) handshake must be rejected by respond_kem.
+        let legacy = CircuitAuthHandshake {
+            public_key: Vec::new(),
+            nonce: [0u8; 32],
+            signature: Vec::new(),
+            timestamp: 0,
+            kem_public_key: Vec::new(),
+        };
+        assert!(CircuitManager::respond_kem(&legacy).is_err());
     }
 }

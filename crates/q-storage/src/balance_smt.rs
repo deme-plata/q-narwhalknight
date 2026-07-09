@@ -13,9 +13,12 @@
 // most significant bit of `addr[0]`. The path from root (depth 0) to leaf (depth 256)
 // consumes bits 0..256 in order.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
+#[cfg(not(target_os = "windows"))]
+use anyhow::{anyhow, Context};
 use blake3::Hasher;
 use parking_lot::RwLock;
+#[cfg(not(target_os = "windows"))]
 use rocksdb::{WriteBatch, DB};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -235,6 +238,7 @@ impl SmtProof {
 /// Thread-safe: the cached root is guarded by `RwLock`. Updates compose into an
 /// external `WriteBatch` via `apply_to_batch` so the SMT and the wallet-balance
 /// column family commit atomically.
+#[cfg(not(target_os = "windows"))]
 pub struct BalanceSmt {
     db: Arc<DB>,
     cf_name: String,
@@ -247,6 +251,7 @@ pub struct BalanceSmt {
     genesis_root: [u8; 32],
 }
 
+#[cfg(not(target_os = "windows"))]
 impl BalanceSmt {
     /// Open the SMT on top of an existing RocksDB instance. Caller must have
     /// created `CF_BALANCE_SMT` before opening (see `add_smt_cf_to_descriptors`).
@@ -567,10 +572,161 @@ impl BalanceSmt {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Windows (sled backend): in-memory SMT
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The Windows KV shim (`kv_sled.rs::RocksDBKV::get_raw_db`) has no raw RocksDB
+// handle (returns `Arc<()>`), so the Windows build keeps SMT nodes purely in
+// memory. balance_root_v2 is DORMANT in production (BalanceRootV1 activation
+// pushed far out) and `rebuild_from_balances` is a pure function of the wallet
+// table, so roots stay byte-identical with Linux nodes — only restart
+// persistence is lost, and the tree is rebuildable at any time via
+// `rebuild_balance_smt_from_wallet_table()`.
+#[cfg(target_os = "windows")]
+pub struct BalanceSmt {
+    /// In-memory node store: same keys as the RocksDB CF (`node_key`).
+    nodes: RwLock<HashMap<Vec<u8>, [u8; 32]>>,
+    /// Cached current root.
+    cached_root: RwLock<[u8; 32]>,
+    /// Precomputed `empty_subtree[d]` for d ∈ 0..=SMT_DEPTH.
+    empty_subtree: [[u8; 32]; SMT_DEPTH + 1],
+    /// `empty_subtree[0]` cached for convenience — the root of an empty tree.
+    genesis_root: [u8; 32],
+}
+
+#[cfg(target_os = "windows")]
+impl BalanceSmt {
+    /// Open an in-memory SMT. `_db` is the sled shim's `Arc<()>` stand-in for
+    /// the raw RocksDB handle — accepted so `lib.rs` construction is
+    /// platform-uniform.
+    pub fn open(_db: Arc<()>) -> Result<Self> {
+        let empty_subtree = precompute_empty_subtrees();
+        let genesis_root = empty_subtree[0];
+        Ok(Self {
+            nodes: RwLock::new(HashMap::new()),
+            cached_root: RwLock::new(genesis_root),
+            empty_subtree,
+            genesis_root,
+        })
+    }
+
+    /// Current root (genesis empty-tree hash until something is applied).
+    pub fn root(&self) -> [u8; 32] {
+        *self.cached_root.read()
+    }
+
+    /// Root of an empty tree — the genesis root constant.
+    pub fn genesis_root(&self) -> [u8; 32] {
+        self.genesis_root
+    }
+
+    /// Update the cached root (API parity with the RocksDB implementation).
+    pub fn commit_root(&self, new_root: [u8; 32]) {
+        *self.cached_root.write() = new_root;
+    }
+
+    /// Rebuild from a complete `(addr → balance)` snapshot. Mirrors the Linux
+    /// implementation: truncate, then apply updates sorted by address, so the
+    /// resulting root is byte-identical across platforms.
+    pub fn rebuild_from_balances(
+        &self,
+        balances: &HashMap<[u8; 32], u128>,
+    ) -> Result<[u8; 32]> {
+        let mut updates: Vec<([u8; 32], u128)> =
+            balances.iter().map(|(a, b)| (*a, *b)).collect();
+        updates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut nodes = self.nodes.write();
+        nodes.clear();
+        let mut current_root = self.genesis_root;
+        for (addr, balance) in &updates {
+            current_root = self.apply_one(&mut nodes, addr, *balance);
+        }
+        drop(nodes);
+        *self.cached_root.write() = current_root;
+        Ok(current_root)
+    }
+
+    /// Apply a batch of `(addr → balance)` updates on top of the current tree.
+    pub fn update_batch(&self, updates: &[([u8; 32], u128)]) -> Result<[u8; 32]> {
+        let mut nodes = self.nodes.write();
+        let mut current_root = *self.cached_root.read();
+        for (addr, balance) in updates {
+            current_root = self.apply_one(&mut nodes, addr, *balance);
+        }
+        drop(nodes);
+        *self.cached_root.write() = current_root;
+        Ok(current_root)
+    }
+
+    /// Apply one update: write the new leaf + 256 internal nodes, return the
+    /// new root. Same hash walk as the Linux `fold_to_root_writing`.
+    fn apply_one(
+        &self,
+        nodes: &mut HashMap<Vec<u8>, [u8; 32]>,
+        addr: &[u8; 32],
+        balance: u128,
+    ) -> [u8; 32] {
+        let mut siblings = [[0u8; 32]; SMT_DEPTH];
+        for d in 0..SMT_DEPTH {
+            siblings[d] = self.load_node(nodes, &sibling_key(d, addr), d + 1);
+        }
+
+        let new_leaf = leaf_hash_raw(addr, balance);
+        nodes.insert(node_key(SMT_DEPTH, addr), new_leaf);
+
+        let mut current = new_leaf;
+        for d_from_leaf in 0..SMT_DEPTH {
+            let depth = SMT_DEPTH - 1 - d_from_leaf;
+            let sibling = siblings[depth];
+            let (left, right) = if addr_bit(addr, depth) {
+                (&sibling, &current)
+            } else {
+                (&current, &sibling)
+            };
+            let parent = node_hash_raw(left, right);
+            nodes.insert(node_key(depth, addr), parent);
+            current = parent;
+        }
+        current
+    }
+
+    /// Read a node hash: in-memory store → empty_subtree fallback.
+    fn load_node(
+        &self,
+        nodes: &HashMap<Vec<u8>, [u8; 32]>,
+        key: &[u8],
+        node_depth: usize,
+    ) -> [u8; 32] {
+        nodes.get(key).copied().unwrap_or(self.empty_subtree[node_depth])
+    }
+
+    /// Generate a Merkle proof for `(addr → balance)` against the current tree.
+    pub fn prove(&self, addr: &[u8; 32], balance: u128) -> Result<SmtProof> {
+        let nodes = self.nodes.read();
+        let mut siblings = [[0u8; 32]; SMT_DEPTH];
+        let mut empty_bitmap = [0u8; 32];
+        for d in 0..SMT_DEPTH {
+            let sib = self.load_node(&nodes, &sibling_key(d, addr), d + 1);
+            siblings[d] = sib;
+            if sib == self.empty_subtree[d + 1] {
+                empty_bitmap[d / 8] |= 1 << (7 - (d % 8));
+            }
+        }
+        Ok(SmtProof {
+            addr: *addr,
+            balance,
+            siblings,
+            empty_bitmap,
+        })
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Tests
 // ════════════════════════════════════════════════════════════════════════════
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
     use rocksdb::{ColumnFamilyDescriptor, Options, DB};

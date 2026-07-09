@@ -283,6 +283,88 @@ impl RealTorClient {
     }
 
     /// Create an onion service
+    /// 🧅 onion-on-boot: launch a REAL embedded-Arti onion service and forward every inbound
+    /// stream to a local TCP port (the Dandelion stem receiver). Returns the published .onion
+    /// address. The RunningOnionService is kept alive inside the spawned forwarder task.
+    /// 🧅 Send a length-framed message to an onion target via the embedded Arti client's
+    /// NATIVE connect (no SOCKS port needed). Used by the Dandelion stem sender.
+    pub async fn send_framed(&self, target: &str, message: &[u8]) -> Result<()> {
+        let mut stream = self
+            .arti_client
+            .connect(target)
+            .await
+            .map_err(|e| anyhow!("arti connect {}: {}", target, e))?;
+        stream.write_all(&(message.len() as u32).to_be_bytes()).await?;
+        stream.write_all(message).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    pub async fn launch_onion_forwarder(&self, nickname: &str, local_port: u16) -> Result<String> {
+        use futures::StreamExt;
+        use safelog::DisplayRedacted;
+        use tor_hsservice::config::OnionServiceConfigBuilder;
+        use tor_hsservice::handle_rend_requests;
+
+        let cfg = OnionServiceConfigBuilder::default()
+            .nickname(
+                nickname
+                    .to_owned()
+                    .try_into()
+                    .map_err(|e| anyhow!("onion nickname: {:?}", e))?,
+            )
+            .build()
+            .map_err(|e| anyhow!("onion service config: {:?}", e))?;
+        let (service, rend_requests) = self
+            .arti_client
+            .launch_onion_service(cfg)
+            .map_err(|e| anyhow!("launch_onion_service: {:?}", e))?
+            .ok_or_else(|| anyhow!("onion service disabled in config"))?;
+
+        // Bounded wait for the onion address to be assigned + published.
+        let mut onion_addr = None;
+        for _ in 0..120 {
+            if let Some(a) = service.onion_address() {
+                onion_addr = Some(a.display_unredacted().to_string());
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let onion_addr =
+            onion_addr.ok_or_else(|| anyhow!("onion address not assigned within 120s"))?;
+        info!(
+            "🧅 [ONION-BOOT] onion service published: {} -> forwarding to 127.0.0.1:{}",
+            onion_addr, local_port
+        );
+
+        // Forward each inbound onion stream to the local stem receiver port.
+        tokio::spawn(async move {
+            let _service = service; // keep RunningOnionService alive for process lifetime
+            let mut streams = Box::pin(handle_rend_requests(rend_requests));
+            while let Some(req) = streams.next().await {
+                tokio::spawn(async move {
+                    match req
+                        .accept(tor_cell::relaycell::msg::Connected::new_empty())
+                        .await
+                    {
+                        Ok(onion_stream) => {
+                            let mut os = onion_stream;
+                            match TcpStream::connect(("127.0.0.1", local_port)).await {
+                                Ok(mut local) => {
+                                    let _ = tokio::io::copy_bidirectional(&mut os, &mut local).await;
+                                }
+                                Err(e) => warn!("🧅 [ONION-BOOT] local stem connect failed: {}", e),
+                            }
+                        }
+                        Err(e) => warn!("🧅 [ONION-BOOT] onion stream accept failed: {:?}", e),
+                    }
+                });
+            }
+        });
+
+        Ok(onion_addr)
+    }
+
     pub async fn create_onion_service(
         &self,
         config: OnionServiceConfig,

@@ -6,7 +6,17 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
 /// 🔐 v2.4.7-beta: Verify Ed25519 signature for vertex validation
-fn verify_ed25519_signature(signature: &[u8], message: &[u8], public_key: &[u8]) -> Result<()> {
+///
+/// 🛡 Phase 0 BUG-2 FIX (2026-07-08): made `pub` (was private to this module)
+/// so `q-dag-knight`'s `vertex_creator::validate_vertex` — the function that
+/// is ACTUALLY on the live vertex-ingestion path (see the doc on that
+/// function for why `q_narwhal_core::NarwhalCore::validate_vertex`, which
+/// already had its own correct copy of this same logic, is not) — can reuse
+/// this exact implementation instead of re-deriving an independent copy that
+/// could drift out of sync. `q-dag-knight` already depends on
+/// `q-narwhal-core` (see its Cargo.toml), so this is a plain reuse, not a new
+/// dependency edge.
+pub fn verify_ed25519_signature(signature: &[u8], message: &[u8], public_key: &[u8]) -> Result<()> {
     // Parse public key (32 bytes for Ed25519)
     let pk_bytes: [u8; 32] = public_key
         .try_into()

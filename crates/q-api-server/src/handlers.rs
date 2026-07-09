@@ -358,12 +358,13 @@ pub async fn health_check(
     let current_height = state
         .current_height_atomic
         .load(std::sync::atomic::Ordering::Relaxed);
-    let raw_network_height = state
-        .highest_network_height
-        .load(std::sync::atomic::Ordering::Relaxed);
+    // v10.11.80 TUI-HEIGHT FIX: aggregated view (gossip ⊔ TurboSync registry)
+    let raw_network_height = state.network_max_height_view().await;
     // v8.0.8: Cap network_height to prevent rogue peers from poisoning status
+    // v10.11.80: clamp only on synced nodes — on fresh nodes the real tip is
+    // legitimately thousands of times local height (see node_status handler).
     let max_reasonable = (current_height * 5).max(current_height + 50_000);
-    let network_height = if raw_network_height > max_reasonable {
+    let network_height = if raw_network_height > max_reasonable && current_height > 100_000 {
         current_height
     } else {
         raw_network_height
@@ -1287,14 +1288,21 @@ pub async fn node_status(
     // Get sync status for miners
     // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
     // v1.0.70-beta: Use real_current_height instead of stale status.current_height
-    let raw_network_height = state
-        .highest_network_height
-        .load(std::sync::atomic::Ordering::SeqCst);
+    // v10.11.80 TUI-HEIGHT FIX: aggregate gossip atomic ⊔ TurboSync peer registry —
+    // the raw atomic showed 0 / a low peer's height on fresh nodes mid-sync.
+    let raw_network_height = state.network_max_height_view().await;
     // v8.0.8: Cap network_height to prevent rogue peers from showing fake sync status
     let max_reasonable = (real_current_height * 5).max(real_current_height + 50_000);
     // v8.2.3: Network height should never display below our own height.
     // The decay timer can push it below local height, confusing the admin panel.
-    let network_height = if raw_network_height > max_reasonable {
+    // v10.11.80 TUI-HEIGHT FIX: only apply the "suspiciously high" clamp on synced
+    // nodes (local > 100K, same rule as the v8.3.0 decay/clamp fixes). On a fresh
+    // node the REAL tip is thousands of times local height, so this clamp replaced
+    // the honest 20M+ view with our own height — THE root cause of node/status
+    // showing highest_network_height == current_height during initial sync. The
+    // aggregated view is already sanity-capped upstream (gossip absurd-height
+    // filter + TurboSync registry 100× cap), so fresh nodes can trust it.
+    let network_height = if raw_network_height > max_reasonable && real_current_height > 100_000 {
         real_current_height // Treat as synced if network height is suspiciously high
     } else if raw_network_height < real_current_height {
         real_current_height // We ARE the network height if we're ahead
@@ -1767,7 +1775,8 @@ pub async fn engine_pulse(
     let current_height = state.current_height_atomic.load(Ordering::Relaxed);
     let contiguous_height = state.contiguous_height_atomic.load(Ordering::Relaxed);
     let peak_height = state.peak_height_atomic.load(Ordering::Relaxed);
-    let highest_network = state.highest_network_height.load(Ordering::Relaxed);
+    // v10.11.80 TUI-HEIGHT FIX: aggregated view (gossip ⊔ TurboSync registry)
+    let highest_network = state.network_max_height_view().await;
     let last_peer_height_update = state.last_peer_height_update.load(Ordering::Relaxed);
 
     let mining_submitted = state.mining_solutions_submitted.load(Ordering::Relaxed);
@@ -3749,8 +3758,17 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                     // This ensures atomic state transitions and prevents double-spending
                     // v1.4.9-beta: Support QUG, QUGUSD, AND custom tokens (TokenTransfer)
 
-                    let is_qugusd = tx.token_type == q_types::TokenType::QUGUSD;
-                    let is_custom_token = tx.tx_type == q_types::TransactionType::TokenTransfer;
+                    // v10.11.76 (2026-07-04): QUGUSD/QSHARE now travel as tx_type=TokenTransfer
+                    // (2026-06-24 "A2" UI change; previously Transfer). They are RESERVED tokens
+                    // credited exclusively by balance_consensus at block-apply (routed on token_type).
+                    // They must NOT also be handled by the custom-token branch below, or the recipient
+                    // is credited twice — the "send QUGUSD, recipient receives 2×" phantom-mint.
+                    let is_reserved_token = matches!(
+                        tx.token_type,
+                        q_types::TokenType::QUGUSD | q_types::TokenType::QSHARE
+                    );
+                    let is_custom_token = tx.tx_type == q_types::TransactionType::TokenTransfer
+                        && !is_reserved_token;
 
                     // v1.4.9-beta: Handle custom token transfers first
                     // v2.4.2: Now with fee/reflection/burn support!
@@ -3978,7 +3996,7 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                                 q_log_privacy::mask_amt_display(tx.amount as f64 / QUG_DISPLAY_DIVISOR)
                             );
                         }
-                    } else if is_qugusd {
+                    } else if is_reserved_token {
                         // v10.2.9: REMOVED duplicate QUGUSD balance modification
                         // ROOT CAUSE: This code credited QUGUSD in token_balances here,
                         // AND balance_consensus.rs:process_block_mining_rewards_tx() credited
@@ -5904,11 +5922,27 @@ pub async fn send_transaction_signed(
                 e
             ))));
         }
-        // Advance the server's nonce view so the next send gets a fresh nonce
-        // (the signed path does not call get_and_increment).
-        state
-            .nonce_tracker
-            .set_nonce(&from_address, nonce.saturating_add(1));
+        // 🛡 Phase 0 BUG-1 FIX (2026-07-08): do NOT advance the nonce tracker here.
+        // This used to call `state.nonce_tracker.set_nonce(&from_address,
+        // nonce.saturating_add(1))` immediately after signature verification,
+        // BEFORE the tx reached the mempool. That made every legitimate
+        // send_signed call self-rejecting the instant Q_ENFORCE_MEMPOOL_NONCE=1
+        // was set: perform_validation's nonce check (via NonceSource,
+        // production_mempool.rs) reads NonceTracker::get_current() to validate
+        // THIS SAME transaction's nonce, but this statement had already bumped
+        // it to nonce+1 one line earlier in the SAME request — so the check
+        // always saw "expected nonce+1" for a transaction whose own nonce is
+        // `nonce`, and rejected 100% of client-signed transfers deterministically.
+        //
+        // Fix: advance the tracker only AFTER mempool admission actually
+        // succeeds (see the `result.queued_for_block` check below). This is
+        // also the more correct invariant: "this nonce is spent" should mean
+        // "this transaction was actually accepted by the mempool", not just
+        // "a client asked the HTTP layer to send it". Reordering (rather than
+        // adding a same-request tolerance window to validate_nonce) was chosen
+        // because it requires no special-casing in the validator at all — the
+        // validator's exact-match semantics stay exactly as documented, and
+        // the ordering fix is fully contained in this one handler.
     } else {
         // ── LEGACY UNSIGNED PATH ── only reachable when Q_ALLOW_UNSIGNED_TX=1 (the
         // interim guard rejects it otherwise). Keep the in-memory X-Wallet-Auth trust
@@ -5928,9 +5962,79 @@ pub async fn send_transaction_signed(
         state.libp2p_discovery.as_ref(),
     ).await;
 
+    // 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): advance the server's nonce
+    // view ONLY after the mempool has GENUINELY admitted the transaction —
+    // `result.mempool_admitted`, NOT `result.queued_for_block`.
+    //
+    // Round-2 adversarial review (two independent reviewers, one with an
+    // empirical repro) found that `result.queued_for_block` is NOT a
+    // reliable "genuinely admitted" signal: `submit_transaction` used to map
+    // BOTH a real `add_transaction` `Ok(true)` AND every `Ok(false)`
+    // rejection (blocked wallet, duplicate tx-hash, pending-nonce conflict,
+    // the Phase-0 nonce check itself failing, fee too low, capacity
+    // eviction) to `queued_for_block: true` — the old `Ok(false)` branch's
+    // own comment literally said "Still counts as queued". Gating the nonce
+    // advance on that field meant a legitimate, correctly-nonced transfer
+    // that got rejected by the mempool for an UNRELATED reason still had its
+    // nonce silently and permanently burned, while the client was told
+    // success:true. Silent transaction loss.
+    //
+    // Fix: `transaction_utils::submit_transaction` now calls
+    // `ProductionMempool::add_transaction_detailed`, whose `AdmissionResult`
+    // return type cannot conflate "genuinely admitted" with "rejected for
+    // any of ~8 reasons" — `result.mempool_admitted` is true ONLY when
+    // `AdmissionResult::Admitted` came back (the transaction is actually in
+    // `pending_transactions`). Gate on that instead.
+    //
+    // Moved from immediately after signature verification (see the comment
+    // there) — see that comment for why the old placement (advancing before
+    // mempool submission at all) self-rejected every client-signed transfer
+    // once Q_ENFORCE_MEMPOOL_NONCE=1 was set.
+    //
+    // Scoped to is_client_signed: the legacy unsigned path's nonce came from
+    // get_and_increment() earlier (which already advanced the tracker
+    // atomically at allocation time — see step 6 above), so it must not be
+    // advanced again here.
+    if is_client_signed && result.mempool_admitted {
+        state
+            .nonce_tracker
+            .set_nonce(&from_address, nonce.saturating_add(1));
+    }
+
+    // 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): the HTTP-level `success`
+    // field must stop unconditionally claiming success when the mempool
+    // never admitted the transaction. Pre-fix, `ApiResponse::success(...)`
+    // was returned unconditionally regardless of `queued_for_block`/
+    // `mempool_admitted` — a client-signed transfer that was validly signed
+    // but then rejected by the mempool (e.g. stale nonce, blocked wallet,
+    // fee too low) got HTTP 200 + `"success": true` with no indication
+    // anything was wrong, even though the transfer would never appear in a
+    // block. For the client-signed path (the durable, nonce-advancing path
+    // this bug concerns), report failure via `ApiResponse::error` — still
+    // HTTP 200 (consistent with how this handler already reports other
+    // rejections, e.g. invalid signature above), but `success: false` with
+    // a concrete reason, so the client is not told a rejected transfer
+    // succeeded. The legacy unsigned path's `queued_for_block` retains its
+    // prior meaning (best-effort informational) and is not gated here.
+    if is_client_signed && !result.mempool_admitted {
+        warn!(
+            "🛡 [BUG-A FIX] send_transaction_signed: tx {} from {} was NOT admitted to the mempool ({}); reporting failure instead of silent success",
+            &result.tx_id_hex[..16.min(result.tx_id_hex.len())],
+            q_log_privacy::mask_addr(&hex::encode(from_address)),
+            result.rejection_reason.as_deref().unwrap_or("no production mempool configured"),
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Transfer was not admitted to the mempool and will NOT be included in a block: {}. \
+             Your nonce has NOT been advanced — you may retry with the same nonce after resolving \
+             the issue (check GET /api/v1/wallets/<addr>/nonce for the current expected value).",
+            result.rejection_reason.as_deref().unwrap_or("no production mempool configured on this node")
+        ))));
+    }
+
     Ok(Json(ApiResponse::success(serde_json::json!({
         "transaction_id": format!("0x{}", hex::encode(result.tx_id)),
         "queued_for_block": result.queued_for_block,
+        "mempool_admitted": result.mempool_admitted,
         "broadcast_success": result.broadcast_success,
         "from": hex::encode(from_address),
         "to": hex::encode(to_address),
@@ -6831,24 +6935,35 @@ pub async fn active_peers(
 ) -> Result<Json<ApiResponse<Vec<PeerNode>>>, StatusCode> {
     debug!("Getting active peers");
 
-    let peers = Vec::new();
+    // v10.11.77b ACTIVE-PEERS FIX: use the REAL connected libp2p peer set (the same
+    // source as /api/v1/p2p/known-peers). The original stub returned [] (only ever
+    // populated from the disabled Bitcoin bridge). v77a read turbo_sync's height
+    // registry, which is only populated during CLIENT sync and is empty on a tip /
+    // serving node -- so the card stayed empty on epsilon.
+    let mut peers = Vec::new();
 
-    // Get Bitcoin bridge peers
-    // DEACTIVATED: bitcoin_bridge is currently disabled
-    /*
-    if let Some(bridge) = &state.bitcoin_bridge {
-        let active_peers = bridge.get_active_peers().await;
-        for (node_id, peer_info) in active_peers {
+    if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let connected = manager.get_discovered_peers().await;
+        let last_seen_unix = manager.get_peer_last_seen_unix();
+        drop(manager); // release the network-manager lock ASAP
+
+        let now = chrono::Utc::now();
+        for pid in connected {
+            let pid_str = pid.to_string();
+            let last_seen = last_seen_unix
+                .get(&pid_str)
+                .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(*secs as i64, 0))
+                .unwrap_or(now);
             peers.push(PeerNode {
-                node_id: hex::encode(node_id),
-                connection_type: "bitcoin-tor".to_string(),
-                latency_ms: Some(20), // Mock latency
-                reliability_score: 0.8,
-                last_seen: chrono::Utc::now(), // Mock connection time
+                node_id: pid_str,
+                connection_type: "libp2p".to_string(),
+                latency_ms: None,
+                reliability_score: 1.0,
+                last_seen,
             });
         }
     }
-    */
 
     Ok(Json(ApiResponse::success(peers)))
 }
@@ -6943,9 +7058,8 @@ pub async fn get_p2p_health(
 
     // Get network height
     // v1.0.10.1-beta: Changed to SeqCst for cross-thread visibility
-    let network_height = state
-        .highest_network_height
-        .load(std::sync::atomic::Ordering::SeqCst);
+    // v10.11.80 TUI-HEIGHT FIX: aggregated view (gossip ⊔ TurboSync registry)
+    let network_height = state.network_max_height_view().await;
     let current_height = node_status.current_height;
 
     // Calculate sync progress
@@ -9385,64 +9499,61 @@ pub async fn stop_mesh(
 pub async fn get_mesh_peers(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<Value>>, StatusCode> {
-    // Get current network height for calculating sync progress
     let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::SeqCst);
     let local_height = state.current_height_atomic.load(std::sync::atomic::Ordering::SeqCst);
+    let reference_height = local_height.max(network_height);
 
-    // Get real peer data from turbo_sync registry if available
-    let mut peers: Vec<serde_json::Value> = if let Some(ref turbo_sync) = state.turbo_sync {
-        let registry = turbo_sync.get_peer_registry_info().await;
+    // v10.11.78 MESH-PEERS FIX: list the REAL connected libp2p peers (get_discovered_peers,
+    // the same source as /api/v1/p2p/known-peers) instead of fabricated "peer-001..peer-NNN"
+    // placeholders. The old handler read ONLY the turbo_sync height registry, which is empty
+    // on a tip/serving node (epsilon), then padded to the connected count with fake
+    // is_real_data:false entries -- so no real node (esp. a NAT'd home node) ever appeared
+    // in the explorer peer list. Heights come from the turbo_sync registry when known.
+    let mut height_by_peer: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    if let Some(ref turbo_sync) = state.turbo_sync {
+        for (peer_id, height) in turbo_sync.get_peer_registry_info().await {
+            height_by_peer.insert(peer_id.to_string(), height);
+        }
+    }
 
-        // v6.0.3: Use local_height as reference for sync status, not network_height.
-        let reference_height = local_height.max(network_height);
-
-        registry.into_iter().map(|(peer_id, height)| {
-            let sync_progress = if reference_height > 0 {
-                ((height as f64 / reference_height as f64) * 100.0).min(100.0)
+    let mut peers: Vec<serde_json::Value> = Vec::new();
+    if let Some(libp2p_manager) = &state.libp2p_discovery {
+        let manager = libp2p_manager.lock().await;
+        let connected = manager.get_discovered_peers().await;
+        drop(manager);
+        for pid in connected {
+            let pid_str = pid.to_string();
+            let height = height_by_peer
+                .get(&pid_str)
+                .copied()
+                .or_else(|| {
+                    // v10.11.79: fall back to the sync-frontier map (fed by inbound
+                    // block requests) so actively-syncing peers show their real height
+                    // even when this node is at tip and the turbo_sync registry is empty.
+                    q_network::unified_network_manager::PEER_SYNC_HEIGHTS
+                        .get(&pid_str)
+                        .map(|e| *e.value())
+                })
+                .unwrap_or(0);
+            let (sync_progress, sync_status) = if height > 0 && reference_height > 0 {
+                let p = ((height as f64 / reference_height as f64) * 100.0).min(100.0);
+                let s = if height + 50 >= reference_height {
+                    "synced"
+                } else if height + 500 >= reference_height {
+                    "syncing"
+                } else {
+                    "behind"
+                };
+                (p, s)
             } else {
-                100.0
+                (100.0, "connected")
             };
-
-            let sync_status = if height + 50 >= reference_height {
-                "synced"
-            } else if height + 500 >= reference_height {
-                "syncing"
-            } else {
-                "behind"
-            };
-
-            serde_json::json!({
-                "peer_id": peer_id.to_string(),
+            peers.push(serde_json::json!({
+                "peer_id": pid_str,
                 "height": height,
                 "sync_progress": sync_progress,
                 "sync_status": sync_status,
                 "is_real_data": true
-            })
-        }).collect()
-    } else {
-        vec![]
-    };
-
-    // v1.0.4: Supplement turbo_sync peers with remaining libp2p connections.
-    // turbo_sync only tracks peers that sent height announcements, but libp2p
-    // has many more connected peers (gossipsub mesh, DHT, etc.).
-    // Show them all so the dropdown count matches the "Active Peers" count.
-    let libp2p_peer_count = if let Some(ref pc) = state.libp2p_peer_count {
-        pc.load(std::sync::atomic::Ordering::Relaxed)
-    } else {
-        let status = state.node_status.read().await;
-        status.connected_peers as usize
-    };
-
-    if libp2p_peer_count > peers.len() {
-        let remaining = libp2p_peer_count - peers.len();
-        for i in 0..remaining {
-            peers.push(serde_json::json!({
-                "peer_id": format!("peer-{:03}", i + 1),
-                "height": local_height,
-                "sync_progress": 100.0,
-                "sync_status": "connected",
-                "is_real_data": false
             }));
         }
     }
@@ -16301,7 +16412,8 @@ pub async fn sync_health(
         Ok(h) => h,
         Err(_) => state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed),
     };
-    let network_height = state.highest_network_height.load(std::sync::atomic::Ordering::SeqCst);
+    // v10.11.80 TUI-HEIGHT FIX: aggregated view (gossip ⊔ TurboSync registry)
+    let network_height = state.network_max_height_view().await;
     let gap = if network_height > local_height {
         network_height - local_height
     } else {

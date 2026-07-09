@@ -47,6 +47,22 @@ pub const MAX_ANCHOR_BATCH: usize = 1000;
 /// Maximum wall-clock seconds before pending_anchor is flushed to an anchor-only vertex
 pub const ANCHOR_FLUSH_SECS: u64 = 5;
 
+/// v10.11.52: Hard cap on the in-memory `pending_anchor` queue.
+///
+/// Records are pushed here AFTER they have already been written authoritatively to
+/// RocksDB (write_finality_record + save_wallet_balance_authoritative). The queue
+/// exists ONLY to feed an optional DAG-vertex anchor-stamp (the DAG-Knight producer
+/// drain is currently a stub), so the records here are durable and droppable.
+///
+/// Before this cap the queue was an unbounded `Vec`: under sustained finality
+/// deliveries above the 200/s flush-drain rate (e.g. 60 miners bursting), it grew
+/// without bound — observed at ~14.9 GB resident (≈100M records) and additionally
+/// cloned wholesale by `get_full_state` → a second multi-GB spike per state-sync
+/// request. Capping with drop-oldest bounds memory at CAP × ~150 B ≈ 7.5 MB while
+/// preserving the most recent records for anchoring. No balance data is lost: the
+/// authoritative state already lives in RocksDB.
+pub const PENDING_ANCHOR_CAP: usize = 50_000;
+
 /// Phase in the Bracha three-phase reliable broadcast protocol.
 ///
 /// ECHO carries the full update (not just broadcast_id) so receivers can

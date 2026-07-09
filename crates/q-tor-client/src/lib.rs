@@ -73,6 +73,15 @@ pub mod onion_balance;
 
 // Quantum-resistant: Post-quantum cryptography for Tor
 pub mod quantum_resistant;
+pub mod pq_secure_channel; // 🔐 Q3: PQ secure channel (hybrid KEM handshake + ChaCha20-Poly1305) over a circuit
+pub mod stem_receiver;     // 🧅 Dandelion stem RECEIVER (accept side) — completes stem relay end-to-end
+
+/// 🧅 OOTB: onions auto-discovered from Tor-capable peers (fed by register_peer_onion,
+/// populated from libp2p Identify in q-network). Process-global so it survives across the
+/// QTorClient handle without threading a field through every constructor.
+static HARVESTED_PEER_ONIONS: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashSet::new()));
 
 // Decoy routing: Advanced censorship resistance
 pub mod decoy_routing;
@@ -863,6 +872,67 @@ impl QTorClient {
         ))
     }
 
+    /// 🔐 Q3: connect to a peer AND perform the post-quantum circuit handshake.
+    ///
+    /// Like [`connect_to_peer`], but after the SOCKS connection is up it runs the
+    /// hybrid X25519+Kyber-1024 KEM handshake (Dilithium5-authenticated) over the stream and
+    /// attaches the agreed key to the returned [`TorConnection`] (see `circuit_key()`), which
+    /// callers wrap with [`pq_secure_channel::PqAead`] to encrypt circuit payloads.
+    ///
+    /// The remote MUST run the matching accept side (`pq_secure_channel::server_handshake`),
+    /// so this is opt-in for PQ-capable peers. Legacy peers keep using `connect_to_peer`.
+    pub async fn connect_to_peer_pq(&self, onion_address: &str) -> Result<TorConnection> {
+        let mut conn = self.connect_to_peer(onion_address).await?;
+        let circuit_id = conn.get_circuit_id();
+
+        // Build the authenticated KEM handshake WITHOUT holding the manager lock across IO.
+        let (handshake, ephemeral) = {
+            let manager = self.circuit_manager.lock().await;
+            manager.create_auth_handshake_kem(circuit_id)?
+        };
+
+        let key =
+            crate::pq_secure_channel::client_handshake(conn.stream_mut(), &handshake, &ephemeral)
+                .await
+                .context("post-quantum circuit handshake failed")?;
+        conn.set_circuit_key(key);
+
+        info!(
+            "🔐 [PQ-CIRCUIT] Established hybrid X25519+Kyber-1024 circuit key with {}",
+            onion_address
+        );
+        Ok(conn)
+    }
+
+    /// 🧅 Start the Dandelion stem RECEIVER (accept side). Binds `bind_addr` — the local
+    /// port the node's onion service forwards to — and returns an mpsc receiver of raw stem
+    /// payloads (postcard txs) sent by peers via [`send_over_tor`]. The node injects each
+    /// into its mempool and fluffs it to the open gossip mesh, completing the stem relay.
+    pub fn start_stem_receiver(
+        &self,
+        bind_addr: std::net::SocketAddr,
+    ) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            if let Err(e) = crate::stem_receiver::serve(bind_addr, tx).await {
+                tracing::error!("🧅 [STEM-RX] receiver stopped: {}", e);
+            }
+        });
+        rx
+    }
+
+    /// 🧅 onion-on-boot: launch the node's embedded-Arti onion service and forward inbound
+    /// streams to the local stem-receiver port (`local_port`). Returns the published .onion
+    /// address — set it as `Q_TOR_ADVERTISE_ONION` so the Identify layer advertises it and
+    /// peers auto-discover us as a Tor-capable stem target (the OOTB path). Errors in SOCKS
+    /// mode (no embedded Arti).
+    pub async fn launch_onion_forwarder(&self, nickname: &str, local_port: u16) -> Result<String> {
+        let rtc = self.real_tor_client.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no embedded Arti client (SOCKS mode) — cannot launch onion service")
+        })?;
+        rtc.launch_onion_forwarder(nickname, local_port).await
+    }
+
     /// Broadcast message through Tor with traffic analysis resistance
     pub async fn broadcast_message(&self, message: &[u8], topic: &str) -> Result<()> {
         debug!("📡 Broadcasting message via Tor to topic: {}", topic);
@@ -877,48 +947,136 @@ impl QTorClient {
         Ok(())
     }
 
-    /// Direct broadcast through Tor circuits
-    async fn direct_broadcast(&self, message: &[u8], _topic: &str) -> Result<()> {
-        let circuit_manager = self.circuit_manager.lock().await;
-
-        // Use all gossip circuits for broadcasting
-        for circuit_id in circuit_manager.get_gossip_circuits() {
-            let proxy_addr = self.socks_proxy;
-            let message = message.to_vec();
-            let circuit_id = *circuit_id;
-
-            tokio::spawn(async move {
-                // Send message through this circuit
-                // Implementation would depend on the specific networking protocol
-                debug!("📤 Sending message through circuit {}", circuit_id);
-            });
+    /// Candidate onion stem targets: configured bootstrap onions + any peer onions the
+    /// circuit manager has learned. Placeholders/empties filtered out.
+    async fn stem_onion_targets(&self) -> Vec<String> {
+        let mut targets: Vec<String> = self
+            .config
+            .bootstrap_onions
+            .iter()
+            .filter(|o| !o.is_empty() && o.contains(".onion"))
+            .cloned()
+            .collect();
+        let manager = self.circuit_manager.lock().await;
+        for o in manager.known_onion_targets() {
+            if o.contains(".onion") && !targets.contains(&o) {
+                targets.push(o);
+            }
         }
+        // 🧅 OOTB: onions auto-discovered from Tor-capable peers' Identify (register_peer_onion).
+        for o in HARVESTED_PEER_ONIONS.read().unwrap().iter() {
+            if o.contains(".onion") && !targets.contains(o) {
+                targets.push(o.clone());
+            }
+        }
+        targets
+    }
 
+    /// 🧅 OOTB: record a Tor-capable peer's onion address (harvested from libp2p Identify by
+    /// q-network's tor_capability layer). These auto-populate the Dandelion stem-target set
+    /// via [`stem_onion_targets`], so stems route to reachable Tor peers with no config — the
+    /// out-of-the-box path. Capability negotiation is implicit: only peers that advertise an
+    /// onion (i.e. are Tor-reachable) ever land here.
+    pub fn register_peer_onion(&self, onion: &str) {
+        if onion.contains(".onion") {
+            HARVESTED_PEER_ONIONS.write().unwrap().insert(onion.to_string());
+        }
+    }
+
+    /// 🧅 OOTB: drop a peer's onion (e.g. on disconnect / capability loss).
+    pub fn forget_peer_onion(&self, onion: &str) {
+        HARVESTED_PEER_ONIONS.write().unwrap().remove(onion);
+    }
+
+    /// Actually send `message` to an onion peer over Tor (SOCKS5 → onion circuit).
+    /// This is a REAL Tor send — the bytes traverse a Tor circuit to the target onion.
+    async fn send_over_tor(&self, onion: &str, message: &[u8]) -> Result<()> {
+        // Prefer embedded Arti's NATIVE connect: embedded Arti exposes no SOCKS port, so the
+        // SOCKS5 path below only works with an external tor daemon. With embedded Arti
+        // (real_tor_client present) we dial the onion directly through Arti.
+        if let Some(rtc) = &self.real_tor_client {
+            rtc.send_framed(onion, message)
+                .await
+                .with_context(|| format!("Tor (embedded Arti) send to {onion}"))?;
+            debug!("🧅 sent {} bytes over Tor (arti) → {}", message.len(), onion);
+            return Ok(());
+        }
+        // Fallback: SOCKS5 (external tor daemon at Q_TOR_SOCKS5_ADDR).
+        use tokio::io::AsyncWriteExt;
+        let mut conn = self
+            .connect_to_peer(onion)
+            .await
+            .with_context(|| format!("Tor connect to stem target {onion}"))?;
+        let stream = conn.stream_mut();
+        // Length-prefixed frame so the receiver can delimit the message.
+        stream.write_all(&(message.len() as u32).to_be_bytes()).await?;
+        stream.write_all(message).await?;
+        stream.flush().await?;
+        debug!("🧅 sent {} bytes over Tor (socks) → {}", message.len(), onion);
         Ok(())
     }
 
-    /// Dandelion++ broadcast for traffic analysis resistance
+    /// Direct broadcast through Tor circuits. Sends to every known onion target.
+    /// Returns Err if there are no targets or every send fails — so callers NEVER
+    /// report "sent via Tor" unless bytes genuinely left over a Tor circuit.
+    async fn direct_broadcast(&self, message: &[u8], _topic: &str) -> Result<()> {
+        let targets = self.stem_onion_targets().await;
+        if targets.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no Tor onion targets (set Q_TOR_BOOTSTRAP_ONIONS) — refusing to fake a Tor broadcast"
+            ));
+        }
+        let mut sent = 0usize;
+        for onion in &targets {
+            match self.send_over_tor(onion, message).await {
+                Ok(()) => sent += 1,
+                Err(e) => warn!("🧅 Tor broadcast to {} failed: {}", onion, e),
+            }
+        }
+        if sent == 0 {
+            return Err(anyhow::anyhow!(
+                "Tor broadcast failed to all {} onion target(s)",
+                targets.len()
+            ));
+        }
+        info!("🧅 tx broadcast via Tor to {}/{} onion peers", sent, targets.len());
+        Ok(())
+    }
+
+    /// Dandelion++ stem: relay the tx to ONE pseudo-random onion peer over Tor before it
+    /// fluffs into the open mesh. Returns Err (→ honest gossipsub fallback) if no Tor stem
+    /// target is reachable, instead of silently pretending the stem went over Tor.
     async fn dandelion_broadcast(&self, message: &[u8], topic: &str) -> Result<()> {
-        debug!("🌻 Using Dandelion++ broadcast for topic: {}", topic);
-
-        // Phase 1: Stem phase - relay to random peer
-        let random_circuit = {
-            let manager = self.circuit_manager.lock().await;
-            manager.get_random_circuit().await?
-        };
-
-        // Send to random peer first (stem phase)
-        // Then peer will either continue stem or switch to fluff phase
-        self.relay_through_circuit(message, random_circuit).await?;
-
+        let targets = self.stem_onion_targets().await;
+        if targets.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Dandelion stem: no Tor onion targets (set Q_TOR_BOOTSTRAP_ONIONS) — refusing to fake Tor"
+            ));
+        }
+        // Pseudo-random stem target (selection spread; not security-critical).
+        let idx = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as usize)
+            .unwrap_or(0)
+            % targets.len();
+        let target = &targets[idx];
+        self.send_over_tor(target, message)
+            .await
+            .with_context(|| format!("Dandelion stem relay via Tor to {target}"))?;
+        info!("🌻 Dandelion++ stem relayed via Tor → {} (topic={})", target, topic);
         Ok(())
     }
 
-    /// Relay message through specific circuit
-    async fn relay_through_circuit(&self, _message: &[u8], circuit_id: u64) -> Result<()> {
-        debug!("🔄 Relaying message through circuit {}", circuit_id);
-        // Implementation would integrate with the actual circuit
-        Ok(())
+    /// Relay a message through the Tor circuit associated with `circuit_id` (real send
+    /// to that circuit's onion peer). Errs if the circuit has no onion peer.
+    async fn relay_through_circuit(&self, message: &[u8], circuit_id: u64) -> Result<()> {
+        let onion = {
+            let manager = self.circuit_manager.lock().await;
+            manager
+                .onion_for_circuit(circuit_id)
+                .ok_or_else(|| anyhow::anyhow!("circuit {circuit_id} has no onion peer to relay to"))?
+        };
+        self.send_over_tor(&onion, message).await
     }
 
     /// Generate quantum-enhanced circuit parameters
@@ -1329,6 +1487,9 @@ pub struct TorConnection {
     stream: TcpStream,
     circuit_id: u64,
     peer_onion: String,
+    /// 🔐 Q3: post-quantum circuit key (hybrid X25519+Kyber-1024), set by connect_to_peer_pq.
+    /// `None` for legacy (auth-only / no key agreement) connections.
+    circuit_key: Option<[u8; 32]>,
 }
 
 impl TorConnection {
@@ -1337,7 +1498,18 @@ impl TorConnection {
             stream,
             circuit_id,
             peer_onion,
+            circuit_key: None,
         }
+    }
+
+    /// 🔐 Q3: the agreed post-quantum circuit key, if a PQ handshake was performed.
+    pub fn circuit_key(&self) -> Option<[u8; 32]> {
+        self.circuit_key
+    }
+
+    /// 🔐 Q3: attach the agreed PQ circuit key (used by connect_to_peer_pq).
+    pub fn set_circuit_key(&mut self, key: [u8; 32]) {
+        self.circuit_key = Some(key);
     }
 
     pub fn get_circuit_id(&self) -> u64 {

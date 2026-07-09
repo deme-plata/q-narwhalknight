@@ -553,9 +553,11 @@ pub enum PeerEventType {
 /// Event broadcaster for managing real-time streams
 pub struct EventBroadcaster {
     tx: broadcast::Sender<StreamEvent>,
-    // Deduplication cache: stores (wallet_address, balance) with timestamp to prevent duplicate broadcasts
+    // Deduplication cache: stores the last exact BalanceUpdated payload per wallet.
+    // It must not coalesce real balance deltas; it only suppresses duplicate sends
+    // of the same old/new/reason/height tuple inside a tiny retry window.
     recent_balance_broadcasts:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant)>>>,
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (f64, f64, Option<u64>, String, std::time::Instant)>>>,
 }
 
 impl EventBroadcaster {
@@ -583,31 +585,56 @@ impl EventBroadcaster {
         // v9.2.7: Reduced from 500ms to 100ms for faster SSE updates
         if let StreamEvent::BalanceUpdated {
             wallet_address,
+            old_balance,
             new_balance,
+            change_reason,
+            block_height,
             ..
         } = &event
         {
+            if old_balance == new_balance {
+                trace!(
+                    "[SSE] Skipping unchanged BalanceUpdated for {}...",
+                    &wallet_address[..16.min(wallet_address.len())]
+                );
+                return Ok(());
+            }
+
             let mut cache = self.recent_balance_broadcasts.lock().await;
             let now = std::time::Instant::now();
 
             // Check if we recently broadcast this exact balance
-            if let Some((last_balance, last_time)) = cache.get(wallet_address) {
-                if (*last_balance - new_balance).abs() < 0.00000001
+            if let Some((last_old, last_new, last_height, last_reason, last_time)) =
+                cache.get(wallet_address)
+            {
+                if *last_old == *old_balance
+                    && *last_new == *new_balance
+                    && last_height == block_height
+                    && last_reason == change_reason
                     && now.duration_since(*last_time).as_millis() < 100
                 {
                     trace!(
                         "📡 [SSE] Skipping duplicate BalanceUpdated for {}... (within 100ms)",
-                        &wallet_address[..16]
+                        &wallet_address[..16.min(wallet_address.len())]
                     );
                     return Ok(());
                 }
             }
 
             // Update cache
-            cache.insert(wallet_address.clone(), (*new_balance, now));
+            cache.insert(
+                wallet_address.clone(),
+                (
+                    *old_balance,
+                    *new_balance,
+                    *block_height,
+                    change_reason.clone(),
+                    now,
+                ),
+            );
 
             // Clean old entries (older than 500ms)
-            cache.retain(|_, (_, time)| now.duration_since(*time).as_millis() < 500);
+            cache.retain(|_, (_, _, _, _, time)| now.duration_since(*time).as_millis() < 500);
         }
 
         // 🔒 PRIVACY: Log aggregate statistics only, no individual wallet data
@@ -746,7 +773,7 @@ pub async fn sse_events(
     // and still apply the per-wallet event filter below.
     let wallet_filter: Option<String> = match (requested_filter.as_ref(), auth_wallet.as_ref()) {
         (Some(filter), Some(auth)) => {
-            let hex_part = filter.strip_prefix("qnk").unwrap_or(filter.as_str());
+            let hex_part = filter.trim_start_matches("qnk");
             let matches = hex_part.len() == 64
                 && hex::decode(hex_part)
                     .ok()
@@ -817,7 +844,7 @@ pub async fn sse_events(
 
         // Normalize wallet address (remove "qnk" prefix if present)
         let normalized_filter = if wallet_addr.starts_with("qnk") {
-            wallet_addr[3..].to_string()
+            wallet_addr.trim_start_matches("qnk").to_string()
         } else {
             wallet_addr.clone()
         };
@@ -839,7 +866,7 @@ pub async fn sse_events(
             // Balance updates - only send if it's for this wallet
             StreamEvent::BalanceUpdated { wallet_address, change_reason, old_balance, new_balance, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -858,7 +885,7 @@ pub async fn sse_events(
             // Mining rewards - only send if it's for this wallet
             StreamEvent::MiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -876,7 +903,7 @@ pub async fn sse_events(
             // Mining stats - only send if it's for this wallet
             StreamEvent::MiningStats { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -894,7 +921,7 @@ pub async fn sse_events(
             // v1.3.8-beta: Pending mining reward - only send if it's for this wallet
             StreamEvent::PendingMiningReward { miner_address, .. } => {
                 let normalized_event = if miner_address.starts_with("qnk") {
-                    miner_address[3..].to_string()
+                    miner_address.trim_start_matches("qnk").to_string()
                 } else {
                     miner_address.clone()
                 };
@@ -910,7 +937,7 @@ pub async fn sse_events(
             // Swap events - only send if it's for this wallet
             StreamEvent::SwapExecuted { wallet_address, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -948,7 +975,7 @@ pub async fn sse_events(
             // v10.2.9: Token balance updates (QUGUSD, custom tokens) — filter by wallet address
             StreamEvent::TokenBalanceUpdated { ref wallet_address, .. } => {
                 let normalized_event = if wallet_address.starts_with("qnk") {
-                    wallet_address[3..].to_string()
+                    wallet_address.trim_start_matches("qnk").to_string()
                 } else {
                     wallet_address.clone()
                 };
@@ -987,8 +1014,7 @@ pub async fn sse_events(
                 // to the real balance once the 15s sync ran — confusing users with balance spikes.
                 // RocksDB is always authoritative and available immediately on startup.
                 let wallet_hex = wallet_filter_value
-                    .strip_prefix("qnk")
-                    .unwrap_or(wallet_filter_value);
+                    .trim_start_matches("qnk");
 
                 // Always read from RocksDB for initial event (authoritative, available at startup)
                 // Fall back to in-memory cache only if RocksDB read fails
@@ -1011,23 +1037,23 @@ pub async fn sse_events(
                 // 🔒 PRIVACY: No logging of balances or addresses
                 debug!("💰 SSE: Initial balance fetched from RocksDB");
 
-                // Create initial balance event
+                // Create initial balance snapshot. BalanceUpdated is reserved for
+                // real deltas and must never carry old_balance == new_balance.
                 let initial_balance_event = serde_json::json!({
-                    "type": "BalanceUpdated",
+                    "type": "BalanceSnapshot",
                     "data": {
                         "wallet_address": wallet_filter_value.clone(),
-                        "old_balance": balance_qnk,
-                        "new_balance": balance_qnk,
-                        "change_reason": "SSE connection established",
+                        "balance": balance_qnk,
+                        "source": "sse_connect",
                         "timestamp": chrono::Utc::now().to_rfc3339()
                     }
                 });
 
                 if let Ok(json) = serde_json::to_string(&initial_balance_event) {
-                    // Return initial balance event, then continue with normal stream
+                    // Return initial balance snapshot, then continue with normal stream
                     // Set state_opt to None so we don't send initial balance again
                     return Some((
-                        Ok(Event::default().event("balance-updated").data(json)),
+                        Ok(Event::default().event("balance-snapshot").data(json)),
                         (rx, filter, None, None, headers_only, miner_mode, connection_start, max_sse_lifetime),
                     ));
                 }

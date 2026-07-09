@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 /// Default bootstrap servers — Delta 1Gbit first for fastest sync
 pub const DEFAULT_BOOTSTRAP_SERVERS: &[&str] = &[
     "http://5.79.79.158:8080",     // Server Delta (primary - 1Gbit fastest)
-    "http://109.205.176.60:8080",  // Server Gamma (secondary - 1Gbit)
+    "http://109.205.176.60:8808",  // Server Gamma (secondary - 1Gbit; API port 8808)
     "http://185.182.185.227:8080", // Server Beta (tertiary - 100Mbit)
     "http://161.35.219.10:8082",   // Server Alpha (quaternary/testing) - port 8082
 ];

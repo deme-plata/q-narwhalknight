@@ -1844,6 +1844,15 @@ impl KVStore for RocksDBKV {
             let cf_handle = db
                 .cf_handle(&cf)
                 .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf))?;
+            // 2026-06-23 (rocky): OOM ROOT-CAUSE FIX. This scan was UNBOUNDED — it pushed every
+            // matching (key,value) into `results`, so a broad prefix over a large CF (e.g.
+            // CF_BLOCKS ~19M rows) loaded tens of GB into RAM and OOM-killed the node in a
+            // death-loop, even while block production was paused (this runs in the catch-up /
+            // handler path via spawn_blocking). Proven via frame-pointer jeprof: 42% Vec::push +
+            // 58% to_vec under scan_prefix::{{closure}}. The sled impl already capped at 100K; the
+            // RocksDB impl never did. Mirror that cap and log the offending cf+prefix so the
+            // pathological caller is named (then fix it caller-side to a bounded scan_prefix_seek).
+            const MAX_SCAN_RESULTS: usize = 100_000;
             let mut results = Vec::new();
             let iter = db.prefix_iterator_cf(&cf_handle, &prefix);
             for item in iter {
@@ -1852,6 +1861,16 @@ impl KVStore for RocksDBKV {
                     break;
                 }
                 results.push((key.to_vec(), value.to_vec()));
+                if results.len() >= MAX_SCAN_RESULTS {
+                    warn!(
+                        "⚠️ [SCAN-CAP] scan_prefix cf='{}' prefix='{}' ({} bytes) hit {} entry cap — TRUNCATING (pathological broad scan; OOM-guard, see kv.rs scan_prefix fix)",
+                        cf,
+                        String::from_utf8_lossy(&prefix),
+                        prefix.len(),
+                        MAX_SCAN_RESULTS
+                    );
+                    break;
+                }
             }
             Ok::<_, anyhow::Error>(results)
         })

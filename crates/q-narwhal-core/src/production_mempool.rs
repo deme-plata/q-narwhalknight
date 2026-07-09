@@ -17,6 +17,127 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
+/// 🛡 Phase 0 (2026-07-08): Source of truth for a wallet's next expected
+/// on-chain nonce. `q-narwhal-core` sits below `q-api-server` in the crate
+/// graph (this crate cannot depend on q-api-server's `NonceTracker`
+/// directly without a cycle), so this trait is the seam: q-api-server
+/// implements it for its `NonceTracker` and injects it via
+/// `TxValidator::set_nonce_source` / `ProductionMempool::set_nonce_source`
+/// at boot, mirroring the existing `set_production_mempool` wiring pattern.
+///
+/// GAP CLOSED: previously nothing between mempool admission and block
+/// packing compared a transaction's `nonce` field against the sender's
+/// actual last-confirmed on-chain nonce. `pending_nonces` below only
+/// prevented two *simultaneously pending* mempool entries from sharing a
+/// nonce — it does not stop a replayed/re-signed transaction (different
+/// tx.id, so DS-1's tx-id replay guard does not catch it) that reuses an
+/// already-spent nonce with a different `to`/`amount`/`data` payload.
+///
+/// This is validate-only by design: incrementing/consuming the nonce stays
+/// owned by whichever path currently does it (`NonceTracker::get_and_increment`
+/// in q-api-server's handlers.rs). Field is `Option`, so behavior is an
+/// exact no-op (identical to pre-patch) until a caller wires it up — same
+/// "off unless opted in" rollout style as DS-1's `Q_REPLAY_PROTECTION_HEIGHT`.
+pub trait NonceSource: Send + Sync {
+    /// Returns Ok(()) if `submitted_nonce` is the sender's expected next
+    /// nonce, Err(expected_nonce) otherwise. Exact-match semantics only
+    /// (no "greater than" tolerance) — matches the semantics already
+    /// proven safe in the existing `NonceTracker::validate_nonce`.
+    fn validate_nonce(&self, wallet: &[u8; 32], submitted_nonce: u64) -> Result<(), u64>;
+}
+
+/// 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): why `add_transaction`'s plain
+/// `Result<bool>` was unsafe to gate anything security-relevant on.
+///
+/// `add_transaction` returns `Ok(false)` for AT LEAST 8 semantically distinct
+/// reasons (blocked wallet, duplicate tx already pending, nonce-key already
+/// pending, rate-limited, failed signature/format validation, fee too low,
+/// mempool-full-and-outbid, mempool-full-and-not-outbid) — and ALSO for the
+/// ONE case that matters to a caller deciding whether to burn a nonce: "this
+/// transaction was never inserted into pending_transactions". Collapsing all
+/// of these into a single boolean is exactly what let
+/// `q-api-server::handlers::send_transaction_signed` treat "rejected for an
+/// unrelated reason" as "genuinely admitted" (BUG A) — its call site had no
+/// way to tell them apart because the type it read from didn't distinguish
+/// them.
+///
+/// `AdmissionResult` is the richer signal: `Admitted` is returned ONLY from
+/// the single code path in `add_transaction_detailed` that actually inserts
+/// into `pending_transactions` and marks the nonce as pending (previously:
+/// `return Ok(true)` / falls through to the final `Ok(true)`). Every other
+/// exit is `Rejected(RejectReason)` with a reason tag identifying exactly
+/// which check failed. `add_transaction` (the original `Result<bool>`
+/// signature) is kept unchanged and is now a thin wrapper over
+/// `add_transaction_detailed` — this preserves every other existing call
+/// site's behavior byte-for-byte (there are 6+ across q-narwhal-core /
+/// q-api-server / q-sharding that only ever cared about the bool), while
+/// giving `submit_transaction` (the one call site that actually needs to
+/// gate nonce-advance) the ability to ask "was this GENUINELY admitted?"
+/// with a type that cannot silently conflate the two.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdmissionResult {
+    /// Genuinely inserted into `pending_transactions` and its (sender,
+    /// nonce) marked as pending. Safe to treat as "this nonce is spent".
+    Admitted,
+    /// Not admitted, for the reason given. NEVER safe to treat as "this
+    /// nonce is spent" — the transaction was not queued for a block.
+    Rejected(RejectReason),
+}
+
+impl AdmissionResult {
+    /// Convenience: true only for `Admitted`. Matches the historical
+    /// `Ok(true)` semantics of `add_transaction` exactly (never true for a
+    /// `Rejected(_)`, regardless of reason).
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, AdmissionResult::Admitted)
+    }
+}
+
+/// Why `add_transaction_detailed` declined to admit a transaction. Every
+/// variant corresponds to a distinct `Ok(false)` / rejection branch that
+/// existed in `add_transaction` before this fix — none of these are new
+/// rejection *behavior*, this only labels the reasons that already existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectReason {
+    /// Sender or recipient is on the Q_BLOCKED_WALLETS operator freeze list.
+    BlockedWallet,
+    /// This exact tx_hash is already present in `pending_transactions`.
+    DuplicateTransaction,
+    /// The (sender, nonce) pair is already used by a different pending tx
+    /// (mempool-local replay/double-spend guard, `pending_nonces`).
+    NonceAlreadyPending,
+    /// Anti-spam rate limit exceeded for the announcing validator.
+    RateLimited,
+    /// `TxValidator::validate_transaction` returned a non-`Valid` status —
+    /// covers signature verification failure, the Phase 0
+    /// nonce-vs-chain-state `NonceSource` check failing, and any other
+    /// `perform_validation` rejection.
+    ValidationFailed(String),
+    /// `Transaction::validate_fee()` returned an error (malformed fee
+    /// structure independent of the minimum-fee-per-byte check below).
+    FeeValidationFailed(String),
+    /// Fee did not meet `config.min_fee_per_byte` for this tx's size.
+    FeeTooLow,
+    /// Mempool at `max_transactions` capacity and this tx's fee did not
+    /// exceed the current lowest-fee occupant, so nothing was evicted.
+    MempoolFullFeeTooLow,
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::BlockedWallet => write!(f, "sender or recipient wallet is blocked"),
+            RejectReason::DuplicateTransaction => write!(f, "transaction already in mempool"),
+            RejectReason::NonceAlreadyPending => write!(f, "nonce already used by a pending transaction"),
+            RejectReason::RateLimited => write!(f, "rate limit exceeded"),
+            RejectReason::ValidationFailed(s) => write!(f, "validation failed: {}", s),
+            RejectReason::FeeValidationFailed(s) => write!(f, "fee validation failed: {}", s),
+            RejectReason::FeeTooLow => write!(f, "fee below minimum required for mempool inclusion"),
+            RejectReason::MempoolFullFeeTooLow => write!(f, "mempool full and fee too low to evict an existing entry"),
+        }
+    }
+}
+
 /// Production-ready transaction mempool
 ///
 /// v3.4.6-beta: Added O(1) nonce tracking for instant replay/double-spend detection
@@ -199,6 +320,15 @@ pub struct TxValidator {
     /// the handler-side mark_auth_trusted() and the validator-side
     /// perform_validation() see the same entries.
     trusted_via_auth: Arc<DashMap<TxHash, ([u8; 32], std::time::Instant)>>,
+
+    /// 🛡 Phase 0 (2026-07-08): optional nonce-vs-chain-state source. See
+    /// `NonceSource` doc above. `None` (the default from `TxValidator::new`)
+    /// means this check is a no-op — set via `set_nonce_source` at boot.
+    /// RwLock (not a plain field) because `TxValidator` is held behind an
+    /// `Arc` (see `ProductionMempool.transaction_validator`), so wiring it
+    /// in post-construction needs interior mutability, same pattern as
+    /// `verification_cache` above.
+    nonce_source: RwLock<Option<Arc<dyn NonceSource>>>,
 }
 
 // TorBroadcastManager is imported from tor_broadcast module
@@ -305,14 +435,56 @@ impl ProductionMempool {
         self.trusted_via_auth.insert(tx_id, (from_address, std::time::Instant::now()));
     }
 
+    /// 🛡 Phase 0 (2026-07-08): wire in the authoritative nonce source (see
+    /// `NonceSource` trait doc). Forwards to the shared `TxValidator` so
+    /// both the admission-time check (Patch 2a, in `perform_validation`)
+    /// and the block-packing re-check (Patch 2b, in
+    /// `get_transactions_for_block`) read from the same source — no second
+    /// independent field to keep in sync. Call once at boot, mirroring the
+    /// existing `set_production_mempool` wiring pattern in lockfree_producer.rs.
+    pub async fn set_nonce_source(&self, source: Arc<dyn NonceSource>) {
+        self.transaction_validator.set_nonce_source(source).await;
+    }
+
     /// Add transaction to mempool (from client or peer)
     ///
     /// v3.4.6-beta: Added O(1) double-spend detection using spent_outpoints DashMap
+    ///
+    /// 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): this is now a thin wrapper
+    /// over `add_transaction_detailed` that collapses `AdmissionResult` back
+    /// to a plain `bool` (`Admitted` -> `true`, any `Rejected(_)` -> `false`)
+    /// — i.e. EXACTLY the historical return semantics, byte-for-byte, for
+    /// every existing call site (there are 6+ across q-narwhal-core /
+    /// q-api-server / q-sharding, none of which need the rejection reason).
+    /// Only `submit_transaction` in q-api-server's `transaction_utils.rs`
+    /// (the BUG A call site) needs the detailed variant, and now calls
+    /// `add_transaction_detailed` directly instead of this wrapper.
     pub async fn add_transaction(
         &self,
         transaction: Transaction,
         announced_by: Option<ValidatorId>,
     ) -> Result<bool> {
+        Ok(self
+            .add_transaction_detailed(transaction, announced_by)
+            .await?
+            .is_admitted())
+    }
+
+    /// Add transaction to mempool (from client or peer) — detailed variant.
+    ///
+    /// 🛡 Phase 0 Round-2 BUG-A FIX (2026-07-08): identical admission logic to
+    /// the pre-fix `add_transaction` (every check, every order, every
+    /// rejection condition is unchanged — this is a pure return-type
+    /// enrichment, not a behavior change), except every `return Ok(false)`
+    /// site now returns `Ok(AdmissionResult::Rejected(reason))` with a reason
+    /// tag identifying exactly which check failed, and the sole genuine-
+    /// admission path returns `Ok(AdmissionResult::Admitted)` instead of
+    /// `Ok(true)`. See `AdmissionResult`'s doc comment for why this exists.
+    pub async fn add_transaction_detailed(
+        &self,
+        transaction: Transaction,
+        announced_by: Option<ValidatorId>,
+    ) -> Result<AdmissionResult> {
         let tx_hash = transaction.hash();
         let start_time = std::time::Instant::now();
 
@@ -357,7 +529,7 @@ impl ProductionMempool {
                 );
                 let mut metrics = self.metrics.write().await;
                 metrics.invalid_transactions += 1;
-                return Ok(false);
+                return Ok(AdmissionResult::Rejected(RejectReason::BlockedWallet));
             }
         }
 
@@ -366,7 +538,7 @@ impl ProductionMempool {
             let pending = self.pending_transactions.read().await;
             if pending.contains_key(&tx_hash) {
                 debug!("   Transaction already in mempool");
-                return Ok(false);
+                return Ok(AdmissionResult::Rejected(RejectReason::DuplicateTransaction));
             }
         }
 
@@ -382,7 +554,7 @@ impl ProductionMempool {
             );
             let mut metrics = self.metrics.write().await;
             metrics.invalid_transactions += 1;
-            return Ok(false);
+            return Ok(AdmissionResult::Rejected(RejectReason::NonceAlreadyPending));
         }
 
         // Anti-spam check
@@ -390,7 +562,7 @@ impl ProductionMempool {
             let mut spam_detector = self.spam_detector.write().await;
             if !spam_detector.check_rate_limit(validator).await {
                 warn!("🚫 Rate limit exceeded for validator: {:?}", validator);
-                return Ok(false);
+                return Ok(AdmissionResult::Rejected(RejectReason::RateLimited));
             }
         }
 
@@ -404,7 +576,11 @@ impl ProductionMempool {
             warn!("❌ Invalid transaction: {:?}", validation_status);
             let mut metrics = self.metrics.write().await;
             metrics.invalid_transactions += 1;
-            return Ok(false);
+            let reason_detail = match &validation_status {
+                ValidationStatus::Invalid(s) => s.clone(),
+                other => format!("{:?}", other),
+            };
+            return Ok(AdmissionResult::Rejected(RejectReason::ValidationFailed(reason_detail)));
         }
 
         // v1.4.5-beta: Validate fee meets minimum requirements (prevent zero-fee spam)
@@ -412,7 +588,7 @@ impl ProductionMempool {
             warn!("💸 Transaction fee validation failed: {}", fee_error);
             let mut metrics = self.metrics.write().await;
             metrics.invalid_transactions += 1;
-            return Ok(false);
+            return Ok(AdmissionResult::Rejected(RejectReason::FeeValidationFailed(fee_error.to_string())));
         }
 
         // Create mempool transaction
@@ -429,7 +605,7 @@ impl ProductionMempool {
             );
             let mut metrics = self.metrics.write().await;
             metrics.invalid_transactions += 1;
-            return Ok(false);
+            return Ok(AdmissionResult::Rejected(RejectReason::FeeTooLow));
         }
         let mempool_tx = MempoolTransaction {
             fee: tx_fee,
@@ -464,10 +640,10 @@ impl ProductionMempool {
                         info!("🗑️  Evicted low-fee transaction for higher fee (newest in lowest-fee bucket)");
                     } else {
                         warn!("💸 Transaction fee too low for mempool inclusion");
-                        return Ok(false);
+                        return Ok(AdmissionResult::Rejected(RejectReason::MempoolFullFeeTooLow));
                     }
                 } else {
-                    return Ok(false);
+                    return Ok(AdmissionResult::Rejected(RejectReason::MempoolFullFeeTooLow));
                 }
             }
 
@@ -513,9 +689,12 @@ impl ProductionMempool {
                 pending.len()
             });
 
-            Ok(true)
+            Ok(AdmissionResult::Admitted)
         } else {
-            Ok(false)
+            // Unreachable in practice (the capacity branch above always either
+            // `return`s early or lets control fall through to `pending.insert`
+            // + `true`), kept as a safe fallback rather than `unreachable!()`.
+            Ok(AdmissionResult::Rejected(RejectReason::MempoolFullFeeTooLow))
         }
     }
 
@@ -575,6 +754,38 @@ impl ProductionMempool {
             .values()
             .filter(|tx| tx.validation_status == ValidationStatus::Valid)
             .collect();
+
+        // 🛡 Phase 0 (2026-07-08) Patch 2b: defense-in-depth nonce re-check
+        // at block-packing time, immediately before selection. Closes the
+        // window between mempool admission (Patch 2a) and packing where
+        // chain state can move — e.g. another block from a different
+        // producer/lane already consumed that nonce after this tx was
+        // admitted but before it was packed. Reject-not-mint: dropped here,
+        // not silently included, matching balance_consensus.rs's existing
+        // "reject, log, continue" style. No-op (same as pre-patch) until
+        // set_nonce_source is called at boot — see NonceSource doc.
+        if let Some(source) = self.transaction_validator.get_nonce_source().await {
+            let before = transactions.len();
+            transactions.retain(|tx| {
+                match source.validate_nonce(&tx.transaction.from, tx.transaction.nonce) {
+                    Ok(()) => true,
+                    Err(expected) => {
+                        warn!(
+                            "🚨 [MEMPOOL-DRAW] dropping tx at pack-time — nonce no longer matches chain state (submitted={} expected={}, tx_hash={})",
+                            tx.transaction.nonce, expected, hex::encode(&tx.transaction.hash()[..8])
+                        );
+                        false
+                    }
+                }
+            });
+            let dropped = before - transactions.len();
+            if dropped > 0 {
+                tracing::warn!(
+                    "📦 [MEMPOOL-DRAW] pack-time nonce re-check dropped {} tx(s)",
+                    dropped
+                );
+            }
+        }
 
         // Sort by fee (highest first) then by receive time (oldest first)
         transactions.sort_by(|a, b| {
@@ -910,7 +1121,26 @@ impl TxValidator {
             current_phase: phase,
             verification_cache: Arc::new(RwLock::new(HashMap::new())),
             trusted_via_auth,
+            nonce_source: RwLock::new(None),
         }
+    }
+
+    /// 🛡 Phase 0 (2026-07-08): wire in the authoritative nonce source. See
+    /// `NonceSource` trait doc. Until this is called, `perform_validation`'s
+    /// nonce check is a no-op (matches pre-patch behavior exactly). Takes
+    /// `&self` (not `&mut self`) so it can be called through the `Arc<TxValidator>`
+    /// that `ProductionMempool` already holds, mirroring `mark_auth_trusted`'s
+    /// shared-Arc pattern on the sibling `trusted_via_auth` field.
+    pub async fn set_nonce_source(&self, source: Arc<dyn NonceSource>) {
+        *self.nonce_source.write().await = Some(source);
+    }
+
+    /// 🛡 Phase 0 (2026-07-08): read-back accessor so `ProductionMempool`
+    /// (specifically `get_transactions_for_block`, Patch 2b) can reuse the
+    /// SAME nonce source the admission-time check (Patch 2a) uses, rather
+    /// than wiring a second independent field that could drift out of sync.
+    async fn get_nonce_source(&self) -> Option<Arc<dyn NonceSource>> {
+        self.nonce_source.read().await.clone()
     }
 
     async fn validate_transaction(&self, transaction: &Transaction) -> Result<ValidationStatus> {
@@ -1006,6 +1236,38 @@ impl TxValidator {
                     hex::encode(&tx_id[..8])
                 );
                 return Ok(false);
+            }
+        }
+
+        // 🛡 Phase 0 (2026-07-08): nonce-vs-chain-state check. See `NonceSource`
+        // doc. GAP CLOSED: a replayed/re-signed tx reusing an already-spent
+        // nonce with a different to/amount/data (different tx.id, so DS-1's
+        // applied_tx_<id> guard does not catch it) is now rejected here
+        // instead of being admitted unconditionally.
+        //
+        // Scoped to !auth_trusted: auth_trusted (X-Wallet-Auth) transactions
+        // have their nonce assigned server-side by the same NonceTracker via
+        // get_and_increment BEFORE this validation runs, so re-checking here
+        // would race the tracker's own increment and risk self-rejecting
+        // legitimate server-issued sends. This check targets the externally-
+        // signed / P2P-gossip path where the client supplies its own nonce
+        // and nothing upstream has verified it yet.
+        //
+        // Field is behind a lock defaulting to None (see TxValidator::new),
+        // so until `set_nonce_source` is called at boot, this is an exact
+        // no-op — zero behavioral change until opted in, same rollout style
+        // as DS-1's Q_REPLAY_PROTECTION_HEIGHT.
+        if !auth_trusted {
+            if let Some(source) = self.nonce_source.read().await.as_ref() {
+                if let Err(expected) = source.validate_nonce(&transaction.from, transaction.nonce) {
+                    warn!(
+                        "🚨 [MEMPOOL] reject: nonce mismatch — submitted={} expected={} (tx_hash={})",
+                        transaction.nonce,
+                        expected,
+                        hex::encode(&tx_id[..8])
+                    );
+                    return Ok(false);
+                }
             }
         }
 

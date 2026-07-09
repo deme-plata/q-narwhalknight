@@ -207,7 +207,80 @@ impl VertexCreator {
         let vertex = Vertex {
             id: vertex_id,
             round: current_round,
-            proposer: self.node_id,
+            // 🛡 Phase 0 Round-2 BUG-B FIX (2026-07-08): `proposer` MUST be the
+            // real Ed25519 public key that `signature` (above) is actually
+            // computed with — `self.signing_key.verifying_key().to_bytes()` —
+            // NOT `self.node_id`.
+            //
+            // Pre-fix this was `proposer: self.node_id`, but `node_id` and
+            // `signing_key` are two INDEPENDENT random values whenever this
+            // struct is built via `new_with_random_key` (the ONLY production
+            // construction path: `main.rs`'s boot sequence generates
+            // `node_id` as plain random bytes, then
+            // `DAGKnightConsensus::new` -> `VertexCreator::new_with_random_key`
+            // generates a SEPARATE random Ed25519 keypair internally — the two
+            // have no cryptographic relationship). `validate_vertex` (below)
+            // verifies `signature` against `vertex.proposer` as the Ed25519
+            // public key, so every node's own legitimately-created vertex
+            // would fail ITS OWN signature check the instant this code ran in
+            // production — an unconditional, network-wide, consensus-vertex
+            // self-DoS, with no feature flag gating it.
+            //
+            // Audit performed before choosing this fix (documenting per the
+            // round's requirement — repo-wide grep for every `node_id` /
+            // `.proposer` consumer that could depend on `proposer` equaling
+            // `self.node_id`/`DAGKnightConsensus.node_id`):
+            //   - `q_narwhal_core::byzantine_detector`: `analyze_validator_behavior`
+            //     is called with `vertex.proposer` from
+            //     `voting_coordinator.rs:382`, but that call sits behind
+            //     `if false { ... }` (a not-yet-implemented TODO stub) and its
+            //     result is discarded — not live. The map it would read
+            //     (`validator_behaviors`) is written by
+            //     `update_validator_behavior`, which has NO caller anywhere in
+            //     this crate's production wiring that keys on `vertex.proposer`
+            //     or `self.node_id` — the two are not cross-referenced today.
+            //   - `q_dag_knight::DAGKnightConsensus.anonymous_validator_set` /
+            //     `.onion_address_registry` (both `HashMap<NodeId, _>`): only
+            //     populated by `register_anonymous_validator`, keyed on a
+            //     PEER-ANNOUNCED `ValidatorInfo.node_id` from DNS-Phantom/Tor
+            //     discovery — never populated from or looked up against
+            //     `vertex.proposer`. Untouched by this fix.
+            //   - `q_storage::validator_registry` (`ValidatorRecord.node_id`)
+            //     and `q_narwhal_core::validator_set` (`ValidatorInfo { node_id,
+            //     public_key, .. }`): both ALREADY model node identity and
+            //     signing/public key as two separate fields with an explicit
+            //     `node_id -> public_key` lookup — i.e. the codebase already
+            //     does not assume `node_id` IS a public key elsewhere. This
+            //     fix is consistent with that existing pattern, not a
+            //     departure from it.
+            //   - `q_dag_knight::voting_coordinator::VotingCoordinator`: derives
+            //     its OWN, separate deterministic Ed25519 signing key FROM
+            //     `node_id` (`SHA3("vote-signing-key-v2.4.8" || node_id)`) for
+            //     VOTE signatures — a third, independent keypair from both
+            //     `node_id` itself and `VertexCreator`'s vertex-signing key.
+            //     This fix does not touch that key derivation or its consumers.
+            //   - `mempool_integration.rs::handle_peer_vertex` (the real
+            //     vertex-ingestion path) takes `from_peer: NodeId` as a
+            //     SEPARATE parameter from `vertex.proposer`, used only for
+            //     peer-communication bookkeeping (fetching missing txs) — the
+            //     two are never compared against each other.
+            //   - `Certificate.author` / `q_types::Vertex.author`
+            //     (`mempool_integration.rs::convert_vertex_to_q_types`) and
+            //     `block_producer.rs`'s `dag_vertex.proposer` copy whatever
+            //     value is in `vertex.proposer` forward as an opaque validator
+            //     identity — they do not independently derive or check it
+            //     against `node_id`, so they are unaffected by what value
+            //     `proposer` carries as long as it is used consistently.
+            // Conclusion: nothing in the real production wiring joins
+            // `vertex.proposer` against `self.node_id` / `DAGKnightConsensus
+            // .node_id`. Changing `proposer` to the real signing pubkey (this
+            // fix) rather than changing what `node_id` means globally is the
+            // minimal, scoped fix — it does not touch the separate `node_id`
+            // identity space used for peer discovery / onion registry /
+            // validator records, which the audit above confirms is used
+            // elsewhere as an intentionally opaque identifier independent of
+            // any one signing keypair.
+            proposer: self.signing_key.verifying_key().to_bytes(),
             transactions: tx_hashes,
             parents,
             vdf_proof: QuantumVDFProof {
@@ -215,7 +288,20 @@ impl VertexCreator {
                 proof: [0u8; 64], // TODO: Get actual proof
                 quantum_seed: Some(vdf_input_array),
                 computation_time: Duration::from_millis(1000), // TODO: Get actual computation time
-                difficulty: 1,                                 // TODO: Get actual difficulty
+                // Phase 0 Round-4 BUG-B-GAP1 FIX (2026-07-08): was hardcoded to
+                // `1`, discarding the real computed difficulty in `vdf_result`
+                // (returned by `self.quantum_vdf.compute_proof` a few lines
+                // above). `quantum_vdf.rs`'s `compute_classical_proof` /
+                // `compute_post_quantum_proof` integer-divide by this exact
+                // field (`i % (difficulty / 8)` and `i % (difficulty / 16)`)
+                // during their OWN verification path -- with difficulty=1
+                // both divisions truncate to 0 and the modulo panics. Using
+                // `vdf_result.proof.difficulty` (== `vdf_result.computational_cost`,
+                // the real `quantum_difficulty_bonus` value computed inside
+                // `compute_proof`) is the real value the proof above was
+                // actually computed against, so it can never be smaller than
+                // the divisors above require.
+                difficulty: vdf_result.proof.difficulty,
                 entropy_estimate: 0.95,                        // TODO: Get actual entropy estimate
                 parallel_witnesses: Vec::new(),                // TODO: Get actual witnesses
             },
@@ -363,7 +449,84 @@ impl VertexCreator {
     }
 
     /// Validate a vertex according to DAG rules
+    ///
+    /// 🛡 Phase 0 BUG-2 FIX (2026-07-08): this is the function that ACTUALLY
+    /// sits on the live vertex-ingestion path — `mempool_integration.rs::
+    /// handle_peer_vertex` (the real handler for network-gossiped vertices)
+    /// calls this, not `q_narwhal_core::NarwhalCore::process_vertex`/
+    /// `validate_vertex` (confirmed via grep: the only two `.process_vertex(`
+    /// call sites repo-wide are in this crate — `mempool_integration.rs:295`
+    /// and `lib.rs:170` — and both call different functions, neither is
+    /// NarwhalCore's). Before this fix, this function checked VDF proof
+    /// validity, parent references, and round consistency, but had NO
+    /// signature check at all — despite `Vertex.signature` being populated
+    /// by `sign_vertex` (above) whenever a node creates its own vertex. Any
+    /// peer could gossip a vertex with a forged, empty, or garbage signature
+    /// and it would sail through unnoticed.
+    ///
+    /// Ported from the already-correct signature check in
+    /// `q_narwhal_core::reliable_broadcast::verify_ed25519_signature`
+    /// (reused directly, not re-derived, to keep both implementations
+    /// consistent) plus the same `H(id || round || tx_root || parents)`
+    /// message construction `q_narwhal_core::lib.rs::validate_vertex` uses —
+    /// which in turn matches exactly what `sign_vertex` (this file, above)
+    /// signs. This crate's local `Vertex` has no `tx_root` field (unlike
+    /// `q_types::Vertex`), so `tx_root` is recomputed here from
+    /// `vertex.transactions` the same way `create_vertex_with_mempool_
+    /// transactions` computes it before signing: SHA3-256 over the
+    /// concatenated tx hashes, or `[0u8; 32]` if there are none.
     pub async fn validate_vertex(&self, vertex: &Vertex) -> Result<bool> {
+        // 0. Verify the vertex proposer's Ed25519 signature over the vertex
+        //    envelope. Checked first: an unsigned/forged vertex should never
+        //    reach the (more expensive) VDF check below.
+        if vertex.signature.is_empty() {
+            warn!(
+                "❌ [VALIDATION] Vertex {:?} signature is missing",
+                vertex.id
+            );
+            return Ok(false);
+        }
+        if vertex.signature.len() != 64 {
+            warn!(
+                "❌ [VALIDATION] Vertex {:?} invalid signature length: expected 64 bytes, got {}",
+                vertex.id,
+                vertex.signature.len()
+            );
+            return Ok(false);
+        }
+
+        let tx_root: [u8; 32] = if vertex.transactions.is_empty() {
+            [0u8; 32]
+        } else {
+            let mut tx_hasher = Sha3_256::new();
+            for tx_hash in &vertex.transactions {
+                tx_hasher.update(tx_hash);
+            }
+            tx_hasher.finalize().into()
+        };
+
+        let mut signing_data = Vec::with_capacity(32 + 8 + 32 + vertex.parents.len() * 32);
+        signing_data.extend_from_slice(&vertex.id);
+        signing_data.extend_from_slice(&vertex.round.to_le_bytes());
+        signing_data.extend_from_slice(&tx_root);
+        for parent in &vertex.parents {
+            signing_data.extend_from_slice(parent);
+        }
+        let message_hash = Sha3_256::digest(&signing_data);
+
+        if let Err(e) = q_narwhal_core::reliable_broadcast::verify_ed25519_signature(
+            &vertex.signature,
+            &message_hash,
+            &vertex.proposer,
+        ) {
+            warn!(
+                "❌ [VALIDATION] Vertex {:?} signature verification failed: {}",
+                vertex.id, e
+            );
+            return Ok(false);
+        }
+        debug!("✅ [VALIDATION] Vertex {:?} signature verified", vertex.id);
+
         // 1. Check VDF proof validity
         let vdf_input = self
             .create_vdf_input(&vertex.id, &vertex.transactions, &vertex.parents)
@@ -479,16 +642,56 @@ pub fn is_genesis_vertex_id(vertex_id: &VertexId) -> bool {
 mod tests {
     use super::*;
     use crate::quantum_vdf::{QuantumVDFConfig, VDFSecurityLevel};
+    use ed25519_dalek::SigningKey;
     use tokio;
+
+    // NOTE (2026-07-08): `test_vertex_creation` and `test_vertex_validation`
+    // below were, prior to this round, broken at baseline against the
+    // CURRENT `QuantumVDFConfig`/`VDFSecurityLevel`/`QuantumVDFProof` API
+    // (`VDFSecurityLevel::Standard` and `quantum_randomness_enabled` do not
+    // exist; `QuantumVDFProof` has no `Default` impl; `QuantumVDF::new` is
+    // `async`) — confirmed via `cargo check -p q-dag-knight --lib` (test
+    // profile) failing with exactly these errors before this round touched
+    // this file. Fixed here to use the real, current API. This fix is
+    // scoped to just these two pre-existing tests; the NEW BUG-2 signature
+    // regression tests live in a separate integration test file —
+    // `crates/q-dag-knight/tests/phase0_dagknight_vertex_signature_tests.rs`
+    // — specifically because `q-dag-knight/src/lib.rs`'s OWN separate
+    // inline test module has extensive PRE-EXISTING, UNRELATED breakage
+    // (missing `.await`, wrong `Vertex` fields matching an old struct shape,
+    // stale `AnchorElectionResult`/`RandomnessSource` APIs — confirmed via
+    // `cargo check -p q-dag-knight --lib` with 26 baseline errors, none of
+    // them touching this file) that prevents the whole `--lib` test binary
+    // from compiling. Since all `#[cfg(test)] mod tests` blocks across a
+    // crate's source files link into ONE test binary, that unrelated
+    // breakage would make it impossible to actually run (not just compile)
+    // any new tests added here. A standalone `tests/*.rs` file compiles as
+    // its own independent binary and sidesteps this entirely — the same
+    // reasoning the prior round's `phase0_vertex_signature_tests.rs` /
+    // `phase0_nonce_reuse_gap_tests.rs` already used for q-narwhal-core.
+    /// Fast VDF config: `Classical` (pure SHA3 loop, no async QRNG spin-up)
+    /// with a small `base_difficulty` so `compute_proof` is instant in
+    /// tests. Must stay >= 8 — `compute_classical_proof` divides
+    /// `difficulty / 8` to space out parallel witnesses, so anything below
+    /// 8 would panic on divide-by-zero.
+    fn fast_vdf_config() -> QuantumVDFConfig {
+        QuantumVDFConfig {
+            base_difficulty: 8,
+            quantum_enhancement: 0.0,
+            parallel_threads: 1,
+            qrng_seed_interval: std::time::Duration::from_secs(60),
+            security_level: VDFSecurityLevel::Classical,
+        }
+    }
 
     #[tokio::test]
     async fn test_vertex_creation() {
         let node_id = NodeId::default();
-        let vdf_config = QuantumVDFConfig {
-            security_level: VDFSecurityLevel::Standard,
-            quantum_randomness_enabled: true,
-        };
-        let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config));
+        let quantum_vdf = Arc::new(
+            QuantumVDF::new(fast_vdf_config())
+                .await
+                .expect("QuantumVDF::new failed"),
+        );
 
         // 🔐 v2.4.7-beta: Use new_with_random_key for testing
         let vertex_creator = VertexCreator::new_with_random_key(node_id, quantum_vdf);
@@ -501,14 +704,24 @@ mod tests {
     #[tokio::test]
     async fn test_vertex_validation() {
         let node_id = NodeId::default();
-        let vdf_config = QuantumVDFConfig {
-            security_level: VDFSecurityLevel::Standard,
-            quantum_randomness_enabled: false,
-        };
-        let quantum_vdf = Arc::new(QuantumVDF::new(vdf_config));
+        let quantum_vdf = Arc::new(
+            QuantumVDF::new(fast_vdf_config())
+                .await
+                .expect("QuantumVDF::new failed"),
+        );
 
-        // 🔐 v2.4.7-beta: Use new_with_random_key for testing
-        let vertex_creator = VertexCreator::new_with_random_key(node_id, quantum_vdf);
+        // 🛡 Phase 0 BUG-2 FIX: use a KNOWN signing key (not
+        // `new_with_random_key`'s opaque internal key) so `proposer` can be
+        // set to the ACTUAL Ed25519 verifying key that signs this vertex.
+        // `validate_vertex` now checks the signature against
+        // `vertex.proposer` — pre-fix, this test passed with
+        // `proposer: node_id` (all zeros) purely because there was no
+        // signature check at all; that field was never read for anything
+        // security-relevant.
+        let node_signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let proposer_pubkey = node_signing_key.verifying_key().to_bytes();
+        let vertex_creator =
+            VertexCreator::new(node_id, Arc::new(node_signing_key), quantum_vdf.clone());
 
         // Create a properly signed test vertex using the creator's signing key
         let vertex_id = new_genesis_vertex_id();
@@ -516,13 +729,23 @@ mod tests {
         let parents: Vec<VertexId> = vec![];
         let signature = vertex_creator.sign_vertex(&vertex_id, 0, &tx_root, &parents);
 
+        // VDF proof: this vertex has no transactions/parents, so any fixed
+        // 32-byte challenge works — `verify_proof` only checks internal
+        // self-consistency (recomputes from `proof.challenge`/`proof.difficulty`
+        // and compares), it does not need to match the vertex's own content.
+        let vdf_proof = quantum_vdf
+            .compute_proof(&[0xABu8; 32])
+            .await
+            .expect("compute_proof failed")
+            .proof;
+
         let vertex = Vertex {
             id: vertex_id,
             round: 0,
-            proposer: node_id,
+            proposer: proposer_pubkey,
             transactions: vec![],
             parents,
-            vdf_proof: QuantumVDFProof::default(),
+            vdf_proof,
             timestamp: 0,
             signature,
         };

@@ -1816,6 +1816,34 @@ unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
 
 impl AppState {
+    /// v10.11.80 TUI-HEIGHT FIX: honest "network max seen" for DISPLAY paths
+    /// (TUI Net Height, /api/v1/status, /api/v1/node/status).
+    ///
+    /// `highest_network_height` alone is unreliable on fresh nodes: gossip
+    /// announcements are sparse and (historically) last-writer-wins, so a
+    /// low-height peer's announcement showed "Net Height: 1.8M" / "0" while
+    /// the node was actively pulling block-packs from a 20M+ peer. TurboSync's
+    /// peer registry already tracks validated per-peer heights (100× sanity
+    /// cap), so the display truth is the max of both views. Display-only —
+    /// sync/production gates keep reading the raw atomic.
+    pub async fn network_max_height_view(&self) -> u64 {
+        let gossip_view = self
+            .highest_network_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let registry_view = if let Some(ref turbo_sync) = self.turbo_sync {
+            turbo_sync
+                .get_peer_registry_info()
+                .await
+                .iter()
+                .map(|(_, h)| *h)
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        gossip_view.max(registry_view)
+    }
+
     /// Load founder's AEGIS-QL public key from file or environment
     fn load_founder_aegis_public_key() -> anyhow::Result<q_aegis_ql::PublicKey> {
         use anyhow::Context;
@@ -1903,95 +1931,41 @@ impl AppState {
 
         let storage_engine = Arc::new(StorageEngine::new(storage_config).await?);
 
-        // 🚨 v0.9.97-beta: CRITICAL DATABASE INTEGRITY CHECK
-        // Unanimous AI Expert Recommendation (ChatGPT, DeepSeek, Kimi AI - 100% consensus)
-        // MANDATORY on EVERY boot to prevent catastrophic data loss
+        // 🛡 Phase 0 Round-2 BUG-C FIX (2026-07-08): INTEGRITY CHECK DISABLED HERE
+        // — porting the SAME fix `main.rs`'s real boot path already applied in
+        // v7.0.1 (see `main.rs`, search "v7.0.1: INTEGRITY CHECK DISABLED"),
+        // which this `AppState::new` test-construction path never received.
         //
-        // This check detects and repairs:
-        // 1. Pointer-data mismatches (pointer=766, blocks=0)
-        // 2. Gaps in blockchain
-        // 3. Total data loss scenarios
+        // The v0.9.97-beta `IntegrityChecker::check()` call that used to be
+        // here opened a SECOND RocksDB handle on the exact same hot DB path
+        // `storage_engine` (just above) already holds open in this same
+        // process — `IntegrityChecker::new(path).check()` internally calls
+        // its own `open_database()` (`DB::open_cf_descriptors`), which is a
+        // distinct handle from `StorageEngine::new`'s, not the same `Arc<DB>`
+        // reused. RocksDB's LOCK file is exclusive even within one process,
+        // so the second open always failed with "Failed to open database" —
+        // every test/caller that reaches `AppState::new()` hit this
+        // unconditionally (round-2 review's BUG C: this is exactly why
+        // `phase0_send_signed_nonce_ordering_tests.rs` could not run).
         //
-        // Performance: O(log N) - ~10 disk reads for 1M blocks, ~2 seconds for 10K blocks
-        #[cfg(not(target_os = "windows"))]
-        {
-        tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        tracing::info!("🔍 v0.9.97-beta: COMPREHENSIVE DATABASE INTEGRITY CHECK");
-        tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        tracing::info!("   AI Expert Consensus: MANDATORY safety check");
-        tracing::info!("   Prevents: Data loss, pointer corruption, blockchain gaps");
-
-        use q_storage::integrity::IntegrityChecker;
-        use std::path::PathBuf;
-        let hot_db_path = PathBuf::from(&db_path_for_logging).join("hot");
-        let checker = IntegrityChecker::new(hot_db_path);
-
-        match checker.check().await {
-            Ok(report) => {
-                if report.is_critical() {
-                    // Catastrophic corruption - REFUSE TO START
-                    tracing::error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    tracing::error!("💀 CRITICAL DATABASE CORRUPTION DETECTED!");
-                    tracing::error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    tracing::error!("   Type: {:?}", report.corruption_type);
-                    tracing::error!("   Pointer: {}", report.pointer_height);
-                    tracing::error!("   Actual: {}", report.highest_contiguous);
-                    tracing::error!("");
-                    tracing::error!("🛠️  MANUAL INTERVENTION REQUIRED:");
-                    tracing::error!("   1. Check disk health: smartctl -a /dev/sdX");
-                    tracing::error!("   2. Review logs for crash/OOM events");
-                    tracing::error!("   3. Restore from backup if available");
-                    tracing::error!(
-                        "   4. Or reset (testnet only): repair-database --reset-pointer=0"
-                    );
-                    tracing::error!("");
-                    tracing::error!("   SERVICE WILL NOT START");
-                    tracing::error!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-                    return Err(anyhow::anyhow!(
-                        "Critical database corruption detected - refusing to start (see logs above)"
-                    ));
-                } else if report.needs_repair() {
-                    // Minor corruption - AUTO-REPAIR
-                    tracing::warn!("⚠️  Minor corruption detected - attempting auto-repair...");
-                    tracing::warn!("   Type: {:?}", report.corruption_type);
-
-                    match checker.repair(&report).await {
-                        Ok(()) => {
-                            tracing::info!("✅ Auto-repair completed successfully");
-                            tracing::info!(
-                                "   Database repaired: pointer {} → {}",
-                                report.pointer_height,
-                                report.highest_contiguous
-                            );
-                            tracing::info!(
-                                "   Node will start from height {}",
-                                report.highest_contiguous
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("❌ Auto-repair failed: {}", e);
-                            return Err(anyhow::anyhow!("Database repair failed: {}", e));
-                        }
-                    }
-                } else {
-                    // Database healthy
-                    tracing::info!(
-                        "✅ Database integrity verified: {} blocks",
-                        report.highest_contiguous
-                    );
-                    tracing::info!("   No corruption detected");
-                }
-            }
-            Err(e) => {
-                tracing::error!("💀 Database integrity check failed: {}", e);
-                tracing::error!("   SERVICE WILL NOT START");
-                return Err(anyhow::anyhow!("Database integrity check failed: {}", e));
-            }
-        }
-
-        tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        } // end #[cfg(not(target_os = "windows"))] integrity check block
+        // `main.rs`'s v7.0.1 fix did NOT weaken or bypass any check that is
+        // still active — it replaced this exact double-open pattern with
+        // `Q_PREFLIGHT_CHECK=1` / `q_storage::preflight_check::
+        // run_preflight_check(db: Arc<DB>, ...)`, which takes the ALREADY-OPEN
+        // `Arc<DB>` handle (the same one `StorageEngine` uses) instead of
+        // opening a second one — i.e. the proven-safe fix is "share the
+        // handle instead of reopening", and the production boot path has not
+        // called this `IntegrityChecker::check()` codepath since v7.0.1.
+        // Porting the identical disablement here (rather than inventing a
+        // new mechanism for the test-construction path) means: (a) this path
+        // is now exactly as safe as the real boot path already is — nothing
+        // is weakened relative to what actually ships and runs today — and
+        // (b) test callers of `AppState::new()` no longer hit a double-open
+        // that production itself stopped hitting two fixes ago. Database
+        // integrity verification for a production deployment remains
+        // available and mandatory-when-enabled via `Q_PREFLIGHT_CHECK=1` on
+        // the real boot path (`main.rs`), unaffected by this change.
+        tracing::info!("🔍 Database integrity: Using preflight check (IntegrityChecker disabled - double-open fix, ported from main.rs v7.0.1 to unblock AppState::new test construction — Phase 0 Round-2 BUG-C)");
 
         // ✅ HEIGHT RECOVERY FIX (v0.8.5-beta): Repair height pointer before loading height
         // NOTE: v0.9.97-beta comprehensive check above supersedes this, but kept for compatibility
@@ -4892,10 +4866,14 @@ impl AppState {
         Ok(())
     }
 
-    /// Helper method to save all wallet balances to persistent storage
+    /// Helper method to save all wallet balances to persistent storage.
+    /// v10.11.70: uses the AUTHORITATIVE batch write so legitimate DEBITS land.
+    /// `wallet_balances` is the live in-memory state (loaded from RocksDB at boot +
+    /// applied per block), so it is authoritative — the old max-wins path silently
+    /// dropped every sender debit (new < old), minting money on each transfer.
     pub async fn save_all_wallet_balances(&self) -> anyhow::Result<()> {
         let balances = self.wallet_balances.read().await.clone();
-        self.storage_engine.save_wallet_balances(&balances).await?;
+        self.storage_engine.save_wallet_balances_authoritative(&balances).await?;
         Ok(())
     }
 

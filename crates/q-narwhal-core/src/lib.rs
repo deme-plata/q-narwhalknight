@@ -414,8 +414,54 @@ impl NarwhalCore {
             return Err(anyhow::anyhow!("Invalid transaction root"));
         }
 
-        // TODO: Validate signature
-        // self.verify_vertex_signature(vertex)?;
+        // 🛡 Phase 0 (2026-07-08): real vertex-proposer signature check.
+        // Previously a no-op TODO — any vertex reached Ok(()) regardless of
+        // signature, meaning process_vertex/validate_vertex would accept a
+        // forged or unsigned vertex once this path is reachable. Modeled on
+        // the already-correct implementation in reliable_broadcast.rs's
+        // validate_vertex (same crate): verifies the *vertex proposer's*
+        // signature over the vertex envelope. Per-transaction signatures are
+        // already verified independently at mempool admission
+        // (production_mempool.rs::perform_validation), so this deliberately
+        // does not re-verify each inner transaction's signature — scope is
+        // kept to what this TODO literally asked for.
+        {
+            use sha3::{Digest, Sha3_256};
+            use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+            if vertex.signature.is_empty() {
+                return Err(anyhow::anyhow!("Vertex signature is missing"));
+            }
+            if vertex.signature.len() != 64 {
+                return Err(anyhow::anyhow!(
+                    "Invalid vertex signature length: expected 64 bytes, got {}",
+                    vertex.signature.len()
+                ));
+            }
+
+            // Signing message: H(vertex_id || round || tx_root || parents) —
+            // identical construction to reliable_broadcast.rs so a signature
+            // produced for one check is valid under the other.
+            let mut signing_data = Vec::new();
+            signing_data.extend_from_slice(&vertex.id);
+            signing_data.extend_from_slice(&vertex.round.to_le_bytes());
+            signing_data.extend_from_slice(&vertex.tx_root);
+            for parent in &vertex.parents {
+                signing_data.extend_from_slice(parent);
+            }
+            let message_hash = Sha3_256::digest(&signing_data);
+
+            let sig_bytes: [u8; 64] = vertex.signature.as_slice().try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid Ed25519 signature length (expected 64 bytes)"))?;
+            let signature = Signature::from_bytes(&sig_bytes);
+
+            let verifying_key = VerifyingKey::from_bytes(&vertex.author)
+                .map_err(|e| anyhow::anyhow!("Invalid Ed25519 author public key: {}", e))?;
+
+            verifying_key
+                .verify(&message_hash, &signature)
+                .map_err(|e| anyhow::anyhow!("Vertex signature verification failed: {}", e))?;
+        }
 
         // TODO: Validate parent references
         // self.validate_parents(&vertex.parents).await?;

@@ -1084,7 +1084,7 @@ impl EmissionController {
         let clamped = factor.clamp(CORRECTION_FACTOR_MIN, CORRECTION_FACTOR_MAX);
 
         if (clamped - 1.0).abs() > 0.01 {
-            info!(
+            debug!(
                 "📐 Emission correction: factor={:.4} | error={:.2}% | actual={:.2} QUG | target={:.2} QUG",
                 clamped,
                 error_fraction * 100.0,
@@ -1161,7 +1161,7 @@ impl EmissionController {
         let remaining_supply = QUG_MAX_SUPPLY.saturating_sub(total_supply);
         reward = reward.min(remaining_supply);
 
-        info!(
+        debug!(
             "💰 Reward: {:.6} QUG | rate: {:.2} bps | correction: {:.4} | era: {} | target: {:.0} QUG/yr",
             reward as f64 / 1e24,
             rate,

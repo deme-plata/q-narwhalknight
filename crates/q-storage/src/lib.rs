@@ -3076,9 +3076,10 @@ impl QStorage {
                 warn!("🔍 [DB-SCAN] Found {} blocks with OLD binary key format! Block data exists but key format mismatch!", old_found);
             }
 
-            // Check scan_prefix for any qblock:height: keys
-            let sample = self.hot_db.scan_prefix(CF_BLOCKS, b"qblock:height:").await?;
-            info!("🔍 [DB-SCAN] scan_prefix('qblock:height:') returned {} entries", sample.len());
+            // 2026-06-23 Codex: keep this diagnostic bounded. A full
+            // qblock:height: prefix scan walks ~19M production rows into one Vec.
+            let sample = self.hot_db.scan_prefix_seek(CF_BLOCKS, b"qblock:height:", 16).await?;
+            info!("[DB-SCAN] bounded qblock:height sample returned {} entries", sample.len());
             if let Some((first_key, _)) = sample.first() {
                 info!("🔍 [DB-SCAN] First key: {}", String::from_utf8_lossy(first_key));
             }
@@ -4962,6 +4963,38 @@ impl QStorage {
         Ok(())
     }
 
+    /// v10.11.70 ROOT-CAUSE FIX (live double-spend): authoritative batch balance write.
+    ///
+    /// `save_wallet_balances` is MAX-WINS — it SKIPS any entry where new < old, to
+    /// protect against stale replay/partial-sync callers overwriting higher balances
+    /// (CLAUDE.md Rule 1). But the block-apply persist (`save_all_wallet_balances`)
+    /// flushes the LIVE in-memory state, which INCLUDES legitimate debits (a sender's
+    /// balance going DOWN after a transfer). Max-wins silently dropped those debits:
+    /// the recipient's credit (new > old) landed, the sender's debit (new < old) was
+    /// skipped → the sender kept full balance while the recipient got spendable coins
+    /// = money minted on EVERY transfer. This variant writes EVERY entry as given —
+    /// no max-wins — and is for callers whose `balances` map is authoritative (the
+    /// live apply state). Replay/partial-sync callers MUST keep using `save_wallet_balances`.
+    pub async fn save_wallet_balances_authoritative(
+        &self,
+        balances: &HashMap<[u8; 32], u128>,
+    ) -> Result<()> {
+        let mut batch_ops = Vec::new();
+        for (address, amount) in balances {
+            let key = format!("wallet_balance_{}", hex::encode(address));
+            let value = amount.to_le_bytes().to_vec();
+            batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
+        }
+        self.hot_db.write_batch(batch_ops).await?;
+        let total_balance: u128 = balances.values().sum();
+        info!(
+            "💰 [AUTHORITATIVE] SYNCED {} wallet balances (incl. debits) total={} QUG",
+            balances.len(),
+            total_balance / 1_000_000_000_000_000_000_000_000
+        );
+        Ok(())
+    }
+
     /// v8.2.0: Compute a deterministic hash of all wallet balances.
     /// Sorts all (address, balance) pairs by address, feeds through blake3.
     /// Same balances on any node → same hash. Used for cross-node verification.
@@ -5995,8 +6028,9 @@ impl QStorage {
         let mut blocks_scanned = 0usize;
         let progress_interval = 50_000usize; // Log every 50k blocks
 
-        // Scan block column family
-        match self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+        // Scan block column family. Keep the emergency migration bounded if it is
+        // re-enabled; full CF_BLOCKS scans are unsafe on production-scale RocksDB.
+        match self.hot_db.scan_prefix_seek(CF_BLOCKS, b"qblock:height:", 100_000).await {
             Ok(entries) => {
                 let total_entries = entries.len();
                 info!("🔄 [v3.5.11] Found {} blocks to scan for transactions", total_entries);
@@ -7064,9 +7098,10 @@ impl QStorage {
         // v7.3.4: Use network-aware genesis timestamp
         let genesis_timestamp: u64 = crate::balance_consensus::active_genesis_timestamp();
 
-        // Check if any stored blocks predate genesis by scanning the first few entries
+        // Check if any stored blocks predate genesis by sampling a few canonical
+        // height entries. A full CF_BLOCKS scan can OOM production nodes.
         let mut has_pre_genesis = false;
-        if let Ok(entries) = self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+        if let Ok(entries) = self.hot_db.scan_prefix_seek(CF_BLOCKS, b"qblock:height:", 20).await {
             for (key, value) in entries.iter().take(20) {
                 let key_str = String::from_utf8_lossy(key);
                 if key_str == "qblock:latest" || key_str.starts_with("qblock:hash:") {
@@ -7118,9 +7153,10 @@ impl QStorage {
         let _ = self.hot_db.delete(CF_MANIFEST, b"collateral_vault").await;
         let _ = self.hot_db.delete(CF_MANIFEST, b"emission_controller_state").await;
 
-        // Purge pre-genesis blocks from CF_BLOCKS
+        // Purge pre-genesis blocks from CF_BLOCKS. Bound each pass so this old
+        // migration cannot allocate the entire block CF in one call.
         let mut blocks_deleted = 0usize;
-        if let Ok(entries) = self.hot_db.scan_prefix(CF_BLOCKS, &[]).await {
+        if let Ok(entries) = self.hot_db.scan_prefix_seek(CF_BLOCKS, b"qblock:height:", 100_000).await {
             for (key, value) in &entries {
                 let key_str = String::from_utf8_lossy(key);
                 // Skip metadata keys

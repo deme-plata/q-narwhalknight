@@ -132,6 +132,10 @@ name = "fix-corrupt-tip"
 path = "src/bin/fix_corrupt_tip.rs"
 
 [[bin]]
+name = "reset_collateral_vault"
+path = "src/bin/reset_collateral_vault.rs"
+
+[[bin]]
 name = "diagnose-block"
 path = "src/bin/diagnose_block.rs"
 

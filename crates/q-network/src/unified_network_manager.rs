@@ -53,6 +53,12 @@ lazy_static::lazy_static! {
     /// Read by turbo_sync gravity-assist to seed initial bandwidth estimates
     pub static ref PEER_BANDWIDTH_TIERS: DashMap<String, u32> = DashMap::new();
 
+    /// v10.11.79: peer sync frontier, updated from inbound BlockSync requests
+    /// (request.start_height). Lets a tip/serving node report REAL peer heights in
+    /// the explorer (/api/mesh/peers) instead of 0 -- the turbo_sync height registry
+    /// is empty when this node is not itself syncing. peer_id string -> max height seen.
+    pub static ref PEER_SYNC_HEIGHTS: DashMap<String, u64> = DashMap::new();
+
     /// v9.1.0: Global peer compute power map — updated by gossipsub announcements.
     /// Maps peer_id string → (total_hashrate_hs, active_miners, timestamp).
     /// Used by gravity-assist for hashpower-weighted peer routing.
@@ -1807,8 +1813,16 @@ impl UnifiedNetworkManager {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(4);
+        // v10.11.76: pending-incoming 64 -> 256 (env Q_MAX_PENDING_INCOMING).
+        // Half-open inbound handshakes (port scanners, dead NAT clients) hold pending
+        // slots and the transport stack has no upgrade timeout, so the bootstrap node
+        // needs headroom. Pairs with the accept-wedge fairness fix in run_once().
+        let max_pending_incoming: u32 = std::env::var("Q_MAX_PENDING_INCOMING")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
         let limits = ConnectionLimits::default()
-            .with_max_pending_incoming(Some(64))
+            .with_max_pending_incoming(Some(max_pending_incoming))
             .with_max_pending_outgoing(Some(64))
             .with_max_established_incoming(Some(max_established_incoming as u32))
             .with_max_established_outgoing(Some(256))
@@ -1866,6 +1880,21 @@ impl UnifiedNetworkManager {
                 yamux::Config::default,
             )?  // Sync
             .with_quic()  // Sync
+            // 🧅 Tor Phase C (SOCKS5-beneath-TCP) — outbound onion dialing.
+            // Connects via Arti SOCKS5 and hands libp2p a Compat<TcpStream> that gets
+            // the SAME Noise+Yamux upgrade as TCP. Resolves the reverted fe3feea7 splice
+            // (returns transport directly; Compat output satisfies .authenticate; lands
+            // after .with_quic / before .with_dns). Inert unless Q_TOR_SOCKS5_DIAL=1 /
+            // Q_TOR_ONLY=1 -> libp2p falls through to TCP/QUIC = zero regression default.
+            .with_other_transport(|kp| {
+                use crate::socks5_transport::{Socks5DialConfig, Socks5DialTransport};
+                let cfg = Socks5DialConfig::from_env();
+                let transport = Socks5DialTransport::new(cfg)
+                    .upgrade(libp2p::core::upgrade::Version::V1Lazy)
+                    .authenticate(noise::Config::new(kp)?)
+                    .multiplex(yamux::Config::default());
+                Ok(transport)
+            })?
             .with_dns()?  // Sync
             .with_websocket(
                 noise::Config::new,
@@ -1919,7 +1948,13 @@ impl UnifiedNetworkManager {
                 // Identify
                 let identify = libp2p::identify::Behaviour::new(
                     libp2p::identify::Config::new("/qnarwhal/1.0.0".to_string(), keypair_inner.public())
-                        .with_push_listen_addr_updates(true),
+                        .with_push_listen_addr_updates(true)
+                        // 🧅 OOTB Tor: advertise our onion (if Q_TOR_ADVERTISE_ONION set by onion-on-boot)
+                        // so Tor-capable peers learn they can stem-relay to us over Tor.
+                        .with_agent_version(crate::tor_capability::build_agent_version(
+                            concat!("qnk/", env!("CARGO_PKG_VERSION")),
+                            std::env::var("Q_TOR_ADVERTISE_ONION").ok().as_deref(),
+                        )),
                 );
 
                 // Ping
@@ -3686,6 +3721,7 @@ impl UnifiedNetworkManager {
                             let pid_str = peer_id.to_string();
                             PEER_BANDWIDTH_TIERS.remove(&pid_str);
                             PEER_COMPUTE_POWER.remove(&pid_str);
+                            PEER_SYNC_HEIGHTS.remove(&pid_str);
                             self.slow_peer_strikes.remove(&peer_id);
                         }
 
@@ -3956,6 +3992,15 @@ impl UnifiedNetworkManager {
                 // to dial. Without this, the [PEER CHECK] fast-fail path drops
                 // the ideal sync source and round-robins through unrelated peers.
                 if let libp2p::identify::Event::Received { peer_id, info, .. } = event {
+                    // 🧅 OOTB Tor: harvest peer Tor capability + onion from agent_version.
+                    // Only Tor-capable peers advertise an onion, so feeding these to the
+                    // stem-target set makes capability negotiation implicit + safe-by-default.
+                    let _peer_cap = crate::tor_capability::parse_peer(&info.agent_version);
+                    if let (true, Some(onion)) = (_peer_cap.tor_capable, _peer_cap.onion.clone()) {
+                        if let Some(tor) = &self.tor_client {
+                            tor.register_peer_onion(&onion);
+                        }
+                    }
                     let listen_addrs = info.listen_addrs.clone();
                     if !listen_addrs.is_empty() {
                         let cache = self.peer_addresses.clone();
@@ -4252,6 +4297,13 @@ impl UnifiedNetworkManager {
                                 info!("📥 [BLOCK-PACK] Received block pack request from {}", peer);
                                 info!("   Requested: start_height={}, end_height={}, max_blocks={}",
                                       request.start_height, request.end_height, request.max_blocks);
+                                // v10.11.79: record the requester sync frontier so the
+                                // explorer (/api/mesh/peers) can show REAL peer heights.
+                                // Keep the max observed height (gap-fill requests can dip).
+                                PEER_SYNC_HEIGHTS
+                                    .entry(peer.to_string())
+                                    .and_modify(|h| { if request.start_height > *h { *h = request.start_height; } })
+                                    .or_insert(request.start_height);
                                 // v10.9.31: wire qnk_libp2p_rx_bytes_total — server side, count
                                 // the (bincode-serialized) request bytes so we can finally see
                                 // whether libp2p block-pack traffic is actually flowing.
@@ -5913,6 +5965,47 @@ impl UnifiedNetworkManager {
     pub async fn run_once(&mut self) -> anyhow::Result<()> {
         use futures::stream::StreamExt;
 
+        // v10.11.76 CONN-HEALTH: sample swarm connection counters every ~10s so a
+        // pending-incoming pile-up (the 07-05 accept-wedge signature) is visible in
+        // the journal and alertable. Static atomic gate: no struct/state changes.
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST_CONN_LOG: AtomicU64 = AtomicU64::new(0);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let last = LAST_CONN_LOG.load(Ordering::Relaxed);
+            if now.saturating_sub(last) >= 10
+                && LAST_CONN_LOG
+                    .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                let info = self.swarm.network_info();
+                let c = info.connection_counters();
+                let pending_in = c.num_pending_incoming();
+                if pending_in >= 48 {
+                    warn!(
+                        "🚨 [CONN-HEALTH] pending_incoming={} nearing limit (accept-wedge risk): established={} (in={} out={}) pending_out={}",
+                        pending_in,
+                        c.num_established(),
+                        c.num_established_incoming(),
+                        c.num_established_outgoing(),
+                        c.num_pending_outgoing()
+                    );
+                } else {
+                    debug!(
+                        "[CONN-HEALTH] established={} (in={} out={}) pending_in={} pending_out={}",
+                        c.num_established(),
+                        c.num_established_incoming(),
+                        c.num_established_outgoing(),
+                        pending_in,
+                        c.num_pending_outgoing()
+                    );
+                }
+            }
+        }
+
         // 🔥 v5.0.1-beta: CRITICAL FIX - Drain gossipsub queue BEFORE select!
         // BUG: run_once() was missing the gossipsub queue drain that run() has.
         // Blocks were enqueued via handle_command(PublishBlock) but NEVER actually
@@ -5945,7 +6038,14 @@ impl UnifiedNetworkManager {
                         }
                     }
                     Err(e) => {
-                        warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                        // v10.11.76: mining-solutions failing on full peer send queues is
+                        // expected under load (message is dropped by design, no requeue) --
+                        // do not WARN-spam the journal (07-05: thousands/min during wedge).
+                        if topic_str.contains("mining-solutions") {
+                            debug!("[QUEUE DRAIN] dropped low-prio {} ({} bytes): {}", topic_str, data_len, e);
+                        } else {
+                            warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                        }
                     }
                 }
             }
@@ -5958,9 +6058,18 @@ impl UnifiedNetworkManager {
         // ROOT CAUSE: Async block pack handler stores response in channel, but
         // run_once() never polled it, so responses sat in channel forever.
         tokio::select! {
-            // v1.3.7-beta: HIGHEST PRIORITY - Block pack response channel
-            // Must be processed first to prevent ResponseOmission timeouts!
-            biased;
+            // v10.11.76 ACCEPT-WEDGE FIX (2026-07-05): removed `biased;`.
+            // Strict priority (response_rx > command_rx > swarm.next()) starved swarm
+            // events under sustained serve load: the response/command channels are
+            // ready on nearly every iteration, so inbound Noise/upgrade handshakes
+            // were never serviced -> kernel accepted TCP on :9001 but libp2p never
+            // completed the handshake -> CLOSE-WAIT pile-up -> new nodes saw 0 peers
+            // (existing peers unaffected: their I/O runs in per-connection tasks).
+            // Same wedge class as the v10.11.43 SWARM-WEDGE FIX one screen up.
+            // Fair (unbiased) polling gives every branch ~1/3 service under full
+            // load; response sends only need to win a draw within the 10-15s
+            // request timeout, so ResponseOmission (the v1.3.7 reason for biased)
+            // stays fixed.
 
             Some((async_req_id, response)) = self.block_pack_response_rx.recv() => {
                 // Retrieve the stored response channel and send response

@@ -155,6 +155,13 @@ impl RocksDBKV {
         Arc::new(())
     }
 
+    /// API parity with `kv.rs::RocksDBKV::db()` — the raw-DB stand-in used by
+    /// callers like `NonceTracker::set_storage` (nonce persistence is a no-op
+    /// on the sled backend).
+    pub fn db(&self) -> Arc<()> {
+        Arc::new(())
+    }
+
     /// v6.1.1: Stub for RocksDB memory usage reporting (not applicable to Sled)
     pub fn get_memory_usage_mb(&self) -> (f64, f64, f64) {
         (0.0, 0.0, 0.0)

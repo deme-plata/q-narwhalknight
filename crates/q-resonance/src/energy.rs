@@ -50,6 +50,16 @@ pub struct EnergyFunctional {
 
     /// Committed vertex IDs (for finality)
     committed_vertices: Arc<DashMap<[u8; 32], bool>>,
+
+    /// Couplings with |J_ij| below this are treated as 0 and never stored.
+    /// Distance- and decoherence-weighted couplings are mostly negligible, so
+    /// pruning keeps the matrix genuinely sparse (O(n·k), not O(n²)).
+    coupling_epsilon: f64,
+
+    /// Hard cap on stored coupling entries — bounds RAM regardless of vertex
+    /// count. At ~64 B/entry this keeps the matrix well under ~32 MB even in
+    /// the worst case (vs. the old O(n²) ≈ 200 MB/round blow-up).
+    max_coupling_entries: usize,
 }
 
 impl EnergyFunctional {
@@ -69,7 +79,16 @@ impl EnergyFunctional {
             temporal_weight: 0.3,
             finality_weight: 10.0,
             committed_vertices: Arc::new(DashMap::new()),
+            coupling_epsilon: 1e-6,
+            max_coupling_entries: 500_000,
         }
+    }
+
+    /// Override the sparsity threshold and hard entry cap (RAM budget).
+    pub fn with_coupling_budget(mut self, epsilon: f64, max_entries: usize) -> Self {
+        self.coupling_epsilon = epsilon;
+        self.max_coupling_entries = max_entries;
+        self
     }
 
     /// Compute total energy
@@ -88,16 +107,14 @@ impl EnergyFunctional {
 
         for i in 0..self.strings.len() {
             for j in (i + 1)..self.strings.len() {
-                let j_ij = self
-                    .coupling_matrix
-                    .get(&(i, j))
-                    .map(|v| *v)
-                    .unwrap_or_else(|| {
-                        // Compute and cache coupling
-                        let coupling = self.strings[i].coupling_strength(&self.strings[j]);
-                        self.coupling_matrix.insert((i, j), coupling);
-                        coupling
-                    });
+                // READ-ONLY: a missing (i,j) was pruned as negligible → treat as
+                // 0. We must NOT lazily re-insert here — this runs every gradient
+                // step and the old re-insert silently re-grew the matrix back to
+                // O(n²) after rebuild pruned it (the ~200 MB/round leak).
+                let j_ij = self.coupling_matrix.get(&(i, j)).map(|v| *v).unwrap_or(0.0);
+                if j_ij == 0.0 {
+                    continue;
+                }
 
                 let phase_diff = self.strings[i].phase - self.strings[j].phase;
                 energy += j_ij * phase_diff.norm_sqr();
@@ -215,8 +232,30 @@ impl EnergyFunctional {
             prev_energy
         );
 
+        // Bound the step size: the old code grew the learning rate by 1.05×
+        // every 10 iterations with no ceiling, which could overshoot and (pre
+        // unit-circle-normalization) diverge. Even on the manifold, a clamp
+        // keeps convergence monotone.
+        const MAX_LR: f64 = 0.5;
+        const MIN_LR: f64 = 1e-6;
+
         for iteration in 0..max_iterations {
             let energy = self.gradient_descent_step(learning_rate);
+
+            // Hard NaN/inf guard: if the energy ever goes non-finite, back off
+            // hard rather than returning a poisoned result to consensus.
+            if !energy.is_finite() {
+                learning_rate = (learning_rate * 0.25).max(MIN_LR);
+                tracing::warn!(
+                    "Non-finite energy at iter {}, backing off LR to {:.8}",
+                    iteration,
+                    learning_rate
+                );
+                if learning_rate <= MIN_LR {
+                    return Err(ResonanceError::ConvergenceError);
+                }
+                continue;
+            }
 
             if (prev_energy - energy).abs() < tolerance {
                 tracing::info!(
@@ -227,15 +266,15 @@ impl EnergyFunctional {
                 return Ok(energy);
             }
 
-            // Adaptive learning rate
+            // Adaptive learning rate (clamped to [MIN_LR, MAX_LR]).
             if energy > prev_energy {
-                learning_rate *= 0.5;
+                learning_rate = (learning_rate * 0.5).max(MIN_LR);
                 tracing::debug!(
                     "Energy increased, reducing learning rate to {:.6}",
                     learning_rate
                 );
             } else if iteration % 10 == 0 {
-                learning_rate *= 1.05;
+                learning_rate = (learning_rate * 1.05).min(MAX_LR);
             }
 
             if iteration % 100 == 0 {
@@ -323,21 +362,67 @@ impl EnergyFunctional {
         sum_sq_diff / (self.strings.len() as f64)
     }
 
-    /// Rebuild coupling matrix (call when strings change)
+    /// Rebuild coupling matrix (call when strings change).
+    ///
+    /// Sparse + bounded: only couplings with |J_ij| > `coupling_epsilon` are
+    /// stored, and the total is hard-capped at `max_coupling_entries` (keeping
+    /// the strongest by magnitude). This is what keeps RAM under budget — the
+    /// old version stored the full O(n²) dense matrix (~200 MB/round).
     pub fn rebuild_coupling_matrix(&mut self) {
         self.coupling_matrix.clear();
 
-        for i in 0..self.strings.len() {
-            for j in (i + 1)..self.strings.len() {
+        // Collect significant couplings only.
+        let n = self.strings.len();
+        let mut entries: Vec<((usize, usize), f64)> = Vec::new();
+        for i in 0..n {
+            for j in (i + 1)..n {
                 let coupling = self.strings[i].coupling_strength(&self.strings[j]);
-                self.coupling_matrix.insert((i, j), coupling);
+                if coupling.is_finite() && coupling.abs() > self.coupling_epsilon {
+                    entries.push(((i, j), coupling));
+                }
             }
         }
 
-        tracing::debug!(
-            "Rebuilt coupling matrix with {} entries",
-            self.coupling_matrix.len()
-        );
+        // Enforce the hard RAM cap: keep the strongest |J_ij|, log the drop.
+        let pruned_for_cap = if entries.len() > self.max_coupling_entries {
+            let dropped = entries.len() - self.max_coupling_entries;
+            entries.sort_unstable_by(|a, b| {
+                // Deterministic total order so every honest node keeps the SAME
+                // entries at the cap boundary: |J| desc via total_cmp (handles
+                // equal/NaN magnitudes identically across nodes), then key (i,j)
+                // asc as a strict tiebreak. Without this, two nodes could prune
+                // different couplings → has_consensus() diverges → resonance forks.
+                b.1.abs()
+                    .total_cmp(&a.1.abs())
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            entries.truncate(self.max_coupling_entries);
+            dropped
+        } else {
+            0
+        };
+
+        for (key, coupling) in entries {
+            self.coupling_matrix.insert(key, coupling);
+        }
+
+        let dense = n.saturating_mul(n.saturating_sub(1)) / 2;
+        if pruned_for_cap > 0 {
+            tracing::warn!(
+                "Coupling matrix hit cap: kept {} / {} dense pairs ({} below ε, {} dropped for cap)",
+                self.coupling_matrix.len(),
+                dense,
+                dense.saturating_sub(self.coupling_matrix.len()).saturating_sub(pruned_for_cap),
+                pruned_for_cap
+            );
+        } else {
+            tracing::debug!(
+                "Rebuilt sparse coupling matrix: {} / {} dense pairs stored (ε={})",
+                self.coupling_matrix.len(),
+                dense,
+                self.coupling_epsilon
+            );
+        }
     }
 
     /// Mark vertex as committed (for finality)
