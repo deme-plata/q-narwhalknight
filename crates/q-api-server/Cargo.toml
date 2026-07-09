@@ -1,6 +1,6 @@
 [package]
 name = "q-api-server"
-version = "10.11.80"  # v10.11.80: TUI/status height display fix (net height = gossip fetch_max ⊔ turbo-sync peer registry; fresh nodes no longer show Net Height 0 / low-peer garbage). Prior: v10.11.74 custom-token swap decimal fix (overrides workspace 10.11.72 for the release binary)
+version = "10.11.81"  # v10.11.81: CO-FOUNDER dev-fee split — founder share of the mining dev fee is split 50/50 with COFOUNDER_WALLET (qnk44a9a59b…f78da8) as a separate coinbase tx; total minted unchanged; producer-side only (validate_coinbase_amounts checks totals not recipients). Prior: v10.11.80 TUI/status height display fix; v10.11.74 custom-token swap decimal fix (overrides workspace 10.11.72)
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

@@ -1481,6 +1481,15 @@ impl BlockProducer {
         const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
         const FOUNDER_WALLET_HEX: &str =
             "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        // v10.11.81 CO-FOUNDER SPLIT (operator-approved 2026-07-09): the founder
+        // share of the dev fee is split 50/50 with the co-founder wallet as a
+        // SEPARATE coinbase tx minted alongside the founder tx. Producer-side
+        // convention only — consensus validation (validate_coinbase_amounts,
+        // q-types/src/block.rs) checks the dev-fee TOTAL, not recipients, so no
+        // height gate / hard fork is required. Total minted is unchanged.
+        const COFOUNDER_WALLET_HEX: &str =
+            "44a9a59b31bf28c72bae8d2571d21efb720e64d10bce711053ecc9c092f78da8";
+        const COFOUNDER_SPLIT_BPS: u128 = 5_000; // 50.00% of the FOUNDER share
         let mut transactions = Vec::new();
 
         if solutions.is_empty() {
@@ -1546,11 +1555,24 @@ impl BlockProducer {
         };
         let founder_fee_amount = dev_fee_amount.saturating_sub(operator_fee_amount);
 
+        // v10.11.81 CO-FOUNDER SPLIT: carve the co-founder's half out of the
+        // founder share BEFORE either branch below builds the founder tx.
+        // Shadowing founder_fee_amount keeps both branches (distributed +
+        // legacy) untouched; integer division rounds in the founder's favor
+        // so founder + cofounder always sums to the original share exactly.
+        let cofounder_fee_amount =
+            founder_fee_amount.saturating_mul(COFOUNDER_SPLIT_BPS) / BPS_DIVISOR;
+        let founder_fee_amount = founder_fee_amount.saturating_sub(cofounder_fee_amount);
+
         // Decode founder wallet
         let founder_wallet_bytes =
             hex::decode(FOUNDER_WALLET_HEX).expect("Invalid founder wallet hex");
         let mut founder_wallet = [0u8; 32];
         founder_wallet.copy_from_slice(&founder_wallet_bytes);
+        let cofounder_wallet_bytes =
+            hex::decode(COFOUNDER_WALLET_HEX).expect("Invalid cofounder wallet hex");
+        let mut cofounder_wallet = [0u8; 32];
+        cofounder_wallet.copy_from_slice(&cofounder_wallet_bytes);
 
         // Zero address for coinbase "from" (newly minted coins)
         let coinbase_from = [0u8; 32];
@@ -1693,7 +1715,16 @@ impl BlockProducer {
             } else { None };
 
             // Transaction 1: Founder development fee
-            let actual_founder_amount = if operator_wallet.is_some() { founder_fee_amount } else { dev_fee_amount };
+            // v10.11.81: was `dev_fee_amount` in the no-operator case, which would
+            // bypass the co-founder split. founder_fee_amount already equals
+            // dev_fee − operator − cofounder; fold an unclaimable operator share
+            // (promille set but wallet unresolvable) back into the founder tx to
+            // preserve the old behavior of never silently burning it.
+            let actual_founder_amount = if operator_wallet.is_some() {
+                founder_fee_amount
+            } else {
+                founder_fee_amount.saturating_add(operator_fee_amount)
+            };
             let dev_fee_tx_id = {
                 let mut hasher = Sha256::new();
                 hasher.update(b"DEV_FEE");
@@ -1778,6 +1809,52 @@ impl BlockProducer {
                     memo: None,
                 });
             }
+        }
+
+        // v10.11.81 CO-FOUNDER SPLIT: Transaction 2/3: co-founder's half of the
+        // founder dev-fee share, minted directly at coinbase (bypasses the
+        // FOUNDER_WALLET timelock/vesting on later transfers). Pushed after both
+        // branches above so distributed + legacy paths are covered identically.
+        if cofounder_fee_amount > 0 {
+            info!(
+                "💰 Block #{}: Co-founder fee = {:.6} QUG (50% of founder dev-fee share)",
+                block_height,
+                cofounder_fee_amount as f64 / 1e24
+            );
+            let cofounder_tx_id = {
+                let mut hasher = Sha256::new();
+                hasher.update(b"COFOUNDER_FEE");
+                hasher.update(&cofounder_fee_amount.to_le_bytes());
+                hasher.update(&cofounder_wallet);
+                hasher.update(&timestamp.timestamp().to_le_bytes());
+                let hash = hasher.finalize();
+                let mut tx_id = [0u8; 32];
+                tx_id.copy_from_slice(&hash);
+                tx_id
+            };
+
+            transactions.push(Transaction {
+                id: cofounder_tx_id,
+                from: coinbase_from,
+                to: cofounder_wallet,
+                amount: cofounder_fee_amount,
+                fee: 0,
+                nonce: 0,
+                signature: vec![0xC0, 0x1B, 0xA5, 0xE],
+                timestamp,
+                data: format!("Development fee (co-founder share) for sustainable quantum consensus research").into_bytes(),
+                token_type: TokenType::QUG,
+                fee_token_type: TokenType::QUGUSD,
+                tx_type: TransactionType::Coinbase,
+                pqc_signature: None,
+                signature_phase: TxSignaturePhase::Phase0Ed25519,
+                pqc_public_key: None,
+                zk_proof_bundle: None,
+                privacy_level: TransactionPrivacyLevel::Transparent,
+                bulletproof: None,
+                nullifier: None,
+                memo: None,
+            });
         }
 
         // Transaction 3-N: Miner rewards
