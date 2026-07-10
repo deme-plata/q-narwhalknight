@@ -1,6 +1,6 @@
 [package]
 name = "q-api-server"
-version = "10.11.81"  # v10.11.81: CO-FOUNDER dev-fee split — founder share of the mining dev fee is split 50/50 with COFOUNDER_WALLET (qnk44a9a59b…f78da8) as a separate coinbase tx; total minted unchanged; producer-side only (validate_coinbase_amounts checks totals not recipients). Prior: v10.11.80 TUI/status height display fix; v10.11.74 custom-token swap decimal fix (overrides workspace 10.11.72)
+version = "10.11.82"  # v10.11.82: DEX money-printer fix — QUGUSD->QUG buy-back credit is now atomic (balance+counter+applied_net one batch), stopping the 5s reconciler double-apply that minted the buy-back amount per zero-sum round trip. Prior: v10.11.81 co-founder dev-fee split; v10.11.80 height display; v10.11.74 swap decimals
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

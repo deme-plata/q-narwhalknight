@@ -13925,27 +13925,35 @@ pub async fn execute_swap(
             drop(token_balances);
             let wallet_hex = hex::encode(wallet_addr);
 
-            // 1. Record credit counter (for startup idempotency via apply_dex_qug_adjustments)
-            if let Err(e) = state.storage_engine.record_dex_qug_credit(&wallet_hex, final_amount_out as u128).await {
-                warn!("⚠️ [SWAP v10.5.1] Failed to record DEX credit counter: {} — continuing", e);
-            }
-
-            // 2. Persist QUG credit directly to CF_MANIFEST wallet_balance_ (the authoritative
-            //    location for native QUG). balance_consensus never does this for QUGUSD-input swaps.
-            match state.storage_engine.add_balance(&wallet_hex, final_amount_out as u128).await {
-                Ok(_) => {
-                    // 3. Sync in-memory cache from the freshly-updated RocksDB value
-                    let new_qug = state.storage_engine.get_balance(&wallet_hex).await.unwrap_or(0);
-                    let mut wallet_balances = state.wallet_balances.write().await;
-                    wallet_balances.insert(wallet_addr, new_qug);
-                    info!("💰 [SWAP v10.5.1] QUG credit {} persisted to CF_MANIFEST + in-memory synced (new balance: {})",
+            // v10.11.82 MONEY-PRINTER FIX (repro'd 2026-07-09: +1 QUG per zero-sum
+            // QUG↔QUGUSD round trip). The old path made TWO writes on a QUGUSD→QUG
+            // buy: record_dex_qug_credit (bumps dex_qug_credited but, per v10.5.2,
+            // intentionally does NOT touch dex_applied_net) + add_balance (credits
+            // wallet_balance_). Because applied_net was left stale, the 5s reconciler
+            // apply_dex_qug_adjustments() computed delta = (credited−debited) −
+            // applied_net = +output and RE-ADDED the credit on its next tick — minting
+            // the buy-back amount from thin air, unboundedly.
+            //
+            // Fix: use the atomic variant that writes balance + credit counter +
+            // dex_applied_net in ONE batch, exactly mirroring the debit side
+            // (atomic_subtract_and_record_dex_debit). Now applied_net == credited −
+            // debited immediately, so the reconciler sees delta=0 and never
+            // double-applies. Checkpoint-safe: the checkpoint purge deletes the
+            // dex_applied_net: prefix (lib.rs:6390), so post-checkpoint credits still
+            // re-derive from the (surviving) counters on restore.
+            match state.storage_engine.atomic_add_and_record_dex_credit(&wallet_hex, final_amount_out as u128).await {
+                Ok(new_qug) => {
+                    state.wallet_balances.write().await.insert(wallet_addr, new_qug);
+                    info!("💰 [SWAP v10.11.82] QUG credit {} applied atomically (balance+counter+applied_net in one batch); new balance: {}",
                         final_amount_out, new_qug);
                 }
                 Err(e) => {
-                    warn!("⚠️ [SWAP v10.5.1] Failed to persist QUG credit to RocksDB: {} — updating in-memory only", e);
+                    // Atomic write failed → NOTHING persisted (no balance, no counter,
+                    // no applied_net), so the reconciler is unaffected. Bump in-memory
+                    // only for instant UX; next balance load from RocksDB corrects it.
+                    warn!("⚠️ [SWAP v10.11.82] atomic_add_and_record_dex_credit failed: {} — in-memory only (no double-apply risk; nothing persisted)", e);
                     let cur = state.wallet_balances.read().await.get(&wallet_addr).copied().unwrap_or(0);
-                    let mut wallet_balances = state.wallet_balances.write().await;
-                    wallet_balances.insert(wallet_addr, cur.saturating_add(final_amount_out as u128));
+                    state.wallet_balances.write().await.insert(wallet_addr, cur.saturating_add(final_amount_out as u128));
                 }
             }
         } else if to_is_qugusd {
