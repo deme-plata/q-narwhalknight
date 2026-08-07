@@ -320,6 +320,10 @@ pub struct ContractInfo {
     pub total_supply: Option<u128>, // v3.0.4: Migrated from u64 to u128
     pub decimals: Option<u32>,     // Add decimals for display
     pub deployment_params: Option<serde_json::Value>, // v4.0.3: RWA configuration parameters
+    // v10.11.88: DeepSeek audit #7 — real holder count. Frontend previously fell back to
+    // Math.random() when this field was absent (SmartContractModal.tsx:89).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holders_count: Option<u64>,
 }
 
 /// Helper to serialize Option<u128> as string for JSON (avoids JS 2^53 overflow)
@@ -468,6 +472,8 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/:contract_address/fee-config", get(get_fee_config))
         .route("/:contract_address/fee-config", post(update_fee_config))
         .route("/:contract_address/token-stats", get(get_token_stats))
+        // v10.11.88: DeepSeek audit #7 — frontend calls this and got 404, showing 0 holders
+        .route("/:contract_address/holders", get(get_token_holders))
         // v2.4.8: Social media profile endpoints
         .route("/:contract_address/social", get(get_social_profile))
         .route("/:contract_address/social", post(update_social_profile))
@@ -867,8 +873,8 @@ pub async fn deploy_contract(
                 let decimals = request
                     .parameters
                     .get("decimals")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(8) as u32;
+                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .unwrap_or(24) as u32;
 
                 // v1.0.49-beta: CRITICAL FIX - Convert human-readable to base units
                 // User enters "1000000" (1 million tokens)
@@ -1242,6 +1248,7 @@ pub async fn get_user_contracts(
                 total_supply,
                 decimals,
                 deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
+                holders_count: None, // list view: not computed (O(N×M)); details endpoint has it
             }
         })
         .collect();
@@ -1339,6 +1346,7 @@ pub async fn get_contracts(
                 total_supply,
                 decimals,
                 deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
+                holders_count: None, // list view: not computed (O(N×M)); details endpoint has it
             }
         })
         .collect();
@@ -1385,10 +1393,13 @@ pub async fn get_contract_details(
                 });
 
             // v1.0.49-beta: FIXED - Default to 8 decimals (like Bitcoin satoshis)
+            // v10.11.88: DeepSeek audit #1 (read-path twin) — deployment stored decimals as a
+            // STRING ("24") for tokens deployed via the GUI/MCP; as_u64() alone returned None
+            // and misreported 8. Same string-parse fallback as the deploy path (line ~870).
             let decimals = contract
                 .deployment_params
                 .get("decimals")
-                .and_then(|v| v.as_u64())
+                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
                 .map(|d| d as u32)
                 .or(Some(8)); // Default to 8 decimals (Bitcoin standard)
 
@@ -1411,6 +1422,20 @@ pub async fn get_contract_details(
                 }
             }
 
+            // v10.11.88: DeepSeek audit #7 — real holder count (was absent; frontend
+            // substituted Math.random()). Same counting rule as get_token_stats.
+            // Use the contract's own address bytes (contract_addr was moved into
+            // get_contract_by_address above).
+            let holders_count = {
+                let addr_bytes = contract.address.0;
+                let token_balances = state.token_balances.read().await;
+                let n = token_balances
+                    .iter()
+                    .filter(|((_, token_addr), balance)| *token_addr == addr_bytes && **balance > 0)
+                    .count() as u64;
+                Some(n)
+            };
+
             let contract_info = ContractInfo {
                 address: format!("qnk{}", hex::encode(contract.address.0)),
                 contract_type: format!("{:?}", contract.contract_type),
@@ -1425,6 +1450,7 @@ pub async fn get_contract_details(
                 total_supply,
                 decimals,
                 deployment_params: serde_json::to_value(&contract.deployment_params).ok(),
+                holders_count,
             };
             Ok(Json(ApiResponse::success(contract_info)))
         }
@@ -1433,6 +1459,74 @@ pub async fn get_contract_details(
             address
         )))),
     }
+}
+
+/// v10.11.88: DeepSeek audit #7 — GET /contracts/:contract_address/holders
+///
+/// The quantum-wallet frontend has called this since v3.4.20
+/// (services/api.ts getContractHolders) and always received 404, so every
+/// Custom token displayed 0 holders. Returns the top holders by balance.
+///
+/// Amounts are returned as RAW BASE UNITS (string) plus a percentage share.
+/// Deliberately no display-divided value: which decimals divisor applies to
+/// Custom-token balances is the open #8/#5 question (see the v2.7.4 ASHEN
+/// bug, MCP index.ts:4108) — percentages are scale-invariant and safe either
+/// way.
+#[derive(Deserialize)]
+pub struct HoldersQuery {
+    pub limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct HolderInfo {
+    pub rank: u32,
+    pub address: String,
+    /// Raw u128 base units as string (avoids JS 2^53 overflow)
+    pub balance_base: String,
+    /// Share of on-ledger supply, 0..100
+    pub percentage: f64,
+}
+
+pub async fn get_token_holders(
+    Path(contract_address): Path<String>,
+    Query(query): Query<HoldersQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<Vec<HolderInfo>>>, StatusCode> {
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let limit = query.limit.unwrap_or(50).min(500) as usize;
+
+    // Same counting rule as get_token_stats: positive balances for this token.
+    let token_balances = state.token_balances.read().await;
+    let mut holders: Vec<([u8; 32], u128)> = token_balances
+        .iter()
+        .filter(|((_, token_addr), balance)| *token_addr == contract_addr && **balance > 0)
+        .map(|((wallet, _), balance)| (*wallet, *balance))
+        .collect();
+    drop(token_balances);
+
+    let total: u128 = holders.iter().map(|(_, b)| *b).sum();
+    holders.sort_by(|a, b| b.1.cmp(&a.1));
+    holders.truncate(limit);
+
+    let list: Vec<HolderInfo> = holders
+        .into_iter()
+        .enumerate()
+        .map(|(i, (wallet, balance))| HolderInfo {
+            rank: (i + 1) as u32,
+            address: format!("qnk{}", hex::encode(wallet)),
+            balance_base: balance.to_string(),
+            percentage: if total > 0 {
+                (balance as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(list)))
 }
 
 /// Interact with deployed contract - execute RWA and token actions
@@ -1981,7 +2075,7 @@ pub struct AirdropRequest {
 pub struct TokenOperationResponse {
     pub success: bool,
     pub transaction_hash: String,
-    pub amount: u64,
+    pub amount: u128,
     pub message: String,
 }
 
@@ -1997,7 +2091,7 @@ pub async fn mint_tokens(
     };
 
     // Parse amount
-    let amount = match request.amount.parse::<u64>() {
+    let amount = match request.amount.parse::<u128>() {
         Ok(amt) if amt > 0 => amt,
         Ok(_) => {
             return Ok(Json(ApiResponse::error(
@@ -2113,7 +2207,7 @@ pub async fn burn_tokens(
     };
 
     // Parse amount
-    let amount = match request.amount.parse::<u64>() {
+    let amount = match request.amount.parse::<u128>() {
         Ok(amt) if amt > 0 => amt,
         Ok(_) => {
             return Ok(Json(ApiResponse::error(
@@ -2272,7 +2366,9 @@ pub async fn airdrop_tokens(
     }
 
     // Parse amount per recipient
-    let amount_per_recipient = match request.amount_per_recipient.parse::<u64>() {
+    // v10.11.88: DeepSeek audit #4 family — u64 caps at 1.8e19, unusable for
+    // 24-decimal amounts (mint/burn were already u128; airdrop was the straggler).
+    let amount_per_recipient = match request.amount_per_recipient.parse::<u128>() {
         Ok(amt) if amt > 0 => amt,
         Ok(_) => {
             return Ok(Json(ApiResponse::error(
@@ -2331,7 +2427,7 @@ pub async fn airdrop_tokens(
     }
 
     // Calculate total amount needed
-    let total_amount = amount_per_recipient.saturating_mul(recipient_addrs.len() as u64);
+    let total_amount = amount_per_recipient.saturating_mul(recipient_addrs.len() as u128);
 
     // Check if owner has sufficient balance
     let owner = contract.deployer;
@@ -2360,13 +2456,13 @@ pub async fn airdrop_tokens(
                 .get(&(*recipient_addr, contract_addr))
                 .copied()
                 .unwrap_or(0);
-            let new_balance = current_balance.saturating_add(amount_per_recipient as u128);
+            let new_balance = current_balance.saturating_add(amount_per_recipient);
             token_balances.insert((*recipient_addr, contract_addr), new_balance);
             recipient_balances.push((*recipient_addr, new_balance));
 
             tracing::debug!(
                 "✈️ Airdropped {} tokens to {} for contract {}",
-                q_log_privacy::mask_amt(amount_per_recipient as u128),
+                q_log_privacy::mask_amt(amount_per_recipient),
                 q_log_privacy::mask_addr(&hex::encode(recipient_addr)),
                 q_log_privacy::mask_addr(&hex::encode(contract_addr))
             );
@@ -2374,7 +2470,7 @@ pub async fn airdrop_tokens(
 
         tracing::info!(
             "✈️ Airdrop complete: {} tokens to {} recipients for contract {}. Total: {}",
-            q_log_privacy::mask_amt(amount_per_recipient as u128),
+            q_log_privacy::mask_amt(amount_per_recipient),
             recipient_addrs.len(),
             q_log_privacy::mask_addr(&hex::encode(contract_addr)),
             q_log_privacy::mask_amt(total_amount as u128)
@@ -2409,9 +2505,10 @@ pub async fn airdrop_tokens(
     );
 
     // v1.4.10: Record airdrop event for event history
+    // v10.11.88: string-parse fallback (audit #1 family — GUI/MCP deploys store "24" as string)
     let decimals = contract.deployment_params
         .get("decimals")
-        .and_then(|v| v.as_u64())
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
         .unwrap_or(8) as u32;
     let display_amount = amount_per_recipient as f64 / 10f64.powi(decimals as i32);
     let event = ContractEventRecord {
@@ -2703,7 +2800,9 @@ pub async fn stake_tokens(
         Ok(a) => a,
         Err(_) => return Ok(Json(ApiResponse::error("Invalid amount".to_string()))),
     };
-    let amount = (amount_f64 * 100_000_000.0) as u64;
+    // v10.11.88: scale by 1e24 (24-decimal base units) to match token_balances,
+    // as u128 (was ×1e8 as u64 — the bug that truncated every stake to ~1e-16).
+    let amount: u128 = (amount_f64 * 1e24) as u128;
 
     if amount == 0 {
         return Ok(Json(ApiResponse::error("Amount must be greater than 0".to_string())));
@@ -2715,7 +2814,7 @@ pub async fn stake_tokens(
     let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
     drop(token_balances);
 
-    if current_balance < amount as u128 {
+    if current_balance < amount {
         return Ok(Json(ApiResponse::error(format!(
             "Insufficient balance. Have: {}, Need: {}",
             current_balance as f64 / 1e24,
@@ -2841,7 +2940,7 @@ pub async fn unstake_tokens(
     let mut token_balances = state.token_balances.write().await;
     let balance_key = (wallet_addr, contract_addr);
     let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
-    let new_balance = current_balance + stake.amount as u128 + pending_rewards as u128;
+    let new_balance = current_balance + stake.amount + pending_rewards;
     token_balances.insert(balance_key, new_balance);
     drop(token_balances);
 
@@ -2922,7 +3021,7 @@ pub async fn claim_staking_rewards(
     let mut token_balances = state.token_balances.write().await;
     let balance_key = (wallet_addr, contract_addr);
     let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
-    let new_balance = current_balance + pending_rewards as u128;
+    let new_balance = current_balance + pending_rewards;
     token_balances.insert(balance_key, new_balance);
     drop(token_balances);
 
@@ -3145,7 +3244,7 @@ pub async fn get_token_stats(
 
     // Count stakers and total staked
     let staking_store = state.token_staking_positions.read().await;
-    let mut total_staked: u64 = 0;
+    let mut total_staked: u128 = 0;
     let mut staker_count: u64 = 0;
 
     for (key, stake) in staking_store.iter() {
@@ -3168,7 +3267,7 @@ pub async fn get_token_stats(
     Ok(Json(ApiResponse::success(TokenStatsResponse {
         contract_address,
         symbol,
-        total_supply: (total_supply + total_staked as u128) as f64 / 1e24,
+        total_supply: (total_supply + total_staked) as f64 / 1e24,
         circulating_supply: total_supply as f64 / 1e24,
         total_staked: total_staked as f64 / 1e24,
         total_burned: total_burned as f64 / 1e24,
@@ -3180,14 +3279,17 @@ pub async fn get_token_stats(
 }
 
 /// Calculate pending rewards for a stake position
-fn calculate_pending_rewards_internal(stake: &TokenStakePosition) -> u64 {
+fn calculate_pending_rewards_internal(stake: &TokenStakePosition) -> u128 {
     let current_time = current_timestamp();
     let time_staked = current_time.saturating_sub(stake.last_reward_claim);
-    let seconds_per_year: u64 = 365 * 24 * 3600;
+    let seconds_per_year: u128 = 365 * 24 * 3600;
 
-    // Calculate rewards based on APY and time
-    let annual_reward = (stake.amount * stake.tier.apy_bps()) / 10000;
-    let pending = (annual_reward * time_staked) / seconds_per_year;
+    // Calculate rewards based on APY and time.
+    // v10.11.88: u128 saturating math — stake.amount is now 24-decimal base units
+    // (up to ~1e30), so amount × apy_bps can approach u128 range; saturate rather
+    // than panic (debug) / wrap (release) on the multiply.
+    let annual_reward = stake.amount.saturating_mul(stake.tier.apy_bps() as u128) / 10000;
+    let pending = annual_reward.saturating_mul(time_staked as u128) / seconds_per_year;
 
     pending
 }
