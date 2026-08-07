@@ -1553,8 +1553,25 @@ pub async fn bootstrap_peers(
     let current_height = state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
     let pq_signatures_active = state.upgrade_manager.is_active(&network_upgrades::PQ_SIGNATURES_REQUIRED);
 
+    // v10.11.88 PEER-COUNT FIX: this endpoint (/api/v1/status) never published a peer
+    // count, so every client that looked for one — the Quillon wallet MCP's
+    // `network_status`, explorers, dashboards — fell back to its `0` default and
+    // displayed "Peers: 0" on a node that was in fact well connected (13 peers when this
+    // was diagnosed). That read as a dead mesh and made the metric unquotable. The
+    // counter already exists and is live: `libp2p_peer_count` is wired in main.rs from
+    // the network manager's atomic and updated on every ConnectionEstablished/Closed.
+    // It simply was not exposed here, unlike /api/v1/health and /api/v1/node/status
+    // which both report it correctly. `None` (JSON null) when the counter is not
+    // installed at all (test mode) so "unknown" stays distinct from a genuine zero.
+    let connected_peers: Option<usize> = state
+        .libp2p_peer_count
+        .as_ref()
+        .map(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+
     let bootstrap_info = serde_json::json!({
         "peer_id": peer_id,
+        "peers": connected_peers,
+        "connected_peers": connected_peers,
         "multiaddrs": if peer_id != "discovering..." { multiaddrs } else { vec![] },
         "network_id": std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string()),
         "version": env!("CARGO_PKG_VERSION"),
@@ -1743,6 +1760,8 @@ pub async fn proof_tip(
 ///     "solutions_accepted_total": 4310,
 ///     "accept_ratio": 99.75,
 ///     "last_solution_unix_ms": 1715619995000,
+///     "last_solution_unix_s": 1715619995,
+///     "seconds_since_last_solution": 1,
 ///     "is_healthy": true
 ///   },
 ///   "p2p": {
@@ -1782,6 +1801,27 @@ pub async fn engine_pulse(
     let mining_submitted = state.mining_solutions_submitted.load(Ordering::Relaxed);
     let mining_accepted = state.mining_solutions_accepted.load(Ordering::Relaxed);
     let last_solution_ts = state.last_mining_solution_time.load(Ordering::Relaxed);
+    // v10.11.88 TELEMETRY-UNIT FIX: `last_mining_solution_time` is stored in SECONDS
+    // (main.rs stores `chrono::Utc::now().timestamp()`), but this endpoint published it
+    // under the name `last_solution_unix_ms` — and the documented example above is a
+    // 13-digit millisecond value. Every client that honoured the contract
+    // (`Date.now() - last_solution_unix_ms`, e.g. the Quillon wallet MCP) therefore
+    // computed ~1.78e9 SECONDS since the last solution instead of ~1s, which made the
+    // mining-liveness readout unusable. Convert to true milliseconds here so the value
+    // matches its own field name. The atomic itself is left in seconds — the three other
+    // consumers (deploy_admin_api, mining_stats, main.rs metrics) do `now_secs - value`
+    // and are already correct; changing the atomic would break them.
+    let last_solution_unix_ms = (last_solution_ts as u128).saturating_mul(1000) as u64;
+    // Pre-computed liveness so clients never have to do unit arithmetic at all.
+    // `None` (JSON null) when no solution has been recorded yet, so "never" is
+    // distinguishable from "0 seconds ago" instead of surfacing as a bogus epoch delta.
+    let seconds_since_last_solution: Option<u64> = if last_solution_ts > 0 {
+        Some(
+            (chrono::Utc::now().timestamp().max(0) as u64).saturating_sub(last_solution_ts),
+        )
+    } else {
+        None
+    };
     let mining_healthy = state.mining_is_healthy.load(Ordering::Relaxed);
     let accept_ratio = if mining_submitted > 0 {
         (mining_accepted as f64 / mining_submitted as f64) * 100.0
@@ -1848,7 +1888,9 @@ pub async fn engine_pulse(
             "solutions_submitted_total": mining_submitted,
             "solutions_accepted_total": mining_accepted,
             "accept_ratio_pct": accept_ratio,
-            "last_solution_unix_ms": last_solution_ts,
+            "last_solution_unix_ms": last_solution_unix_ms,
+            "last_solution_unix_s": last_solution_ts,
+            "seconds_since_last_solution": seconds_since_last_solution,
             "is_healthy": mining_healthy,
         },
         "p2p": {
@@ -4264,6 +4306,15 @@ pub struct TransactionDetails {
     pub amount: Option<u128>,
     pub fee: Option<u128>,
     pub token_type: Option<String>,
+    /// v10.11.86: Optional memo attached to the transaction by the sender.
+    /// The memo has always been persisted on the Transaction record (q-types
+    /// `Transaction::memo`) and pushed live to the recipient over SSE, but it was
+    /// never echoed back by this read route — so a memo was effectively
+    /// write-only: readable at the moment it landed, unrecoverable afterwards.
+    /// Carries the SAME ZK-STARK privacy gate as from/to/amount: populated only
+    /// when `can_see_full_details` passes (sender or receiver), `None` otherwise.
+    #[serde(default)]
+    pub memo: Option<String>,
 }
 
 /// Get transaction status
@@ -4325,6 +4376,7 @@ pub async fn get_transaction(
             amount: None, // ZK-encrypted
             fee: None,   // ZK-encrypted
             token_type: None,
+            memo: None,  // ZK-encrypted: memo is private to sender/receiver
         }
     };
 
@@ -4368,6 +4420,7 @@ pub async fn get_transaction(
                             amount: Some(stored_tx.amount),
                             fee: Some(stored_tx.fee),
                             token_type: Some(format!("{:?}", stored_tx.token_type)),
+                            memo: stored_tx.memo.clone(),
                         })));
                     }
                     build_privacy_response(tx_hash_str.clone(), "confirmed".to_string(), None, 1, ts)
@@ -4400,6 +4453,7 @@ pub async fn get_transaction(
                                     amount: Some(tx.amount),
                                     fee: Some(tx.fee),
                                     token_type: Some(format!("{:?}", tx.token_type)),
+                                    memo: tx.memo.clone(),
                                 })));
                             } else {
                                 debug!("🔒 ZK-STARK Privacy: Transaction details encrypted");
@@ -4433,6 +4487,7 @@ pub async fn get_transaction(
                             amount: Some(stored_tx.amount),
                             fee: Some(stored_tx.fee),
                             token_type: Some(format!("{:?}", stored_tx.token_type)),
+                            memo: stored_tx.memo.clone(),
                         })));
                     } else {
                         debug!("🔒 ZK-STARK Privacy (from storage lookup)");
@@ -4466,6 +4521,7 @@ pub async fn get_transaction(
                 amount: None,
                 fee: None,
                 token_type: None,
+                memo: None,
             },
         };
         return Ok(Json(ApiResponse::success(details)));
@@ -4577,6 +4633,7 @@ pub async fn get_transaction(
                     amount: Some(tx.amount),
                     fee: Some(tx.fee),
                     token_type: Some(format!("{:?}", tx.token_type)),
+                    memo: tx.memo.clone(),
                 };
                 return Ok(Json(ApiResponse::success(details)));
             } else {
@@ -4623,6 +4680,7 @@ pub async fn get_transaction(
                             amount: Some(tx.amount),
                             fee: Some(tx.fee),
                             token_type: Some(format!("{:?}", tx.token_type)),
+                            memo: tx.memo.clone(),
                         };
                         return Ok(Json(ApiResponse::success(details)));
                     } else {
@@ -5063,6 +5121,84 @@ async fn send_transaction_inner(
         );
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // v10.11.89 (2026-07-28) SIGN-ORDER ROOT-CAUSE FIX — "validation failed"
+    // on EVERY /transactions/send (Slint wallet's only send path).
+    //
+    // `signable_payload()` = SHA3(postcard(tx)) with ONLY `signature` and `id`
+    // zeroed. `data`, `privacy_level`, `zk_proof_bundle`, `bulletproof` and
+    // `nullifier` are all COVERED by it (and by `hash()` / `p2p_signable_hash()`
+    // — the other two targets the verifier accepts). This code used to:
+    //
+    //     1. sign signable_payload()
+    //     2. THEN mutate `data`   (pubkey append / overwrite)
+    //     3. THEN apply_privacy_proofs() -> mutates privacy_level + proof fields
+    //
+    // Steps 2–3 change the very bytes step 1 committed to, so the mempool's
+    // `verify_signature()` recomputed all three targets over DIFFERENT bytes and
+    // returned "no candidate key … matches signable_payload, hash, or
+    // p2p_signable_hash". Under v10.11.87's fail-loud rejection that surfaces to
+    // the user as `Transaction rejected: validation failed: …` — which is exactly
+    // what the Slint wallet reports for QUGUSD. It is NOT QUGUSD-specific: plain
+    // QUG on this path was equally unverifiable, it just went unnoticed because
+    // the browser wallet and the MCP sign client-side and use /send_signed.
+    //
+    // v10.11.87 fixed the token *layout* (data = token_addr‖pubkey) but kept the
+    // mutation AFTER the signature, so it could not land a transfer either.
+    //
+    // Fix: finalise EVERY signature-covered field first, recompute the id from
+    // the final body, and sign LAST. Nothing below the signing line may mutate
+    // the transaction. Pinned by q-types/tests/send_path_signature_order_tests.rs.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── 1. Final `data` layout (pubkey placement the verifier expects) ──
+    //
+    // Key off the ACTUAL wire layout — the tx_type — not the token category, so
+    // QUGUSD / QSHARE / Custom are handled identically and can never drift apart
+    // from the verifier's expectation (v10.11.87's insight, kept).
+    //   TokenTransfer : data = token_addr(32) ‖ pubkey(32)  — verifier reads data[32..64]
+    //   Transfer      : data = pubkey(32)                   — verifier reads data[0..32]
+    let uses_token_transfer_layout =
+        signed_transaction.tx_type == q_types::TransactionType::TokenTransfer;
+    if uses_token_transfer_layout && signed_transaction.data.len() == 32 {
+        signed_transaction.data.extend_from_slice(&derived_public_key);
+        info!(
+            "✅ TokenTransfer layout{}: data = token_addr(32) + pubkey(32) = {} bytes (pre-sign)",
+            if used_vault { " (vault)" } else { "" },
+            signed_transaction.data.len()
+        );
+    } else {
+        signed_transaction.data = derived_public_key.to_vec();
+        info!(
+            "✅ Transfer layout{}: data = pubkey(32) (pre-sign)",
+            if used_vault { " (vault auto-sign)" } else { "" }
+        );
+    }
+
+    // ── 2. Privacy proofs (mutates privacy_level + proof fields) ──
+    // v3.4.16-beta: maximum privacy is applied automatically. These fields are
+    // inside the signed body, so this MUST run before signing.
+    if let Err(e) = apply_privacy_proofs(&mut signed_transaction, None).await {
+        tracing::warn!("⚠️ Privacy proof generation failed (tx still valid): {}", e);
+    } else {
+        info!(
+            "🔐 Privacy proofs applied (pre-sign): level={:?}",
+            signed_transaction.privacy_level
+        );
+    }
+
+    // ── 3. Recompute the id from the FINAL body ──
+    // The early `tx_hash` was computed before the data/privacy fields existed, so
+    // it did not match what the mempool would compute. Recompute now so the hash
+    // we report to the client is the hash the network actually indexes.
+    let tx_hash = {
+        signed_transaction.id = TxHash::default();
+        let h = signed_transaction.hash();
+        signed_transaction.id = h;
+        h
+    };
+
+    // ── 4. Sign LAST ──
     // v10.11.8 (2026-05-22): sign canonical signable_payload, NOT tx_hash.
     //
     // Why: tx_hash is postcard(tx) with signature=empty Vec. After signing we
@@ -5075,26 +5211,17 @@ async fn send_transaction_inner(
     let message = signed_transaction.signable_payload();
     let signature: Signature = signing_key.sign(&message);
 
-    // Store the signature in the transaction
+    // Store the signature in the transaction. 🚨 NOTHING BELOW MAY MUTATE THE TX.
     signed_transaction.signature = signature.to_bytes().to_vec();
+    debug_assert!(
+        signed_transaction.verify_signature().is_ok(),
+        "self-check: freshly signed transaction must verify"
+    );
 
-    // v1.4.9-beta: Store public key in transaction data field for SIMD verification
-    if is_custom_token && signed_transaction.data.len() == 32 {
-        signed_transaction.data.extend_from_slice(&derived_public_key);
-        info!(
-            "✅ TokenTransfer signed{}: {} bytes sig, data = token_addr(32) + pubkey(32) = {} bytes",
-            if used_vault { " (vault)" } else { "" },
-            signed_transaction.signature.len(),
-            signed_transaction.data.len()
-        );
-    } else {
-        signed_transaction.data = derived_public_key.to_vec();
-        info!(
-            "✅ Transaction signed with Ed25519{}: {} bytes, public key stored",
-            if used_vault { " (vault auto-sign)" } else { "" },
-            signed_transaction.signature.len()
-        );
-    }
+    // NOTE (v10.11.89): the `data` layout block that used to sit HERE — after the
+    // signature — has moved ABOVE the signing line. Mutating `data` post-signature
+    // invalidated every verification target and was the real cause of the
+    // "validation failed" rejections. Do not reintroduce a mutation below signing.
 
     // v8.1.7: Store signing key in vault for future OAuth2 auto-signing
     if store_key_in_vault {
@@ -5116,16 +5243,10 @@ async fn send_transaction_inner(
     }
     // ============================================================================
 
-    // ============================================================================
-    // 🔐 v3.4.16-beta: AUTO-APPLY MAXIMUM PRIVACY - ZK proofs generated by default
-    // Users don't choose privacy levels - best privacy is always applied automatically
-    // ============================================================================
-    if let Err(e) = apply_privacy_proofs(&mut signed_transaction, None).await {
-        tracing::warn!("⚠️ Privacy proof generation failed (tx still valid): {}", e);
-    } else {
-        info!("🔐 Privacy proofs applied: level={:?}", signed_transaction.privacy_level);
-    }
-    // ============================================================================
+    // NOTE (v10.11.89): apply_privacy_proofs() also used to run HERE, after the
+    // signature. It rewrites privacy_level / zk_proof_bundle / bulletproof /
+    // nullifier — all inside the signed body — so it broke the signature exactly
+    // like the `data` mutation did. It now runs pre-sign (step 2 above).
 
     // Check sender has sufficient balance (but don't update balances yet)
     // Balances will be updated ONLY after consensus confirmation
@@ -5330,44 +5451,76 @@ async fn send_transaction_inner(
     // Now we AWAIT the mempool result and return an error if the transaction is rejected.
     if let Some(ref mempool) = state.production_mempool {
         let tx_for_mempool = signed_transaction.clone();
-        match mempool.add_transaction(tx_for_mempool, None).await {
-            Ok(added) => {
-                if added {
-                    info!(
-                        "📦 [TX-QUEUED] Transaction {} queued for block production",
-                        q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8]))
-                    );
-                }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // v10.11.87 (2026-07-28) PHANTOM-TRANSFER FIX — fail LOUDLY on rejection.
+        //
+        // `add_transaction` collapses AT LEAST 8 semantically distinct rejection
+        // branches into a plain `Ok(false)` (see ProductionMempool's own doc
+        // comment). The previous code matched only `Err(e)` as a rejection and
+        // wrote `Ok(added) => if added { log }` — so EVERY `Ok(false)` fell
+        // silently through, execution continued to the optimistic balance
+        // emission below, and the handler returned "completed successfully"
+        // for a transaction the mempool had just REFUSED.
+        //
+        // Real incident that motivated this: Viktor's 176,000 QUGUSD FÆLLED
+        // (tx b3dd0ec0…, 2026-07-28 08:04:47). The mempool logged
+        // "🚨 reject: signature invalid" and returned Ok(false); 0 ms later this
+        // handler emitted optimistic TokenBalanceUpdated events to BOTH sender
+        // and recipient and logged "[TX END] send_transaction completed
+        // successfully". Both wallets rendered a 176,000 QUGUSD movement that
+        // the ledger never recorded, and no balance was ever debited. Supply was
+        // never inflated (the apply layer is symmetric and simply never ran) —
+        // but settlement REPORTING lied, which is its own money-safety failure.
+        //
+        // Fix: use `add_transaction_detailed`, whose `AdmissionResult::Rejected`
+        // carries a typed `RejectReason`, and treat Rejected EXACTLY like Err.
+        // Nothing below this block may run for a non-admitted transaction.
+        // ═══════════════════════════════════════════════════════════════════
+        let rejection: Option<String> = match mempool
+            .add_transaction_detailed(tx_for_mempool, None)
+            .await
+        {
+            Ok(q_narwhal_core::production_mempool::AdmissionResult::Admitted) => {
+                info!(
+                    "📦 [TX-QUEUED] Transaction {} queued for block production",
+                    q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8]))
+                );
+                None
+            }
+            Ok(q_narwhal_core::production_mempool::AdmissionResult::Rejected(reason)) => {
+                Some(format!("Transaction rejected: {}", reason))
             }
             Err(e) => {
                 // v3.5.25-beta: Return error to user instead of silently failing!
-                // This fixes the bug where transactions showed as "confirmed" in explorer
-                // even though they were rejected by mempool (e.g., insufficient fee)
-                let error_msg = format!("Transaction rejected: {}", e);
-                warn!(
-                    "❌ [TX-REJECTED] Transaction {} rejected by mempool: {}",
-                    q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8])),
-                    e
-                );
-                // Update status to failed
-                state.tx_status.insert(tx_hash, TxStatus::Failed { error: error_msg.clone() });
-                // Return JSON error response so frontend can display the rejection reason
-                let error_response = serde_json::json!({
-                    "transaction_hash": hex::encode(&tx_hash),
-                    "status": "rejected",
-                    "error": error_msg,
-                    "suggestion": "Ensure sufficient fee is included (minimum 21000 for transfers)"
-                });
-                return Ok(Json(ApiResponse {
-                    success: false,
-                    data: Some(error_response),
-                    error: Some(error_msg),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0),
-                }));
+                Some(format!("Transaction rejected: {}", e))
             }
+        };
+
+        if let Some(error_msg) = rejection {
+            warn!(
+                "❌ [TX-REJECTED] Transaction {} rejected by mempool: {} — NOT emitting optimistic balance updates",
+                q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8])),
+                error_msg
+            );
+            // Update status to failed
+            state.tx_status.insert(tx_hash, TxStatus::Failed { error: error_msg.clone() });
+            // Return JSON error response so frontend can display the rejection reason
+            let error_response = serde_json::json!({
+                "transaction_hash": hex::encode(&tx_hash),
+                "status": "rejected",
+                "error": error_msg,
+                "suggestion": "Ensure sufficient fee is included (minimum 21000 for transfers)"
+            });
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: Some(error_response),
+                error: Some(error_msg),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            }));
         }
     } else {
         warn!("⚠️ production_mempool not available - transaction {} will not be included in blocks!",
@@ -5827,6 +5980,53 @@ pub async fn send_transaction_signed(
         (TransactionType::TokenTransfer, TokenType::Custom(token_addr), token_addr.to_vec())
     };
 
+    // ── v10.11.88 TOKEN-SEND FIX (send_signed) ──────────────────────────────
+    // A TokenTransfer's `data` must be the 64-byte layout the fleet expects:
+    //
+    //     data = token_addr(32) ‖ sender_pubkey(32)
+    //
+    //  · q-types verify_ed25519_signature (HTTP layer + mempool perform_validation):
+    //    candidate keys = `from`, data[..32]; targets include p2p_signable_hash,
+    //    which COVERS `data` — so the client must sign over these exact 64 bytes.
+    //  · process_transaction_batch (SIMD verify pipeline): REQUIRES
+    //    data.len() >= 64 for TokenTransfer and reads the pubkey at data[32..64];
+    //    with 32-byte data the tx was silently `continue`-skipped. This is the
+    //    convention the /transactions/send path already builds (see the
+    //    "TokenTransfer layout" block above) — send_signed now matches it.
+    //
+    // For the Ed25519 scheme the sender's ADDRESS IS their public key
+    // (wallet_auth.rs verify_ed25519: VerifyingKey::from_bytes(address)), so the
+    // server completes the layout with zero new wire fields and the client can
+    // independently build byte-identical data before signing.
+    //
+    // ⚠️ Scheme-gated on purpose: Dilithium5 / UltraSecure (and Hybrid, whose
+    // address derivation is not verified to equal the Ed25519 pubkey) derive
+    // addresses by HASHING public keys, so address ≠ pubkey there and this
+    // construction would produce an unverifiable layout. Reject loudly instead
+    // of corrupting the transfer. Native QUG is untouched by this block.
+    let tx_data = if tx_type == TransactionType::TokenTransfer {
+        match auth_wallet.scheme {
+            crate::wallet_auth::AuthScheme::Ed25519 => {
+                debug_assert_eq!(tx_data.len(), 32, "token_addr must be exactly 32 bytes");
+                let mut d = tx_data;
+                d.extend_from_slice(&from_address);
+                d
+            }
+            ref other => {
+                return Ok(Json(ApiResponse::error(format!(
+                    "Token transfers via send_signed currently require an Ed25519 wallet \
+                     (your auth scheme: {:?}). Post-quantum wallet addresses are hashes of \
+                     their public keys, so the server cannot derive the required 64-byte \
+                     TokenTransfer data layout (token_addr ‖ pubkey) from the address alone. \
+                     Native QUG sends are unaffected.",
+                    other
+                ))));
+            }
+        }
+    } else {
+        tx_data
+    };
+
     // 6. Build the transaction. DURABLE (client-signed) path MUST use the client's
     //    nonce + timestamp so the bytes match what was signed; legacy path assigns them.
     let nonce = if is_client_signed {
@@ -5915,10 +6115,13 @@ pub async fn send_transaction_signed(
                 e
             );
             return Ok(Json(ApiResponse::error(format!(
-                "Invalid transaction signature: {}. (Note: the verifier resolves the \
-                 signer key from `from`; this path currently covers QUG native transfers \
-                 — token-transfer signing is a tracked follow-up because the token address \
-                 occupies the data[..32] field the verifier prefers as the key.)",
+                "Invalid transaction signature: {}. The signature must be Ed25519 over \
+                 p2p_signable_hash (SHA3-256 of: 0x01 ‖ from(32) ‖ to(32) ‖ amount_le(16) ‖ \
+                 fee_le(16) ‖ nonce_le(8) ‖ timestamp_le(8) ‖ token_byte(1) ‖ \
+                 data_len_le(4) ‖ data). For token transfers (v10.11.88+) `data` is \
+                 token_addr(32) ‖ sender_pubkey(32) = 64 bytes and the token_byte is \
+                 1 (QUGUSD) or 2 (custom) — sign over exactly these bytes or the hashes \
+                 will not match. For native QUG, data is empty and token_byte is 0.",
                 e
             ))));
         }
@@ -10693,6 +10896,55 @@ pub async fn test_production_peer_connectivity(
 
         Ok(Json(ApiResponse::success(result)))
     }
+}
+
+/// v10.11.83: Mining hashrate heartbeat request.
+/// A keepalive a miner POSTs every ~30s while hashing, so the server keeps counting its
+/// hashrate between the (rare) actual solution submissions. See MiningStatistics::heartbeat_miner.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MiningHeartbeatRequest {
+    pub miner_address: String,
+    /// Current aggregated hashrate in KH/s (same unit as MiningSolutionRequest.hash_rate).
+    pub hash_rate: Option<f64>,
+    #[serde(default)]
+    pub miner_id: Option<String>,
+    #[serde(default)]
+    pub worker_name: Option<String>,
+}
+
+/// v10.11.83: `POST /api/v1/mining/heartbeat` — refresh a miner's liveness + reported hashrate
+/// without a solution. Fixes "my 20 MH/s GPU doesn't show in network power": miners previously
+/// only reported hashrate on solution submit, so between blocks (often > the 300s active window)
+/// they were dropped as stale. This keeps them counted. Cheap: a brief write lock at ~1 req/30s
+/// per miner, so it does NOT need the sharded/channel path the high-frequency solution flow uses.
+pub async fn mining_heartbeat(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<MiningHeartbeatRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // Light validation — an address that can't be a wallet is ignored (no error spam).
+    if request.miner_address.len() < 8 {
+        return Ok(Json(ApiResponse::error(
+            "invalid miner_address".to_string(),
+        )));
+    }
+    let hr = request.hash_rate.unwrap_or(0.0).max(0.0);
+    // Same worker-id derivation as the stats aggregator (main.rs:17765).
+    let worker_id = request
+        .miner_id
+        .clone()
+        .or_else(|| request.worker_name.clone())
+        .unwrap_or_else(|| "direct".to_string());
+
+    if let Some(ref ms) = state.mining_statistics {
+        ms.write().await.heartbeat_miner(
+            request.miner_address.clone(),
+            hr,
+            worker_id,
+            request.worker_name.clone(),
+        );
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({ "ok": true }))))
 }
 
 /// Submit mining solution (VDF proof)
@@ -17820,6 +18072,7 @@ pub async fn record_swap_in_history(
 /// Response for token price endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenPriceResponse {
+    pub price: f64,
     pub token: String,
     pub price_usd: f64,
     pub source: String,
@@ -17873,6 +18126,7 @@ pub async fn get_token_price(
         return Ok(Json(ApiResponse::success(TokenPriceResponse {
             token: "QUG".to_string(),
             price_usd: price,
+                price: price,
             source: "vault".to_string(),
             last_updated,
             pool_reserves: pool_info_opt,
@@ -17884,6 +18138,7 @@ pub async fn get_token_price(
         return Ok(Json(ApiResponse::success(TokenPriceResponse {
             token: "QUGUSD".to_string(),
             price_usd: 1.0,
+                price: 1.0,
             source: "peg".to_string(),
             last_updated: chrono::Utc::now().timestamp(),
             pool_reserves: None,
@@ -17939,6 +18194,7 @@ pub async fn get_token_price(
         return Ok(Json(ApiResponse::success(TokenPriceResponse {
             token: token_upper,
             price_usd: token_price,
+                price: token_price,
             source: "amm_pool".to_string(),
             last_updated: chrono::Utc::now().timestamp(),
             pool_reserves: Some(PoolReservesInfo {
@@ -17975,6 +18231,7 @@ pub async fn get_all_prices(
     prices.push(TokenPriceResponse {
         token: "QUG".to_string(),
         price_usd: qug_price,
+                price: qug_price,
         source: "amm_oracle".to_string(),
         last_updated,
         pool_reserves: None,
@@ -17984,6 +18241,7 @@ pub async fn get_all_prices(
     prices.push(TokenPriceResponse {
         token: "QUGUSD".to_string(),
         price_usd: 1.0,
+                price: 1.0,
         source: "peg".to_string(),
         last_updated: now,
         pool_reserves: None,
@@ -18046,6 +18304,7 @@ pub async fn get_all_prices(
             prices.push(TokenPriceResponse {
                 token: token_upper,
                 price_usd: token_price,
+                price: token_price,
                 source: "amm_pool".to_string(),
                 last_updated: now,
                 pool_reserves: Some(PoolReservesInfo {
@@ -18722,6 +18981,7 @@ pub async fn get_stablecoin_transparency(
         total_qugusd_supply,
         total_qug_collateral,
         qug_price_usd: qug_price,
+
         total_collateral_value_usd,
         system_collateral_ratio,
         excess_collateral_usd: excess_collateral_usd.max(0.0),
