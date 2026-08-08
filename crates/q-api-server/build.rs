@@ -18,6 +18,10 @@ fn main() {
         now.format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // Rerun if this file changes
-    println!("cargo:rerun-if-changed=build.rs");
+    // 2026-07-16: force this build script to re-run on EVERY build so BUILD_DATE /
+    // BUILD_TIMESTAMP are always fresh. The old `rerun-if-changed=build.rs` only re-ran
+    // when build.rs itself changed, so incremental release rebuilds reported a stale
+    // build_date (e.g. an incremental v10.11.84 build still said "2026-07-13"). Emitting
+    // a rerun-if-changed for a path that never exists makes cargo re-run us every time.
+    println!("cargo:rerun-if-changed=.build-always-rerun");
 }

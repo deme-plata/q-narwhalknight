@@ -45,6 +45,7 @@ pub mod performance_profiler;
 pub mod optimization_engine;
 pub mod advanced_zk;
 pub mod recursive_stark;
+pub mod settlement;
 
 // Bulletproofs++ Range Proofs (v3.9.0: EUROCRYPT 2024)
 // 39% smaller proofs (416 bytes for 64-bit), 5x faster proving, 9.5x batch verification speedup

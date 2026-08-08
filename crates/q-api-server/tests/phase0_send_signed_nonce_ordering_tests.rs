@@ -103,9 +103,6 @@ impl TorClient for NoopTorClient {
 // ============================================================================
 
 async fn make_test_app_state(db_suffix: &str) -> Arc<AppState> {
-    // TEMP DIAGNOSTIC (round-4, will be reverted): surface tracing warn!/error!
-    // output so we can see the real perform_validation rejection reason.
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     // NOTE: `IntegrityChecker` (q-storage/src/integrity.rs, invoked
     // unconditionally by AppState::new) always looks at `{db_path}/hot` —
     // it does NOT read the separate `hot_db_path` config field at all (a

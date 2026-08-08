@@ -283,28 +283,42 @@ impl VertexCreator {
             proposer: self.signing_key.verifying_key().to_bytes(),
             transactions: tx_hashes,
             parents,
-            vdf_proof: QuantumVDFProof {
-                challenge: vdf_input_array,
-                proof: [0u8; 64], // TODO: Get actual proof
-                quantum_seed: Some(vdf_input_array),
-                computation_time: Duration::from_millis(1000), // TODO: Get actual computation time
-                // Phase 0 Round-4 BUG-B-GAP1 FIX (2026-07-08): was hardcoded to
-                // `1`, discarding the real computed difficulty in `vdf_result`
-                // (returned by `self.quantum_vdf.compute_proof` a few lines
-                // above). `quantum_vdf.rs`'s `compute_classical_proof` /
-                // `compute_post_quantum_proof` integer-divide by this exact
-                // field (`i % (difficulty / 8)` and `i % (difficulty / 16)`)
-                // during their OWN verification path -- with difficulty=1
-                // both divisions truncate to 0 and the modulo panics. Using
-                // `vdf_result.proof.difficulty` (== `vdf_result.computational_cost`,
-                // the real `quantum_difficulty_bonus` value computed inside
-                // `compute_proof`) is the real value the proof above was
-                // actually computed against, so it can never be smaller than
-                // the divisors above require.
-                difficulty: vdf_result.proof.difficulty,
-                entropy_estimate: 0.95,                        // TODO: Get actual entropy estimate
-                parallel_witnesses: Vec::new(),                // TODO: Get actual witnesses
-            },
+            // Phase 0 Round-4 BUG-B-GAP1 FIX (2026-07-08): this used to hand-build
+            // a QuantumVDFProof out of mostly-hardcoded stub values --
+            // `proof: [0u8; 64]`, `computation_time: Duration::from_millis(1000)`,
+            // `difficulty: 1`, `entropy_estimate: 0.95`, `parallel_witnesses:
+            // Vec::new()` -- discarding `vdf_result` (returned by
+            // `self.quantum_vdf.compute_proof` a few lines above), which is
+            // already a complete, correctly-computed `QuantumVDFProof` for
+            // this exact `vdf_input_array` challenge.
+            //
+            // Two independent, compounding consequences of the stub:
+            //   1. `difficulty: 1` -- `quantum_vdf.rs`'s `compute_classical_proof`
+            //      / `compute_post_quantum_proof` integer-divide by this exact
+            //      field during their OWN verification path (`i % (difficulty / 8)`,
+            //      `i % (difficulty / 16)`) -- with difficulty=1 both divisions
+            //      truncate to 0 and the modulo panics.
+            //   2. Even with (1) fixed in isolation (e.g. clamping difficulty
+            //      only), `proof: [0u8; 64]` is not the real proof bytes for
+            //      that difficulty/challenge -- `verify_proof` recomputes the
+            //      VDF from `challenge`+`difficulty` and compares against
+            //      `proof`, so a fake all-zero `proof` field can never match
+            //      and `validate_vertex` would still reject every vertex with
+            //      "Invalid VDF proof for vertex ..." (confirmed empirically:
+            //      after fixing only `difficulty`, `test_production_wired_
+            //      dagknight_own_vertex_is_self_valid` stopped panicking but
+            //      still failed with exactly this warning, not a signature
+            //      failure -- BUG B's `proposer` fix was independently
+            //      confirmed correct by that same run).
+            //
+            // Fix: use `vdf_result.proof` directly -- it already carries the
+            // real `challenge` (this IS `vdf_input_array`, its own input),
+            // `proof`, `computation_time`, `difficulty`, `entropy_estimate`,
+            // and `parallel_witnesses`, all mutually consistent because a
+            // single real `compute_proof` call produced them together.
+            // `vdf_result` is not read anywhere else in this function, so
+            // moving `.proof` out of it here is safe.
+            vdf_proof: vdf_result.proof,
             timestamp,
             signature, // 🔐 v2.4.7-beta: Now properly signed!
         };

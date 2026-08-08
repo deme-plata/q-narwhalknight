@@ -80,16 +80,24 @@ pub enum StakingTier {
 }
 
 /// Token stake position
+///
+/// v10.11.88 (2026-08-07): `amount` and `total_rewards_claimed` widened u64 → u128.
+/// Custom-token balances are denominated in 24-decimal base units (up to
+/// total_supply × 1e24 ≈ 1e30 for a 1M-supply token), which does NOT fit in u64
+/// (max ~1.8e19). The old staking path multiplied the display amount by 1e8 and
+/// stored it in a u64, so any real stake was silently truncated to ~1e-16 tokens
+/// (staking "1 LEVI" locked 0.0000000000000001). Persistence is serde_json (numeric),
+/// so widening the field is backward-compatible with already-stored positions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenStakePosition {
     pub wallet_address: String,
     pub contract_address: String,
-    pub amount: u64,
+    pub amount: u128,
     pub tier: StakingTier,
     pub start_time: u64,
     pub unlock_time: u64,
     pub last_reward_claim: u64,
-    pub total_rewards_claimed: u64,
+    pub total_rewards_claimed: u128,
 }
 
 impl TokenFeeConfig {
@@ -738,6 +746,21 @@ pub struct QStorage {
     /// Used by `turbo_sync::sync_to_height` as the chunk-build start, replacing
     /// `local_height` which was the contiguous pointer.
     synced_through_atomic: Arc<std::sync::atomic::AtomicU64>,
+    /// v10.11.85 — THE single source of truth for permanent (network-wide
+    /// missing) height ranges. Historically each subsystem carried its own
+    /// idea of "which heights are legitimately empty": turbo_sync's private
+    /// `known_gaps`, mainnet_safety's `find_block_gaps` (no gap knowledge),
+    /// the contiguity walk (strict height+1, no skip), fill_gap_p2p (blind
+    /// chunk build). They disagreed, so whichever wasn't gap-aware wedged a
+    /// fresh single-peer sync on ~476-block historical pruning holes (e.g.
+    /// 9824-10204) — either looping AUTO-REPAIR forever or stalling the tip.
+    ///
+    /// Now this Arc is created here, hydrated from `permanent_gap:` RocksDB
+    /// keys at startup, and SHARED: `TurboSyncManager` clones it (its runtime
+    /// declaration/trust path mutates THIS set), `advance_contiguous_tip` and
+    /// `find_block_gaps` read it directly, and handlers reach it via the
+    /// storage engine. One truth, every consumer.
+    known_gaps: Arc<crate::known_gaps::KnownGaps>,
     /// 📊 v10.9.23: Sparse Merkle Tree for balance_root_v2.
     ///
     /// Opened on the same physical RocksDB instance as `hot_db_concrete` so
@@ -867,9 +890,31 @@ impl QStorage {
             cache_verification_counter: std::sync::atomic::AtomicU64::new(0),
             // v10.9.55 Task 4: initialized to 0; reloaded from disk below after `recover()`.
             synced_through_atomic: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // v10.11.85: THE shared permanent-gap truth. Seeded from env override
+            // (Q_KNOWN_PERMANENT_GAPS, normally empty), then hydrated from the
+            // persisted `permanent_gap:` RocksDB keys just below.
+            known_gaps: Arc::new(crate::known_gaps::KnownGaps::from_env()),
             // 📊 v10.9.23: BalanceSmt for balance_root_v2 (dormant until D2 wires it)
             balance_smt,
         };
+
+        // v10.11.85: Hydrate the shared permanent-gap set from RocksDB so every
+        // consumer (contiguity walk, AUTO-REPAIR, fill_gap, turbo_sync) starts
+        // the session already knowing the historically-declared holes. Runtime
+        // declarations (peer forward-seek → trust → add_gap) keep extending it.
+        {
+            let persisted = storage.load_permanent_gaps().await;
+            if !persisted.is_empty() {
+                for (s, e) in &persisted {
+                    storage.known_gaps.add_gap(*s, *e);
+                }
+                tracing::info!(
+                    "🕳️ [KNOWN-GAP v10.11.85] Hydrated {} permanent gap(s) from RocksDB into the shared set: {:?}",
+                    persisted.len(),
+                    storage.known_gaps.snapshot()
+                );
+            }
+        }
 
         // Perform crash recovery and get recovered height
         let _recovered_height = storage.recover().await?;
@@ -2097,6 +2142,14 @@ impl QStorage {
     ///
     /// Both tiers are O(log n) point lookups. Total latency well under 1ms.
     /// Returns Ok(true) if the block exists in either tier, Ok(false) if neither.
+    /// v10.11.85: accessor for the shared permanent-gap truth. `TurboSyncManager`
+    /// clones this so its runtime declaration/trust path mutates the SAME set that
+    /// `advance_contiguous_tip` / `find_block_gaps` read; handlers use it for the
+    /// fast-404 negative cache. One Arc, every subsystem.
+    pub fn known_gaps(&self) -> Arc<crate::known_gaps::KnownGaps> {
+        self.known_gaps.clone()
+    }
+
     pub async fn is_height_present(&self, height: u64) -> Result<bool> {
         // Tier 1: marker
         let marker_key = height_present_key(height);
@@ -2155,7 +2208,26 @@ impl QStorage {
             if self.is_height_present(h + 1).await? {
                 h += 1;
             } else {
-                return Ok(h); // real gap → stop. Background tick will retry later.
+                // v10.11.85: absent height. Before stopping, consult the SHARED
+                // permanent-gap truth. If h+1 falls inside a network-wide-missing
+                // range (peer-declared + trust-passed, or persisted), it will
+                // NEVER be fillable — treat it as filled-by-absence and jump to
+                // the gap end so contiguity advances honestly instead of wedging
+                // here forever (the fresh-single-peer 9824-10204 stall). If the
+                // hole is NOT a known permanent gap, it may still be in-flight —
+                // stop and let the background tick retry once the block lands.
+                match self.known_gaps.next_gap_above(h) {
+                    Some((gap_start, gap_end)) if h + 1 >= gap_start && h + 1 <= gap_end => {
+                        // Never advance past the storage tip we verified above.
+                        let jump_to = gap_end.min(upper);
+                        if jump_to > h {
+                            h = jump_to;
+                            continue;
+                        }
+                        return Ok(h);
+                    }
+                    _ => return Ok(h), // real (not-yet-known-permanent) gap → stop.
+                }
             }
         }
         Ok(h)
@@ -5412,6 +5484,97 @@ impl QStorage {
         Ok(balances)
     }
 
+    /// v10.11.90: Per-wallet variant of `load_token_balances`.
+    ///
+    /// `load_token_balances()` iterates the ENTIRE token-balance keyspace (every
+    /// wallet × every token, plus tombstones) — measured at 12%+ of prod CPU in
+    /// RocksDB iterator internals when called from per-event paths (~1.1 calls/s
+    /// on the swap/mining confirmation path starved block-pack serving fleet-wide).
+    /// Event handlers know WHICH wallet changed, so they only need that wallet's
+    /// rows. Same merge semantics as the full loader, scoped by prefix:
+    /// CF_MANIFEST `token_balance_{wallet_hex}_` text keys are authoritative
+    /// (LE u128/u64), CF_TOKEN_BALANCES binary `wallet‖token` keys fill only
+    /// MISSING entries (BE, QUGUSD excluded — the 172K-ghost rule). Returns
+    /// token_address → balance for the one wallet.
+    pub async fn load_token_balances_for_wallet(
+        &self,
+        wallet_address: &[u8; 32],
+    ) -> Result<HashMap<[u8; 32], u128>> {
+        let mut balances: HashMap<[u8; 32], u128> = HashMap::new();
+        let wallet_hex = hex::encode(wallet_address);
+
+        // CF_MANIFEST (authoritative): prefix narrows straight to this wallet.
+        let prefix = format!("token_balance_{}_", wallet_hex);
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix.as_bytes()).await {
+            Ok(entries) => {
+                for (key, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(token_hex) = key_str.strip_prefix(prefix.as_str()) {
+                            if let Ok(token_bytes) = hex::decode(token_hex) {
+                                if token_bytes.len() == 32 {
+                                    let mut token_address = [0u8; 32];
+                                    token_address.copy_from_slice(&token_bytes);
+                                    let amount = if value.len() == 16 {
+                                        u128::from_le_bytes(value[..16].try_into().unwrap())
+                                    } else if value.len() == 8 {
+                                        u64::from_le_bytes(value[..8].try_into().unwrap()) as u128
+                                    } else {
+                                        warn!(
+                                            "Invalid token balance data length ({} bytes) for wallet {}",
+                                            value.len(),
+                                            wallet_hex
+                                        );
+                                        continue;
+                                    };
+                                    balances.insert(token_address, amount);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to scan token balances for wallet {}: {}", wallet_hex, e);
+            }
+        }
+
+        // CF_TOKEN_BALANCES (state sync): 32-byte wallet prefix over the 64-byte
+        // wallet‖token keys — seek + bounded walk, never the whole CF.
+        #[cfg(not(target_os = "windows"))]
+        if let Some(db) = self.get_rocks_db_handle() {
+            if let Some(cf) = db.cf_handle(CF_TOKEN_BALANCES) {
+                let iter = db.iterator_cf(
+                    &cf,
+                    rocksdb::IteratorMode::From(&wallet_address[..], rocksdb::Direction::Forward),
+                );
+                for item in iter {
+                    if let Ok((key, value)) = item {
+                        if !key.starts_with(&wallet_address[..]) {
+                            break; // walked past this wallet's key range
+                        }
+                        if key.len() == 64 && value.len() >= 8 {
+                            let mut token_address = [0u8; 32];
+                            token_address.copy_from_slice(&key[32..64]);
+                            if token_address == q_types::QUGUSD_TOKEN_ADDRESS {
+                                continue; // NEVER load QUGUSD from state sync CF
+                            }
+                            let amount = if value.len() >= 16 {
+                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                            } else {
+                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                            };
+                            if !balances.contains_key(&token_address) && amount > 0 {
+                                balances.insert(token_address, amount);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(balances)
+    }
+
     /// Save multiple token balances atomically with SYNC to guarantee disk write
     /// v2.7.9-beta: Changed from u64 to u128 for larger token supplies
     pub async fn save_token_balances(&self, balances: &HashMap<([u8; 32], [u8; 32]), u128>) -> Result<()> {
@@ -5493,7 +5656,7 @@ impl QStorage {
         debug!(
             "🔒 Saved stake position: {} ({} tokens, tier: {:?})",
             stake_key,
-            position.amount as f64 / 100_000_000.0,
+            position.amount as f64 / 1e24,
             position.tier
         );
         Ok(())
@@ -11987,6 +12150,14 @@ impl mainnet_safety::IntegrityCheckable for QStorage {
         let mut gaps = Vec::new();
 
         for height in start..=end {
+            // v10.11.85: skip heights inside a known permanent (network-wide
+            // missing) gap. These are filled-by-absence, not repairable — before
+            // this, AUTO-REPAIR flagged them every 60s and dispatched a fetch that
+            // could never succeed (the 9824-10204 infinite loop). The shared
+            // gap-truth on the storage engine is the single arbiter now.
+            if self.known_gaps.contains(height) {
+                continue;
+            }
             let height_key = format!("qblock:height:{}", height);
             if self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await?.is_none() {
                 gaps.push(height);

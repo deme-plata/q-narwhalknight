@@ -779,6 +779,10 @@ async fn get_loan_applications(
                 "monthly_payment": safe_f64(loan.monthly_payment),
                 "status": loan.status,
                 "created_at": loan.created_at,
+                // v10.11.83: expose amount_paid (base units, as string for u128 safety) so the
+                // wallet's payment modal can show remaining balance / repayment progress / next
+                // payment date accurately instead of assuming 0 paid.
+                "amount_paid": loan.amount_paid.to_string(),
             })
         })
         .collect();
@@ -821,16 +825,43 @@ pub async fn approve_loan(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
-    let loan_id = request
-        .get("loan_id")
-        .and_then(|v| v.as_str())
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    // v10.11.76: every business-logic failure below now returns a descriptive
+    // ApiResponse::error (HTTP 200, success:false) instead of a bare StatusCode
+    // with an empty body. The admin panel's bankAction logs the response text, so
+    // the master previously saw only "Error 400/404" with no reason. Now it shows
+    // WHY (missing id / loan not found / already processed / insufficient collateral).
+    let loan_id = match request.get("loan_id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            return Ok(Json(ApiResponse::error(
+                "Missing 'loan_id' in request".to_string(),
+            )))
+        }
+    };
 
     // Get loan from pending applications
     let mut pending_loans = state.pending_loan_applications.write().await;
-    let loan = pending_loans
-        .get_mut(loan_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let loan = match pending_loans.get_mut(&loan_id) {
+        Some(l) => l,
+        None => {
+            return Ok(Json(ApiResponse::error(format!(
+                "Loan {} not found in pending applications",
+                loan_id
+            ))))
+        }
+    };
+
+    // v10.11.76 BALANCE-INTEGRITY GUARD: only a loan still in "pending" may be
+    // approved. Without this, re-approving (double-click / retry / stale list)
+    // re-ran the QUGUSD mint below → phantom mint of new QUGUSD each time.
+    if loan.status != "pending" {
+        let msg = format!(
+            "Loan {} is already '{}' — cannot approve again",
+            loan_id, loan.status
+        );
+        warn!("{}", msg);
+        return Ok(Json(ApiResponse::error(msg)));
+    }
 
     info!(
         "🏦 Approving loan {} for {:.4} QUGUSD",
@@ -842,30 +873,36 @@ pub async fn approve_loan(
     let borrower_addr = match parse_wallet_address(&loan.borrower_address) {
         Ok(addr) => addr,
         Err(e) => {
-            error!("Invalid borrower address: {}", e);
-            return Err(StatusCode::BAD_REQUEST);
+            let msg = format!("Invalid borrower address: {}", e);
+            error!("{}", msg);
+            return Ok(Json(ApiResponse::error(msg)));
         }
     };
 
-    // 1. Lock QUG collateral from borrower's wallet
+    // 1. Lock QUG collateral from borrower's wallet.
+    // v10.11.76: a borrower with no in-memory balance entry is treated as 0 QUG
+    // (→ a clean "insufficient collateral" message) instead of a bare 404 that
+    // told the admin nothing. wallet_balances is fully loaded from storage at boot
+    // (load_wallet_balances), so the in-memory value IS authoritative.
+    let collateral_base_units = (loan.collateral_amount * 1e24) as u128;
     {
         let mut wallet_balances = state.wallet_balances.write().await;
-        let qug_balance = wallet_balances.get_mut(&borrower_addr).ok_or_else(|| {
-            error!("Borrower wallet not found");
-            StatusCode::NOT_FOUND
-        })?;
+        let current_qug = wallet_balances.get(&borrower_addr).copied().unwrap_or(0);
 
-        let collateral_base_units = (loan.collateral_amount * 1e24) as u128;
-
-        if *qug_balance < collateral_base_units {
-            error!(
-                "Insufficient QUG balance for collateral lock: need {}, have {}",
-                collateral_base_units, *qug_balance
+        if current_qug < collateral_base_units {
+            drop(wallet_balances);
+            let msg = format!(
+                "Cannot approve loan {}: borrower has {:.6} QUG but {:.6} QUG collateral is required",
+                loan_id,
+                current_qug as f64 / 1e24,
+                collateral_base_units as f64 / 1e24
             );
-            return Err(StatusCode::BAD_REQUEST);
+            error!("{}", msg);
+            return Ok(Json(ApiResponse::error(msg)));
         }
 
-        *qug_balance -= collateral_base_units;
+        let new_qug = current_qug - collateral_base_units;
+        wallet_balances.insert(borrower_addr, new_qug);
 
         info!(
             "🔒 Locked {} QUG as collateral from {}",
@@ -876,7 +913,7 @@ pub async fn approve_loan(
         // Persist QUG balance update
         if let Err(e) = state
             .storage_engine
-            .save_wallet_balance(&borrower_addr, *qug_balance)
+            .save_wallet_balance(&borrower_addr, new_qug)
             .await
         {
             error!("Failed to persist QUG balance after locking collateral: {}", e);
@@ -964,6 +1001,24 @@ pub async fn approve_loan(
     loan.status = "approved".to_string();
     let approved_loan = loan.clone();
     drop(pending_loans);
+
+    // v10.11.76 BALANCE-INTEGRITY: persist the "approved" status so it survives a
+    // restart. Previously the status flip lived only in the in-memory map; after a
+    // restart load_loan_applications reloaded the loan as "pending", making it
+    // re-approvable and re-minting QUGUSD. Persisting closes that cross-restart hole
+    // (together with the in-memory status=="pending" guard above).
+    match bincode::serialize(&approved_loan) {
+        Ok(bytes) => {
+            if let Err(e) = state
+                .storage_engine
+                .save_loan_application(&loan_id, &bytes)
+                .await
+            {
+                error!("Failed to persist approved loan {} status: {}", loan_id, e);
+            }
+        }
+        Err(e) => error!("Failed to serialize approved loan {}: {}", loan_id, e),
+    }
 
     info!("✅ Loan {} approved and funds disbursed", loan_id);
 

@@ -273,12 +273,11 @@ pub const HARDCODED_BOOTSTRAP_PEERS: &[&str] = &[
     "/dns4/quillon.xyz/tcp/443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
     // WSS via port 9443 — dedicated libp2p WebSocket port (fallback if 443 detection fails)
     "/dns4/quillon.xyz/tcp/9443/wss/p2p/12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM",
-    // Server Delta - 1Gbit (second fastest)
-    "/ip4/5.79.79.158/tcp/9001/p2p/12D3KooWPg1GsUhYtZdzN37NcLQCz2PXJ3GssKMtELwvMvHFrjTt",
-    // Server Gamma - 1Gbit (peer ID refreshed 2026-05-16 — old `WFfZKfKbBnB5` rejected with WrongPeerId)
-    "/ip4/109.205.176.60/tcp/9001/p2p/12D3KooWHNhCWYmUiGGGXGGwTbDgTFZKrXBQ6LSZdGKhkpDici1U",
-    // Server Beta - 100Mbit (DHT coordinator, gossipsub anchor)
-    "/ip4/185.182.185.227/tcp/9001/p2p/12D3KooWKyjQUYXJQ8y8WdHbtMVxsNt4a412Ccqdr1oKjSY8fy93",
+    // 2026-07-14: Delta (5.79.79.158), Gamma (109.205.176.60) and Beta (185.182.185.227)
+    // REMOVED from the hardcoded list — they are offline/abandoned-fork, so a fresh node
+    // wasted ~10 min at boot dialing dead IPs (ConnectionRefused/TimedOut) + failing HTTP
+    // peer-id discovery against them. Epsilon is the only live serving node; re-add others
+    // via Q_BOOTSTRAP_PEERS or DNS discovery if/when they return.
 ];
 
 /// v4.2.0-beta: Bootstrap HTTP API endpoints for dynamic peer ID discovery
@@ -290,10 +289,8 @@ pub const BOOTSTRAP_HTTP_ENDPOINTS: &[&str] = &[
     "https://quillon.xyz",          // Epsilon via q-flux (HTTPS, port 443)
     // v8.7.4: Direct HTTP endpoints (for servers on unrestricted networks)
     "http://89.149.241.126:8080",   // Epsilon - 10Gbit SUPERNODE
-    "http://5.79.79.158:8080",      // Delta - 1Gbit
-    "http://109.205.176.60:8080",   // Gamma - 1Gbit
-    "http://185.182.185.227:8080",  // Beta  - 100Mbit
-    "http://161.35.219.10:8080",    // Alpha - 1Gbit (canary)
+    // 2026-07-14: Delta/Gamma/Beta/Alpha HTTP endpoints REMOVED — dead hosts that made a
+    // fresh node spend ~10 min at boot on failing peer-id discovery. Epsilon-only.
 ];
 
 /// Legacy single bootstrap peer constant (for backwards compatibility)
@@ -2159,10 +2156,15 @@ impl UnifiedNetworkManager {
                 // against OOM cascades during sync bursts (see Epsilon's
                 // 26.9GB RSS incident in memory.md). Default 1 GiB; operators
                 // can tune via Q_MAX_MEMORY_BYTES.
+                // 2026-07-18: default raised 1 GiB → 16 GiB. The 1 GiB default REFUSED
+                // every new libp2p connection once RSS exceeded 1 GiB (always true for a
+                // chain node), so an out-of-the-box node with no Q_MAX_MEMORY_BYTES got 0
+                // peers and never synced. 16 GiB is a runaway-OOM backstop that never trips
+                // during normal sync. Operators/prod still tune via Q_MAX_MEMORY_BYTES.
                 let max_memory_bytes: usize = std::env::var("Q_MAX_MEMORY_BYTES")
                     .ok()
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(1usize.saturating_mul(1024).saturating_mul(1024).saturating_mul(1024));
+                    .unwrap_or(16usize.saturating_mul(1024).saturating_mul(1024).saturating_mul(1024));
                 let memory_connection_limits =
                     libp2p::memory_connection_limits::Behaviour::with_max_bytes(max_memory_bytes);
                 info!(
@@ -4426,10 +4428,24 @@ impl UnifiedNetworkManager {
                                                         // catches all real pruning gaps while still tolerating normal
                                                         // sync hiccups (a few hundred blocks "skipped" by reordering).
                                                         const MAX_FORWARD_SKIP: u64 = 1_000;
-                                                        info!("🔬 [BLOCK-PACK] Forward-seek returned {} blocks (heights {}-{}) in {:.2}s; skip={}, threshold={}",
+                                                        // v10.11.85: the forward-seek found a real block at first_h, so
+                                                        // [start, first_h-1] is DEFINITIVELY empty on this serving node.
+                                                        // Declare it a permanent gap for ANY non-zero skip when the range
+                                                        // is clearly historical (the found block sits far below our tip) —
+                                                        // those heights are old, stable, and were pruned network-wide, so
+                                                        // they will never fill. This catches the ~476-block holes (e.g.
+                                                        // 9824-10204) that the flat 1000-block threshold silently swallowed,
+                                                        // wedging fresh single-peer syncs in an endless AUTO-REPAIR loop.
+                                                        // Near the tip we keep the conservative 1000 threshold to tolerate
+                                                        // normal reorg/reordering hiccups.
+                                                        const HISTORICAL_MARGIN: u64 = 100_000;
+                                                        let skip = first_h.saturating_sub(start_height);
+                                                        let is_historical =
+                                                            first_h.saturating_add(HISTORICAL_MARGIN) < our_height;
+                                                        info!("🔬 [BLOCK-PACK] Forward-seek returned {} blocks (heights {}-{}) in {:.2}s; skip={}, threshold={}, historical={}",
                                                               fwd_blocks.len(), first_h, last_h, fwd_elapsed.as_secs_f32(),
-                                                              first_h.saturating_sub(start_height), MAX_FORWARD_SKIP);
-                                                        if first_h > start_height.saturating_add(MAX_FORWARD_SKIP) {
+                                                              skip, MAX_FORWARD_SKIP, is_historical);
+                                                        if skip > 0 && (is_historical || skip > MAX_FORWARD_SKIP) {
                                                             info!("🚧 [GAP-DECL] Declaring permanent gap {}-{} to peer {} ({}-block skip)",
                                                                   start_height, first_h.saturating_sub(1), peer_clone,
                                                                   first_h.saturating_sub(start_height));

@@ -311,8 +311,15 @@ pub async fn get_multi_token_balance(
     let deployed_contracts = state.orobit_ecosystem.deployed_contracts.read().await;
 
     // Load token balances directly from RocksDB (guaranteed to be up-to-date)
-    let rocksdb_balances = match state.storage_engine.load_token_balances().await {
-        Ok(balances) => balances,
+    // v10.11.90: per-wallet prefix read instead of load_token_balances() — the
+    // full scan walked every wallet×token row on EVERY balance poll (this is a
+    // hot per-request handler) and was a co-driver of prod's iterator CPU burn.
+    // Re-keyed to the (wallet, token) shape so the loop below stays unchanged.
+    let rocksdb_balances = match state.storage_engine.load_token_balances_for_wallet(&addr_bytes).await {
+        Ok(balances) => balances
+            .into_iter()
+            .map(|(token_addr, amount)| ((addr_bytes, token_addr), amount))
+            .collect(),
         Err(e) => {
             warn!("⚠️ [v2.9.21] Failed to load token balances from RocksDB: {}, falling back to in-memory", e);
             // Fallback to in-memory if RocksDB fails

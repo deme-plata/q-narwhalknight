@@ -24,6 +24,29 @@ pub const CWND_CEILING: u32 = 64;
 pub const CWND_INITIAL: u32 = 16; // Match legacy CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER.
 pub const BETA: f64 = 0.7;        // Multiplicative-decrease factor.
 
+/// v10.11.84: runtime CWND floor, env-tunable via `Q_CUBIC_CWND_FLOOR` (default `CWND_FLOOR`=1).
+///
+/// A fresh node syncing from a SINGLE peer that serves slow historical (sparse-DAG) blocks
+/// sees repeated 25s chunk timeouts. Each timeout is an `on_loss` → cwnd *= 0.7 → cwnd
+/// collapses to the floor (1) and STAYS there, serializing fetches to ~6 bps even though the
+/// server has 24-48 block-pack permits free. Raising the floor (e.g. 6-8) keeps enough
+/// parallelism to actually use those permits and lets the node finish syncing. Default 1 =
+/// zero behavior change for existing (multi-peer) deployments.
+fn cwnd_floor() -> u32 {
+    use std::sync::OnceLock;
+    static FLOOR: OnceLock<u32> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        // 2026-07-18: default floor raised 1 → 4 so an out-of-the-box node keeps some
+        // parallelism instead of collapsing to serial(1) under slow single-peer serving.
+        // Still well below the ceiling (64); operators tune via Q_CUBIC_CWND_FLOOR.
+        std::env::var("Q_CUBIC_CWND_FLOOR")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&n| (CWND_FLOOR..=CWND_CEILING).contains(&n))
+            .unwrap_or(4)
+    })
+}
+
 /// Per-peer congestion window.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CubicWindow {
@@ -42,10 +65,10 @@ impl CubicWindow {
         Self::default()
     }
 
-    /// Start at a specific value (clamped to floor/ceiling).
+    /// Start at a specific value (clamped to the runtime floor/ceiling).
     pub fn with_initial(cwnd: u32) -> Self {
         Self {
-            cwnd: cwnd.clamp(CWND_FLOOR, CWND_CEILING),
+            cwnd: cwnd.clamp(cwnd_floor(), CWND_CEILING),
         }
     }
 
@@ -62,9 +85,11 @@ impl CubicWindow {
     }
 
     /// Multiplicative decrease: `cwnd = max(floor, floor(cwnd * 0.7))`.
+    /// v10.11.84: floor is env-tunable (see [`cwnd_floor`]) so a single-peer node
+    /// on slow serving doesn't collapse to serial (cwnd=1) fetching.
     pub fn on_loss(&mut self) {
         let new = (self.cwnd as f64 * BETA).floor() as u32;
-        self.cwnd = new.max(CWND_FLOOR);
+        self.cwnd = new.max(cwnd_floor());
     }
 
     /// Reset to initial — e.g. on reconnect.

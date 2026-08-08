@@ -48,6 +48,7 @@ mod cdp_simple;
 use q_api_server::contracts_api;
 use q_api_server::listing_api;
 use q_api_server::pool_api;
+use q_api_server::real_mixer_settle;
 mod dex_integration_api;
 mod liquidity_api;
 // v3.4.16-beta: Use library's quillon_bank_api module instead of redeclaring (fixes crate:: imports)
@@ -504,10 +505,8 @@ const QUG_DISPLAY_DIVISOR: f64 = 1_000_000_000_000_000_000_000_000.0; // 10^24
 const HTTP_BOOTSTRAP_PEERS: &[&str] = &[
     "https://quillon.xyz",          // HTTPS via q-flux (works behind NAT/firewalls on port 443)
     "http://89.149.241.126:8080",   // Server Epsilon (10Gbit supernode)
-    "http://5.79.79.158:8080",      // Server Delta (primary - 1Gbit fastest)
-    "http://109.205.176.60:8808",   // Server Gamma (secondary - 1Gbit; port 8808 not 8080 — verified 2026-05-16)
-    "http://185.182.185.227:8080",  // Server Beta (tertiary - 100Mbit)
-    "http://161.35.219.10:8080",    // Server Alpha (quaternary)
+    // 2026-07-14: Delta/Gamma/Beta/Alpha REMOVED — dead hosts; a fresh node spent ~10 min at
+    // boot on failing HTTP fallbacks to them. Epsilon-only. Re-add via env if they return.
 ];
 
 /// v10.2.8: Map HTTP bootstrap URLs to known libp2p peer IDs for auto-registration.
@@ -2287,8 +2286,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             Arg::new("network")
                 .long("network")
                 .value_name("NETWORK")
-                .help("Network to join: testnet or mainnet [env: Q_NETWORK_ID]")
-                .default_value("testnet"),
+                .help("Network to join [env: Q_NETWORK_ID]")
+                // 2026-07-18: default testnet → mainnet-genesis so an out-of-the-box node
+                // joins the live public chain (there is no active testnet). Override with
+                // --network / Q_NETWORK_ID.
+                .default_value("mainnet-genesis"),
         )
         .arg(
             Arg::new("experimental-fast-sync")
@@ -2430,8 +2432,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     std::process::exit(1);
                 }
             }
-        } else if !has_admin_wallet_arg && node_setup::is_first_boot(&working_dir) {
-            // Auto-detect first boot: no .env AND no --admin-wallet
+        } else if !has_admin_wallet_arg
+            && node_setup::is_first_boot(&working_dir)
+            && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        {
+            // Auto-detect first boot on an INTERACTIVE terminal: run the browser wizard.
+            // 2026-07-18: gated on is_terminal(stdin). Previously a first-boot node with no
+            // .env ALWAYS launched the browser setup wizard, which HANGS when run
+            // non-interactively (docker/systemd/background) — the "just launch the exe and
+            // it syncs" path never started. Now a non-interactive first boot skips the
+            // wizard and proceeds straight to sync with sane baked-in defaults (see the
+            // else branch below). Interactive operators still get the wizard.
             eprintln!();
             eprintln!("🔍 First boot detected (no .env file found).");
             eprintln!("   Running setup wizard automatically...");
@@ -2452,6 +2463,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     eprintln!("   You can run setup later with: ./q-api-server --setup");
                 }
             }
+        } else if !has_admin_wallet_arg && node_setup::is_first_boot(&working_dir) {
+            // 2026-07-18: first boot but NON-interactive (docker/systemd/background) —
+            // skip the browser setup wizard and sync straight away with baked-in defaults.
+            eprintln!("🔍 First boot, non-interactive — skipping setup wizard, syncing with defaults.");
+            eprintln!("   (For admin features run `--setup` interactively, or set --admin-wallet.)");
         }
     }
 
@@ -4738,7 +4754,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // height (PQC-002), to the producer's PERSISTENT Dilithium pubkey logged at boot
     // by PQC-003. Format: "<producer_ed25519_nodeid_hex>:<dilithium_pubkey_hex>",
     // comma-separated for multiple producers.
-    if let Ok(pins) = std::env::var("Q_PRODUCER_DILITHIUM_PUBKEY_HEX") {
+    //
+    // 2026-07-18: bake the live Epsilon producer pin as a DEFAULT (embedded via
+    // include_str!) so an out-of-the-box node can verify producer blocks past the
+    // activation height WITHOUT the operator manually pinning it — otherwise a fresh
+    // node stalls at ~h19.7M. Q_PRODUCER_DILITHIUM_PUBKEY_HEX still overrides.
+    const DEFAULT_PRODUCER_DILITHIUM_PIN: &str = include_str!("producer_dilithium_pin.txt");
+    {
+        let pins = std::env::var("Q_PRODUCER_DILITHIUM_PUBKEY_HEX")
+            .unwrap_or_else(|_| DEFAULT_PRODUCER_DILITHIUM_PIN.trim().to_string());
         let mut registry = state.validator_key_registry.write().await;
         let mut pinned = 0usize;
         for entry in pins.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -4929,8 +4953,20 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                     // Fluff: re-broadcast into the open mesh; origin is now hidden behind Tor.
                     if let Some(ref cmd) = cmd_tx_stem {
+                        // v10.11.88 (2026-07-28) NAMESPACE BLACK-HOLE FIX: was a hardcoded
+                        // "/qnk/mainnet/transactions" while every subscriber is on the
+                        // network-id-derived "/qnk/mainnet-genesis/transactions". A Dandelion
+                        // stem transaction that reached the fluff stage was therefore published
+                        // into a topic nobody listens to — i.e. privately-routed transactions
+                        // were silently dropped at exactly the point they should have rejoined
+                        // the open mesh. `transactions_topic()` already existed and was unused.
+                        let fluff_topic = std::env::var("Q_NETWORK_ID")
+                            .ok()
+                            .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                            .unwrap_or(q_types::NetworkId::MainnetGenesis)
+                            .transactions_topic();
                         let _ = cmd.send(q_network::NetworkCommand::PublishMessage {
-                            topic: "/qnk/mainnet/transactions".to_string(),
+                            topic: fluff_topic,
                             data,
                         });
                     }
@@ -15186,18 +15222,26 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         // Peers announcing 12.8 TRILLION height poison highest_network_height,
                                         // triggering DEEP FORK detection on every block and filling all mining shards.
                                         // Allow generous growth: 3x our height (or 50M during initial sync).
-                                        let max_reasonable_height = if our_height_now < 100_000 {
-                                            50_000_000 // Initial sync: trust up to 50M
-                                        } else {
-                                            our_height_now.saturating_mul(3).max(our_height_now + 100_000)
-                                        };
+                                        // v10.11.89: the cap must NEVER drop below the initial-sync trust
+                                        // ceiling. A node at h=100,443 computed max_reasonable=301,329 and
+                                        // rejected the TRUE tip (21.5M) — every fresh node crossing 100k
+                                        // entered this window until local reached tip/3. The 50M floor still
+                                        // blocks the 12.8-trillion poisoning this check was built for.
+                                        let max_reasonable_height = our_height_now
+                                            .saturating_mul(3)
+                                            .max(our_height_now + 100_000)
+                                            .max(50_000_000);
 
                                         if announcement.highest_block > max_reasonable_height {
                                             warn!("🚫 [HEIGHT] Rejecting absurd peer height {} from {} (our: {}, max reasonable: {})",
                                                 announcement.highest_block,
                                                 &announcement.peer_id[..20.min(announcement.peer_id.len())],
                                                 our_height_now, max_reasonable_height);
-                                            return;
+                                            // v10.11.89: `return` here killed the ENTIRE gossip consumer task —
+                                            // the supervisor saw a clean exit, assumed shutdown, and dropped the
+                                            // receiver, leaving the node deaf to all gossip forever (observed:
+                                            // fresh node parked 43h at h=120k). Skip the message, not our life.
+                                            continue 'gossip_loop;
                                         }
 
                                         // Log large gaps for monitoring
@@ -16465,8 +16509,17 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                         // Broadcast signature response back via gossipsub
                                         if let Some(ref network_tx) = app_state_gossip.libp2p_command_tx {
                                             let response_data = postcard::to_allocvec(&response).unwrap_or_default();
-                                            // Use mainnet as default network ID for topic
-                                            let topic_str = "/qnk/mainnet/consensus/sig-responses".to_string();
+                                            // v10.11.88 (2026-07-28) NAMESPACE BLACK-HOLE FIX: was a
+                                            // hardcoded "/qnk/mainnet/consensus/sig-responses" while every
+                                            // subscriber is on the network-id-derived
+                                            // "/qnk/mainnet-genesis/...". BFT signature responses could
+                                            // never reach a peer. `signature_response_topic()` already
+                                            // existed on NetworkId and was simply not used here.
+                                            let topic_str = std::env::var("Q_NETWORK_ID")
+                                                .ok()
+                                                .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                                                .unwrap_or(q_types::NetworkId::MainnetGenesis)
+                                                .signature_response_topic();
                                             let _ = network_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
                                                 topic: topic_str,
                                                 message_bytes: response_data,
@@ -16711,8 +16764,24 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 }); // close inner consumer tokio::spawn
                 match handle.await {
                     Ok(()) => {
-                        warn!("📨 [GOSSIP SUPERVISOR] consumer exited cleanly (sender dropped) — STOPPING supervisor");
-                        break;
+                        // v10.11.89: a clean exit does NOT prove the sender dropped — a stray
+                        // `return` inside the consumer body exits Ok(()) too (that exact bug
+                        // deafened a fresh node for 43h). Only stop if the channel is truly
+                        // closed; otherwise respawn like we would after a panic.
+                        let truly_closed = gossipsub_rx_arc.lock().await.is_closed();
+                        if truly_closed {
+                            warn!("📨 [GOSSIP SUPERVISOR] consumer exited cleanly and channel is closed (sender dropped) — STOPPING supervisor");
+                            break;
+                        }
+                        restarts += 1;
+                        error!(
+                            "📨 [GOSSIP SUPERVISOR] consumer exited cleanly but sender is ALIVE (stray return in consumer body?) — respawning (restart #{})",
+                            restarts
+                        );
+                        if let Some(m) = &app_state_gossip_outer.network_metrics {
+                            m.gossipsub_consumer_restarts.inc();
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                     Err(e) if e.is_panic() => {
                         restarts += 1;
@@ -16919,8 +16988,22 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     info!("   SQIsign pubkey: {} bytes", announcement.sqisign_public_key.len());
 
                     if let Some(ref network_tx) = app_state_validator.libp2p_command_tx {
+                        // v10.11.88 (2026-07-28) NAMESPACE BLACK-HOLE FIX.
+                        // This published to a HARDCODED "/qnk/mainnet/consensus/validators"
+                        // while every subscriber in the network is on the network-id-derived
+                        // "/qnk/mainnet-genesis/consensus/validators". Nothing was ever
+                        // subscribed to the hardcoded topic, so the publish failed forever with
+                        // NoPeersSubscribedToTopic — observed firing every 5 minutes for the
+                        // whole of 2026-07-28. BFT validator announcements have never reached a
+                        // single peer. `validator_announce_topic()` already existed on NetworkId
+                        // and was simply not used here.
+                        let validator_topic = std::env::var("Q_NETWORK_ID")
+                            .ok()
+                            .and_then(|s| s.parse::<q_types::NetworkId>().ok())
+                            .unwrap_or(q_types::NetworkId::MainnetGenesis)
+                            .validator_announce_topic();
                         let announcement_data = postcard::to_allocvec(&announcement).unwrap_or_default();
-                        let topic_str = "/qnk/mainnet/consensus/validators".to_string();
+                        let topic_str = validator_topic.clone();
                         match network_tx.send(q_network::NetworkCommand::PublishConsensusMessage {
                             topic: topic_str.clone(),
                             message_bytes: announcement_data.clone(),
@@ -16941,7 +17024,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             interval.tick().await;
                             let announcement_data = postcard::to_allocvec(&announcement).unwrap_or_default();
                             let _ = network_tx_clone.send(q_network::NetworkCommand::PublishConsensusMessage {
-                                topic: "/qnk/mainnet/consensus/validators".to_string(),
+                                // v10.11.88: network-derived, was hardcoded "/qnk/mainnet/..."
+                                topic: validator_topic.clone(),
                                 message_bytes: announcement_data,
                             });
                             debug!("🔄 [BFT] Re-announced validator identity");
@@ -17505,32 +17589,69 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 } else {
                     0
                 };
-                if staleness > 60
-                    && network_height > local_height
-                    && last_update > 0
-                    && local_height > 100_000
-                    && active_tip_height < network_height
-                {
-                    let gap = network_height - local_height;
-                    // Decay by 10% of gap, minimum 1 block
-                    let decay_amount = (gap / 10).max(1);
-                    let new_network_height = network_height.saturating_sub(decay_amount).max(local_height);
-
-                    app_state_decay.highest_network_height.store(
-                        new_network_height,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
-
+                // ═══════════════════════════════════════════════════════════════
+                // v10.11.88 (2026-07-28) STALENESS SIGN-INVERSION FIX.
+                //
+                // The block that used to live here decayed the ESTIMATE toward
+                // local_height when peer data went stale:
+                //
+                //     decay = (network_height - local_height) / 10
+                //     network_height = (network_height - decay).max(local_height)
+                //
+                // That is sign-inverted, not merely crude. Model block arrivals as
+                // a Poisson process at rate λ. A peer reported height h at staleness
+                // Δ, so:
+                //
+                //     E[tip now]   = h + λΔ     ← the tip is HIGHER than reported
+                //     Var[tip now] = λΔ + σ²    ← and we are LESS certain of it
+                //
+                // Staleness must decay the PRECISION, never the ESTIMATE. Moving the
+                // estimate DOWN toward our own height is the one direction the model
+                // forbids, and it makes ignorance indistinguishable from completion.
+                //
+                // MEASURED CONSEQUENCE (2026-07-28, fresh node vs this prod node):
+                // the node learned the true tip (21,364,541), crossed the
+                // `local_height > 100_000` guard about two minutes into a 21.36M-block
+                // sync — so that guard protects only the first 0.5% of sync — then
+                // decayed 21,364,541 → … → 115,289 → 115,285 → 115,282 → 115,270,
+                // concluded `blocks_behind ≈ 0`, logged
+                // "[TOPIC MGR] Resubscribed to 22 mining topics (caught up, 92 blocks
+                // behind)" while 21,252,884 blocks behind, and stopped syncing. Fresh
+                // nodes do not stall on a missing block; they stall because they
+                // convince themselves they are finished.
+                //
+                // FIX: never move the estimate on account of staleness. `fetch_max`
+                // from live peer announcements remains the only thing that raises it,
+                // and the HARD CLAMP above (local + 5M) remains the poisoning defence
+                // — that clamp is bounded and evidence-based, so it stays. With the
+                // decay gone, `blocks_behind` can no longer collapse to zero merely
+                // because we stopped hearing from anyone, so a node that knows nothing
+                // keeps syncing instead of declaring victory. Failing toward "I might
+                // still be behind" is the safe direction; the old behaviour failed
+                // toward "I am done", which is the expensive one.
+                //
+                // Formal treatment + the inverse-variance estimator this implements
+                // the degenerate (single-source) case of: `flux-science::fisher`
+                // (ArrivalModel / StaleObservation / fuse → FusedEstimate::is_behind,
+                // decided on the UPPER confidence bound so zero information ⇒ "behind").
+                // 34/34 tests green there, including `estimate_never_decays_toward_local`
+                // and `no_observations_means_assume_behind`.
+                // ═══════════════════════════════════════════════════════════════
+                if staleness > 60 && network_height > local_height && last_update > 0 {
+                    // Observability only — deliberately NO mutation of the estimate.
                     warn!(
-                        "📉 [HEIGHT DECAY] Peer data stale ({staleness}s) - decaying network_height {} → {} (local: {}, gap: {} → {})",
-                        network_height, new_network_height, local_height,
-                        gap, new_network_height.saturating_sub(local_height)
+                        "⏳ [HEIGHT STALE] Peer data stale ({staleness}s) — holding network_height at {} (local: {}, gap: {}, turbo_active_tip: {}). \
+                         Estimate is NOT decayed: staleness lowers confidence, not the target (see flux-science::fisher).",
+                        network_height,
+                        local_height,
+                        network_height.saturating_sub(local_height),
+                        active_tip_height
                     );
                 }
             }
         });
 
-        info!("✅ [HEIGHT DECAY] Network height decay + stale peer eviction task started");
+        info!("✅ [HEIGHT GUARD] Stale-peer eviction + absurd-height clamp task started (v10.11.88: estimate decay REMOVED — staleness lowers confidence, not the target)");
     }
 
     // ========================================
@@ -19935,14 +20056,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                                                         // Reload token balances from RocksDB for this wallet
                                                         // This ensures we have the latest confirmed state
-                                                        if let Ok(all_token_balances) = app_state_mining.storage_engine.load_token_balances().await {
+                                                        // v10.11.90: per-wallet prefix read. The old full
+                                                        // load_token_balances() here scanned every wallet×token
+                                                        // row per confirmation (~1.1/s on prod) and starved
+                                                        // block-pack serving — only this wallet's rows are needed.
+                                                        if let Ok(wallet_token_balances) = app_state_mining.storage_engine.load_token_balances_for_wallet(&wallet_addr).await {
                                                             let mut token_balances_write = app_state_mining.token_balances.write().await;
                                                             let mut updated_tokens: Vec<(String, u128, u128, [u8; 32])> = Vec::new(); // (symbol, old_bal, new_bal, token_addr)
 
                                                             // Update in-memory HashMap for ALL tokens owned by this wallet
-                                                            for ((w_addr, t_addr), new_balance) in &all_token_balances {
-                                                                if *w_addr == wallet_addr {
-                                                                    let key = (*w_addr, *t_addr);
+                                                            for (t_addr, new_balance) in &wallet_token_balances {
+                                                                {
+                                                                    let key = (wallet_addr, *t_addr);
                                                                     let old_balance = token_balances_write.get(&key).copied().unwrap_or(0);
 
                                                                     // Only update if balance actually changed
@@ -25741,6 +25866,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             "/api/v1/mining/submit",
             post(handlers::submit_mining_solution),
         )
+        .route("/api/v1/mining/heartbeat", post(handlers::mining_heartbeat)) // v10.11.83: keep active miners counted between solutions (hashrate keepalive)
         .route("/api/v1/mining/health", get(handlers::get_mining_health)) // v0.8.9-beta: Mining heartbeat health check
         .route("/api/v1/mining/diagnostics", get(handlers::get_mining_diagnostics)) // v2.7.0-beta: Mining system diagnostics
         .route("/api/v1/mining/capacity-local", get(q_api_server::deploy_admin_api::mining_capacity_local)) // v1.0.2: Mining capacity metrics (no auth)
@@ -25817,6 +25943,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         ) // v1.4.5-beta: Fee estimation API
         // Quantum Privacy Mixer endpoints
         .route("/api/v1/mixer/join", post(handlers::join_mixing_pool)) // Join quantum privacy mixing pool
+        .route("/api/v1/mixer/settle", post(real_mixer_settle::mixer_settle)) // Real atomic LSAG-verified settlement
         .route(
             "/api/v1/mixer/send",
             post(handlers::send_private_transaction),

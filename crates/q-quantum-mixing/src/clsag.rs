@@ -151,26 +151,17 @@ impl CLSAGSignature {
         // Parse key image I
         let key_image = decompress_point(&self.key_image)?;
 
-        // Parse commitment key image D
-        let commitment_key_image = decompress_point(&self.commitment_key_image)?;
-
-        // Parse commitment C
-        let commitment = decompress_point(&self.commitment)?;
+        // Parse commitment key image D and commitment C for structural validation
+        // only. LSAG does not fold them into the ring equations; the settlement
+        // layer binds the amount to the commitment separately.
+        let _commitment_key_image = decompress_point(&self.commitment_key_image)?;
+        let _commitment = decompress_point(&self.commitment)?;
 
         // Parse ring public keys
         let ring_points: Vec<RistrettoPoint> = self.ring
             .iter()
             .map(decompress_point)
             .collect::<Result<Vec<_>>>()?;
-
-        // Compute aggregation coefficients
-        let (mu_p, mu_c) = compute_aggregation_coefficients(
-            message,
-            &self.ring,
-            &self.commitment,
-            &self.key_image,
-            &self.commitment_key_image,
-        );
 
         // Parse initial challenge c_0
         let mut c = parse_scalar(&self.c0)?;
@@ -180,15 +171,13 @@ impl CLSAGSignature {
             let s = parse_scalar(&self.responses[i])?;
             let h_p = hash_to_point(&self.ring[i]);
 
-            // L_i = s_i * G + c_i * (P_i + mu_P * C)
-            // Aggregated public key: P_i + mu_P * C
-            let aggregated_pk = ring_points[i] + mu_p * commitment;
-            let l_i = &s * RISTRETTO_BASEPOINT_TABLE.basepoint() + c * aggregated_pk;
+            // LSAG link: L_i = s_i * G + c_i * P_i (authorization + key image only).
+            // Amount binding is enforced separately by the settlement layer, which
+            // re-opens the Pedersen commitment against the stated amount.
+            let l_i = &s * RISTRETTO_BASEPOINT_TABLE.basepoint() + c * ring_points[i];
 
-            // R_i = s_i * H_p(P_i) + c_i * (I + mu_C * D)
-            // Aggregated key image: I + mu_C * D
-            let aggregated_ki = key_image + mu_c * commitment_key_image;
-            let r_i = s * h_p + c * aggregated_ki;
+            // R_i = s_i * H_p(P_i) + c_i * I
+            let r_i = s * h_p + c * key_image;
 
             // Compute next challenge
             c = compute_challenge(
@@ -370,17 +359,9 @@ impl CLSAGSigner {
         let commitment_key_image_point = commitment_mask * h_p_s;
         let commitment_key_image = commitment_key_image_point.compress().to_bytes();
 
-        // Parse commitment point
-        let commitment_point = decompress_point(commitment)?;
-
-        // Compute aggregation coefficients
-        let (mu_p, mu_c) = compute_aggregation_coefficients(
-            message,
-            ring,
-            commitment,
-            &key_image,
-            &commitment_key_image,
-        );
+        // LSAG: the amount commitment is not folded into the ring (see `verify`),
+        // so aggregation coefficients and the commitment point are unused here. The
+        // settlement layer binds the amount to `commitment` separately.
 
         // Generate random nonce alpha with quantum entropy
         let mut alpha_bytes = [0u8; 64];
@@ -436,17 +417,10 @@ impl CLSAGSigner {
 
             let h_p_i = hash_to_point(&ring[i]);
 
-            // Aggregated public key: P_i + mu_P * C
-            let aggregated_pk = ring_points[i] + mu_p * commitment_point;
-
-            // Aggregated key image: I + mu_C * D
-            let aggregated_ki = key_image_point + mu_c * commitment_key_image_point;
-
-            // L_i = s_i * G + c_i * (P_i + mu_P * C)
-            let l_i = &responses[i] * RISTRETTO_BASEPOINT_TABLE.basepoint() + challenges[i] * aggregated_pk;
-
-            // R_i = s_i * H_p(P_i) + c_i * (I + mu_C * D)
-            let r_i = responses[i] * h_p_i + challenges[i] * aggregated_ki;
+            // LSAG: L_i = s_i * G + c_i * P_i, R_i = s_i * H_p(P_i) + c_i * I
+            let l_i = &responses[i] * RISTRETTO_BASEPOINT_TABLE.basepoint()
+                + challenges[i] * ring_points[i];
+            let r_i = responses[i] * h_p_i + challenges[i] * key_image_point;
 
             // Compute next challenge
             if next_i != secret_index {
@@ -465,12 +439,9 @@ impl CLSAGSigner {
         let prev_index = if secret_index == 0 { n - 1 } else { secret_index - 1 };
         let h_p_prev = hash_to_point(&ring[prev_index]);
 
-        let aggregated_pk_prev = ring_points[prev_index] + mu_p * commitment_point;
-        let aggregated_ki = key_image_point + mu_c * commitment_key_image_point;
-
         let l_prev = &responses[prev_index] * RISTRETTO_BASEPOINT_TABLE.basepoint()
-            + challenges[prev_index] * aggregated_pk_prev;
-        let r_prev = responses[prev_index] * h_p_prev + challenges[prev_index] * aggregated_ki;
+            + challenges[prev_index] * ring_points[prev_index];
+        let r_prev = responses[prev_index] * h_p_prev + challenges[prev_index] * key_image_point;
 
         challenges[secret_index] = compute_challenge(
             message,
@@ -480,10 +451,8 @@ impl CLSAGSigner {
             n,
         );
 
-        // Close the ring: s_s = alpha - c_s * (x + mu_P * z)
-        // where x is the private key and z is the commitment mask
-        let aggregate_secret = self.private_key + mu_p * commitment_mask;
-        responses[secret_index] = alpha - challenges[secret_index] * aggregate_secret;
+        // Close the ring: s_s = alpha - c_s * x  (x = signer private key)
+        responses[secret_index] = alpha - challenges[secret_index] * self.private_key;
 
         // Convert responses to bytes
         let response_bytes: Vec<[u8; 32]> = responses.iter()

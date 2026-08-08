@@ -17,12 +17,12 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-/// Default bootstrap servers — Delta 1Gbit first for fastest sync
+/// Default bootstrap servers — Epsilon only.
+/// 2026-07-14: was Delta/Gamma/Beta/Alpha (all offline/abandoned-fork, no Epsilon at all),
+/// which made a fresh node spend ~10 min at boot on failing HTTP bootstrap to dead hosts.
 pub const DEFAULT_BOOTSTRAP_SERVERS: &[&str] = &[
-    "http://5.79.79.158:8080",     // Server Delta (primary - 1Gbit fastest)
-    "http://109.205.176.60:8808",  // Server Gamma (secondary - 1Gbit; API port 8808)
-    "http://185.182.185.227:8080", // Server Beta (tertiary - 100Mbit)
-    "http://161.35.219.10:8082",   // Server Alpha (quaternary/testing) - port 8082
+    "https://quillon.xyz",         // Server Epsilon via q-flux (HTTPS 443, NAT/firewall-safe)
+    "http://89.149.241.126:8080",  // Server Epsilon (10Gbit supernode) — direct
 ];
 
 /// Bootstrap server with health status

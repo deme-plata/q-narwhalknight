@@ -303,6 +303,7 @@ pub mod paas_pricing; // ✅ ENABLED - Dynamic USD pricing with oracle integrati
 pub mod payment_api; // ✅ ENABLED - Stripe payment processing with async-stripe
 pub mod payment_request_api; // ✅ v9.6.1 - QR code payment requests for brick-and-mortar POS
 pub mod privacy_service_api; // ✅ ENABLED - Privacy-as-a-Service (PaaS) enterprise API
+pub mod real_mixer_settle;
 pub mod quillon_bank_api; // ✅ ENABLED - Full Quillon Bank CDP system
 pub mod security_tier_governance; // ✅ v1.0.16-beta - Community governance for VDF security tiers
 pub mod storage_api; // IPFS-RocksDB decentralized storage for database backups
@@ -928,6 +929,59 @@ impl MiningStatistics {
 
         // v3.5.4-beta: Return the calculated/effective hashrate for SSE events
         stats.last_hashrate
+    }
+
+    /// v10.11.83: Refresh a miner's reported hashrate + liveness WITHOUT recording a solution.
+    ///
+    /// Backs `POST /api/v1/mining/heartbeat`. Miners only submit solutions when they actually
+    /// find one, which at network difficulty can be far longer than the 300s active window used
+    /// by `calculate_network_hashrate()` / `active_miner_count()`. Without a keepalive, an
+    /// actively-hashing rig (e.g. a 20 MH/s GPU) drops out of "active" between blocks and vanishes
+    /// from both network power and its own personal stats. A periodic heartbeat keeps `last_update`
+    /// fresh so the miner stays counted. Unlike `update_miner_with_worker`, this does NOT increment
+    /// `total_solutions` or push a solution timestamp — it is not a solution.
+    pub fn heartbeat_miner(
+        &mut self,
+        miner_address: String,
+        hash_rate: f64, // KH/s (matches the miner's /mining/submit convention)
+        worker_id: String,
+        worker_name: Option<String>,
+    ) {
+        let now = std::time::Instant::now();
+        let key = format!("{}:{}", miner_address, worker_id);
+
+        // Same anti-bloat cap as the solution path: bound tracked miners, evict oldest.
+        const MAX_TRACKED_MINERS: usize = 500;
+        if self.active_miners.len() >= MAX_TRACKED_MINERS && !self.active_miners.contains_key(&key) {
+            if let Some(oldest_key) = self
+                .active_miners
+                .iter()
+                .min_by_key(|(_, stats)| stats.last_update)
+                .map(|(k, _)| k.clone())
+            {
+                self.active_miners.remove(&oldest_key);
+            }
+        }
+
+        let hash_rate_hs = hash_rate * 1000.0; // KH/s → H/s (same as update_miner_with_worker)
+        let stats = self.active_miners.entry(key).or_insert(MinerStats {
+            address: miner_address,
+            last_hashrate: 0.0,
+            last_update: now,
+            total_solutions: 0,
+            worker_id: worker_id.clone(),
+            worker_name: worker_name.clone(),
+            solution_timestamps: Vec::new(),
+            blocks_found: 0,
+            rewards_earned: 0,
+        });
+        if hash_rate_hs > 0.0 {
+            stats.last_hashrate = hash_rate_hs;
+        }
+        stats.last_update = now; // the keepalive: keeps this miner inside the 300s active window
+        if worker_name.is_some() {
+            stats.worker_name = worker_name;
+        }
     }
 
     /// Calculate total network hash rate from active miners

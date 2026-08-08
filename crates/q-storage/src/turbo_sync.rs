@@ -2493,6 +2493,10 @@ impl TurboSyncManager {
         info!("   Disable with Q_WARP_MULTI_PEER=0 or Q_WARP_PREFETCH=0");
         info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
+        // v10.11.85: capture the shared permanent-gap Arc BEFORE `storage` is
+        // moved into the struct below (the `storage,` field shorthand consumes it).
+        let shared_known_gaps = storage.known_gaps();
+
         Self {
             config,
             storage,
@@ -2547,8 +2551,14 @@ impl TurboSyncManager {
             // 🔒 v10.5.0: Fresh-start single-flight gate
             fresh_sync_gate: Arc::new(Mutex::new(())),
             fresh_sync_target: Arc::new(AtomicU64::new(0)),
-            // v10.9.44: Definitive gap-skip from Q_KNOWN_PERMANENT_GAPS env var
-            known_gaps: Arc::new(crate::known_gaps::KnownGaps::from_env()),
+            // v10.11.85: SHARE the storage engine's permanent-gap set (single
+            // source of truth). Runtime declarations committed here via
+            // spawn_gap_advance_handler → add_gap now mutate the SAME set that
+            // QStorage::advance_contiguous_tip and find_block_gaps read, so the
+            // contiguity walk and AUTO-REPAIR can no longer disagree with the
+            // sync layer about which holes are permanent. (Was: a private
+            // KnownGaps::from_env() that only turbo_sync could see.)
+            known_gaps: shared_known_gaps,
             // v10.9.44: Scientific sync optimizers (q-sync-optimizers crate)
             kalman_bdp: Arc::new(RwLock::new(q_sync_optimizers::KalmanBdpEstimator::new())),
             beta_scores: Arc::new(parking_lot::Mutex::new(q_sync_optimizers::BetaScoreRegistry::new())),
@@ -2610,10 +2620,15 @@ impl TurboSyncManager {
                 return;
             }
         };
+        // 2026-07-18: default true. The network currently has ONE serving peer (Epsilon,
+        // the operator-pinned bootstrap), so a fresh node can never reach the 2-reporter
+        // quorum and would wedge at the first sparse-DAG gap out of the box. Trusting the
+        // single configured bootstrap peer's gap declarations is the pragmatic default;
+        // set Q_GAP_TRUST_SINGLE_PEER=0 to require quorum once multiple peers are serving.
         let trust_single = std::env::var("Q_GAP_TRUST_SINGLE_PEER")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or(true);
         let trust_threshold = std::env::var("Q_GAP_TRUST_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -3800,9 +3815,30 @@ impl TurboSyncManager {
             std::collections::VecDeque::with_capacity(total_chunks as usize);
         let mut cursor = first_gap;
         while cursor <= last_gap {
+            // v10.11.85: consult the shared permanent-gap truth. Never enqueue a
+            // chunk that overlaps a network-wide-missing range — those fetches
+            // return 0 blocks forever (the root of the AUTO-REPAIR loop). Jump
+            // the cursor past any gap that contains it, and cap each chunk at the
+            // next gap's start so a chunk stops cleanly before permanent holes.
+            if let Some((gs, ge)) = self.known_gaps.next_gap_above(cursor.saturating_sub(1)) {
+                if cursor >= gs && cursor <= ge {
+                    cursor = ge.saturating_add(1);
+                    continue;
+                }
+                let end = (cursor + chunk_size - 1)
+                    .min(last_gap)
+                    .min(gs.saturating_sub(1));
+                chunks_queue.push_back((cursor, end));
+                cursor = end + 1;
+                continue;
+            }
             let end = (cursor + chunk_size - 1).min(last_gap);
             chunks_queue.push_back((cursor, end));
             cursor = end + 1;
+        }
+        if chunks_queue.is_empty() {
+            info!("🔧 [GAP-FILL P2P] range {}-{} is entirely permanent gap(s) — nothing to fetch", first_gap, last_gap);
+            return Ok(());
         }
 
         // Async closure that runs one chunk's request-with-retry cycle.
@@ -7257,14 +7293,38 @@ impl TurboSyncManager {
                     }
                 }
                 Some((gap_start, gap_end)) => {
-                    // Gap exists but next_block is before it (sync gap fill in
-                    // progress) — log once and stop. Don't advance.
+                    // v10.11.84: the next KNOWN gap is ahead but not adjacent — there is a
+                    // [next_block .. gap_start-1] region the contiguous tip cannot cross. The
+                    // normal scheduler requests at the DOWNLOAD frontier, not this contiguity
+                    // frontier, so this region is never re-requested and the applied tip WEDGES
+                    // here (observed: fresh single-peer node stuck at ~14.17M while the download
+                    // frontier raced to 14.8M+). Fire a bounded, targeted fill_gap_p2p for the
+                    // stuck region so the peer either SERVES the real blocks (→ verified, stored,
+                    // then advance_contiguous_tip walks them next tick) or DECLARES a permanent
+                    // gap (→ known_gaps, auto-advance skips it next tick).
+                    //
+                    // SAFETY: no state/height is skipped here. Resolution goes entirely through
+                    // the existing verified-block-commit path or the quorum/trust gap-accept path
+                    // — this only *triggers* a network request for the stuck range, it never
+                    // advances the tip past unconfirmed heights.
+                    let dist = gap_start.saturating_sub(next_block);
+                    // Bound the nudge to a single ~chunk so a stuck tick stays quick.
+                    let stuck_to = gap_start
+                        .saturating_sub(1)
+                        .min(next_block.saturating_add(2_000));
                     debug!(
-                        "⏩ [KNOWN-GAP v10.9.46] Next gap {}..={} ahead but not yet adjacent \
-                         (contiguous={}, next_block={}, distance={}). No advance.",
-                        gap_start, gap_end, working_height, next_block,
-                        gap_start.saturating_sub(next_block)
+                        "⏩ [KNOWN-GAP v10.11.84] Next gap {}..={} ahead but not adjacent \
+                         (contiguous={}, next_block={}, distance={}). Nudging contiguity frontier \
+                         via fill_gap_p2p({}..={}).",
+                        gap_start, gap_end, working_height, next_block, dist, next_block, stuck_to
                     );
+                    if let Err(e) = self.fill_gap_p2p(next_block, stuck_to).await {
+                        debug!(
+                            "⏩ [KNOWN-GAP v10.11.84] fill_gap_p2p({}..={}) failed: {} \
+                             — will retry next tick",
+                            next_block, stuck_to, e
+                        );
+                    }
                     break;
                 }
                 None => break, // No more gaps ahead.
