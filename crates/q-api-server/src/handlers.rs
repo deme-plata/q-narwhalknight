@@ -13316,6 +13316,24 @@ pub async fn execute_swap(
                 ))));
             }
 
+            // v10.11.95: ABSOLUTE sanity ceiling on each reserve, independent of the ratio.
+            // A reserve sitting near u128::MAX is not liquidity — it is the fingerprint of a
+            // saturating `as u128` cast (measured 2026-08-09 on pool-qug-qugusd-bootstrap:
+            // reserve1 was at 99.999999999652% of u128::MAX). The ratio guard above misses
+            // this case entirely, because a corrupt reserve paired with a corrupt reserve can
+            // still yield an innocent-looking ratio (~1186:1 there). Catch it before any AMM
+            // arithmetic so the error names the real cause instead of "overflow".
+            const RESERVE_SANITY_CEILING: u128 = u128::MAX / 1000;
+            if p.reserve0 > RESERVE_SANITY_CEILING || p.reserve1 > RESERVE_SANITY_CEILING {
+                warn!(
+                    "🚨 [SWAP v10.11.95] CORRUPT RESERVE in pool {}: reserve0={} reserve1={} — at/near u128::MAX (saturating-cast fingerprint). Rejecting swap.",
+                    id, p.reserve0, p.reserve1
+                );
+                return Ok(Json(ApiResponse::error(
+                    "This pool's reserves are corrupted (one side is pinned at the maximum representable value), so no swap can be priced against it. This is a known issue — retrying will not help.".to_string(),
+                )));
+            }
+
             let (res_in, res_out, amt_out) = if !reversed {
                 // Forward: from_token = token0, to_token = token1
                 let dec_in = p.token0_decimals;
@@ -13329,9 +13347,26 @@ pub async fn execute_swap(
                 // v4.0.11: All values are in 24-decimal format (frontend sends 24-dec, reserves are 24-dec)
                 let denominator = p.reserve0.checked_add(amount_in_with_fee);
 
-                if denominator.is_none() || denominator == Some(0) {
-                    warn!("Denominator overflow or zero in swap calculation");
-                    return Ok(Json(ApiResponse::error("Pool calculation overflow".to_string())));
+                // v10.11.95: split the two failures — they had shared one message, so an
+                // EMPTY pool read as an "overflow" and vice versa, which sent the wBTC
+                // investigation down the wrong path.
+                match denominator {
+                    None => {
+                        warn!(
+                            "🚨 [SWAP v10.11.95] Reserve overflow in pool {}: reserve0={} + amount_in={} exceeds u128",
+                            id, p.reserve0, amount_in_with_fee
+                        );
+                        return Ok(Json(ApiResponse::error(
+                            "This pool's reserves are corrupted — the swap cannot be priced. This is a known issue; retrying will not help.".to_string(),
+                        )));
+                    }
+                    Some(0) => {
+                        warn!("🚨 [SWAP v10.11.95] Empty pool {}: reserve0 + amount_in == 0", id);
+                        return Ok(Json(ApiResponse::error(
+                            "This pool is empty — there is no liquidity to swap against.".to_string(),
+                        )));
+                    }
+                    Some(_) => {}
                 }
 
                 // v8.8.5: Use overflow-safe mul_div_u128 for AMM calculation.
@@ -13365,9 +13400,25 @@ pub async fn execute_swap(
                 // v4.0.11: All values are in 24-decimal format (frontend sends 24-dec, reserves are 24-dec)
                 let denominator = p.reserve1.checked_add(amount_in_with_fee);
 
-                if denominator.is_none() || denominator == Some(0) {
-                    warn!("Denominator overflow or zero in swap calculation (reversed)");
-                    return Ok(Json(ApiResponse::error("Pool calculation overflow".to_string())));
+                // v10.11.95: split the two failures (reversed direction — this is the one
+                // QUGUSD→QUG hits).
+                match denominator {
+                    None => {
+                        warn!(
+                            "🚨 [SWAP v10.11.95] Reserve overflow in pool {} (reversed): reserve1={} + amount_in={} exceeds u128",
+                            id, p.reserve1, amount_in_with_fee
+                        );
+                        return Ok(Json(ApiResponse::error(
+                            "This pool's reserves are corrupted — the swap cannot be priced. This is a known issue; retrying will not help.".to_string(),
+                        )));
+                    }
+                    Some(0) => {
+                        warn!("🚨 [SWAP v10.11.95] Empty pool {} (reversed): reserve1 + amount_in == 0", id);
+                        return Ok(Json(ApiResponse::error(
+                            "This pool is empty — there is no liquidity to swap against.".to_string(),
+                        )));
+                    }
+                    Some(_) => {}
                 }
 
                 // v8.8.5: Use overflow-safe mul_div_u128 for AMM calculation (reversed).

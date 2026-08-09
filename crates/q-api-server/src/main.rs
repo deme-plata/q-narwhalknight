@@ -4577,8 +4577,67 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
             });
             match q_bitcoin_bridge::deposit_bridge::DepositBridge::new(bridge_config, dep_event_tx).await {
                 Ok(bridge) => {
-                    state.deposit_bridge = Some(Arc::new(bridge));
-                    info!("₿ Bitcoin deposit bridge initialized (Delta RPC: {})", btc_rpc_url);
+                    let bridge = Arc::new(bridge);
+
+                    // v10.11.95: PERSIST BTC DEPOSITS. The bridge kept
+                    // pending_deposits/addr_to_deposit in memory ONLY. The save/load
+                    // hooks existed (`get_all_deposits` is even documented "call
+                    // periodically to save to RocksDB") but NOTHING called them, so a
+                    // restart erased the address→QNK-wallet mapping: real BTC arriving
+                    // at a previously issued deposit address had nothing left telling
+                    // the node whom to credit. Coins were never at risk (the qug-bridge
+                    // wallet owns the keys — verified ismine:true) but crediting was.
+                    //
+                    // Restore first so an in-flight deposit survives this boot.
+                    match state
+                        .storage_engine
+                        .db_get(q_storage::CF_MANIFEST, b"btc_deposits_v1")
+                        .await
+                    {
+                        Ok(Some(bytes)) => {
+                            match serde_json::from_slice::<Vec<q_bitcoin_bridge::deposit_bridge::DepositAddress>>(&bytes) {
+                                Ok(deposits) => bridge.load_pending_deposits(deposits).await,
+                                Err(e) => warn!("₿ [DEPOSIT PERSIST] stored deposits unreadable ({}) — starting empty, funds unaffected", e),
+                            }
+                        }
+                        Ok(None) => info!("₿ [DEPOSIT PERSIST] no stored deposits yet (first run)"),
+                        Err(e) => warn!("₿ [DEPOSIT PERSIST] load failed (non-fatal): {}", e),
+                    }
+
+                    // Snapshot periodically. Deliberately a standalone task: bookkeeping
+                    // must never block or fail deposit detection/minting. Whole-set write
+                    // (deposit counts are small) so it cannot half-persist a mapping.
+                    {
+                        let bridge_save = bridge.clone();
+                        let storage_save = state.storage_engine.clone();
+                        tokio::spawn(async move {
+                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+                            let mut last_len = usize::MAX;
+                            loop {
+                                ticker.tick().await;
+                                let deposits = bridge_save.get_all_deposits().await;
+                                // Always rewrite when the set changed; also refresh
+                                // periodically so status transitions are captured.
+                                match serde_json::to_vec(&deposits) {
+                                    Ok(bytes) => {
+                                        if let Err(e) = storage_save
+                                            .db_put(q_storage::CF_MANIFEST, b"btc_deposits_v1", &bytes)
+                                            .await
+                                        {
+                                            warn!("₿ [DEPOSIT PERSIST] save failed (non-fatal): {}", e);
+                                        } else if deposits.len() != last_len {
+                                            last_len = deposits.len();
+                                            info!("₿ [DEPOSIT PERSIST] {} deposit(s) persisted", last_len);
+                                        }
+                                    }
+                                    Err(e) => warn!("₿ [DEPOSIT PERSIST] serialize failed: {}", e),
+                                }
+                            }
+                        });
+                    }
+
+                    state.deposit_bridge = Some(bridge);
+                    info!("₿ Bitcoin deposit bridge initialized + persistence wired (RPC: {})", btc_rpc_url);
                 }
                 Err(e) => {
                     warn!("₿ Bitcoin deposit bridge init failed: {} (deposit address generation disabled)", e);
