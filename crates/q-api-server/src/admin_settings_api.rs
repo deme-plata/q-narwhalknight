@@ -41,7 +41,9 @@ fn extract_wallet(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
+// v10.11.94: pub(crate) so quillon_bank_api's admin portfolio endpoint reuses
+// the exact same admin gate as the Node Admin panel.
+pub(crate) async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
     // 1) Classic check: X-Wallet-Auth or raw hex Bearer matches admin_wallet or FOUNDER_WALLET
     if let Some(wallet) = extract_wallet(headers) {
         if wallet == state.admin_wallet {

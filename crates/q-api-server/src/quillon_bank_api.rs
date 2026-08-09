@@ -52,6 +52,8 @@ pub fn create_public_routes() -> Router<Arc<AppState>> {
         .route("/lending/apply", post(apply_loan))
         .route("/lending/payback", post(payback_loan))
         .route("/lending/at-risk", get(get_loans_at_risk))
+        // v10.11.94 BANK BOOK: lender portfolio; handler self-gates via is_node_admin
+        .route("/admin/portfolio", get(get_admin_portfolio))
         .route("/accounts", get(list_accounts))
         .route("/accounts/pending", get(get_pending_accounts))
         .route("/treasury/reserves", get(get_reserves_status))
@@ -2705,4 +2707,204 @@ pub async fn broadcast_bank_email(
 
     info!("📧 Bank broadcast complete: {} emails sent to {} wallets", sent_count, wallets.len());
     Ok(Json(ApiResponse::success(format!("Broadcast sent to {} email users", sent_count))))
+}
+
+// ============================================================================
+// v10.11.94: BANK BOOK — lender/admin portfolio view
+// ============================================================================
+// Viktor's ask (2026-08-09): the bank UI only ever answered the BORROWER's
+// question ("do I have a loan?"). The bank's operator needs the LENDER's
+// question answered: who owes what, is anyone late, is collateral healthy,
+// and what does the treasury hold — as one derived portfolio, not a raw
+// application dump. This endpoint derives per-loan repayment state from the
+// fields that already exist on LoanApplication (amount_paid, monthly_payment,
+// interest_rate, term_months, created_at) — nothing here writes any state.
+//
+// Admin-gated with the same is_node_admin check the Node Admin panel uses,
+// so it works for Q_ADMIN_WALLET or FOUNDER_WALLET (needs v10.11.93's
+// env-first admin_wallet fix to be useful in prod).
+
+/// Average Gregorian month in seconds (365.2425 d / 12). Used for the derived
+/// repayment schedule; loans store no explicit due dates, only created_at +
+/// term_months, so schedule position is derived from elapsed calendar time.
+const AVG_MONTH_SECS: i64 = 2_629_746;
+
+async fn get_admin_portfolio(
+    headers: axum::http::HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    if !crate::admin_settings_api::is_node_admin(&headers, &state).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let now = Utc::now().timestamp();
+    let qug_price: f64 = state.collateral_vault.read().await.qug_price_usd;
+    const LIQUIDATION_THRESHOLD_PCT: f64 = 120.0;
+    let safe = |v: f64| if v.is_finite() { v } else { 0.0 };
+
+    let mut loans_out: Vec<serde_json::Value> = Vec::new();
+    let mut total_lent = 0.0f64;
+    let mut total_outstanding = 0.0f64;
+    let mut total_repaid = 0.0f64;
+    let mut realized_interest = 0.0f64;
+    let mut collateral_locked_qug = 0.0f64;
+    let mut late_count = 0u32;
+    let mut at_risk_count = 0u32;
+    let mut status_counts: std::collections::BTreeMap<String, u32> = Default::default();
+
+    {
+        let pending_loans = state.pending_loan_applications.read().await;
+        for loan in pending_loans.values() {
+            *status_counts.entry(loan.status.clone()).or_insert(0) += 1;
+
+            let principal = loan.loan_amount as f64 / 1e24;
+            // Same formula payback_loan uses: rate stored as percent, simple
+            // interest over the full term.
+            let rate = loan.interest_rate / 100.0;
+            let total_interest = principal * rate * (loan.term_months as f64 / 12.0);
+            let total_owed = principal + total_interest;
+            let amount_paid = loan.amount_paid as f64 / 1e24;
+            let outstanding = (total_owed - amount_paid).max(0.0);
+            // Proportional split of what's been paid so far into principal vs
+            // interest (payments aren't itemized, so this is the derived view).
+            let paid_fraction = if total_owed > 0.0 { (amount_paid / total_owed).min(1.0) } else { 0.0 };
+            let principal_repaid = principal * paid_fraction;
+            let interest_realized = total_interest * paid_fraction;
+
+            let is_active = loan.status == "approved";
+
+            // ── Derived repayment schedule (approved loans only) ──
+            let mut is_late = false;
+            let mut months_behind = 0u32;
+            let mut next_due_ts: Option<i64> = None;
+            let mut next_due_amount: Option<f64> = None;
+            let mut months_due = 0u32;
+            if is_active && loan.monthly_payment > 0.0 {
+                let elapsed_months =
+                    (((now - loan.created_at).max(0)) / AVG_MONTH_SECS) as u32;
+                months_due = elapsed_months.min(loan.term_months);
+                let expected_paid = (months_due as f64) * loan.monthly_payment;
+                // 0.5% of one payment as tolerance against float dust
+                if amount_paid + loan.monthly_payment * 0.005 < expected_paid {
+                    is_late = true;
+                    months_behind =
+                        ((expected_paid - amount_paid) / loan.monthly_payment).ceil() as u32;
+                    late_count += 1;
+                }
+                if outstanding > 1e-9 {
+                    let months_covered = (amount_paid / loan.monthly_payment).floor() as i64;
+                    let due_idx = (months_covered + 1).min(loan.term_months as i64);
+                    next_due_ts = Some(loan.created_at + due_idx * AVG_MONTH_SECS);
+                    next_due_amount = Some(loan.monthly_payment.min(outstanding));
+                }
+            }
+
+            // ── Collateral health (vs OUTSTANDING debt, not original principal:
+            // a half-repaid loan is twice as covered by the same collateral) ──
+            let collateral_value_usd = loan.collateral_amount * qug_price;
+            let coverage_pct = if is_active && outstanding > 0.0 {
+                (collateral_value_usd / outstanding) * 100.0
+            } else {
+                f64::INFINITY
+            };
+            let at_risk = is_active && outstanding > 0.0 && coverage_pct < LIQUIDATION_THRESHOLD_PCT;
+            if at_risk {
+                at_risk_count += 1;
+            }
+
+            if loan.status == "approved" || loan.status == "paid" || loan.status == "liquidated" {
+                total_lent += principal;
+                total_repaid += amount_paid;
+                realized_interest += interest_realized;
+            }
+            if is_active {
+                total_outstanding += outstanding;
+                collateral_locked_qug += loan.collateral_amount;
+            }
+
+            loans_out.push(serde_json::json!({
+                "loan_id": loan.loan_id,
+                "borrower_address": loan.borrower_address,
+                "status": loan.status,
+                "created_at": loan.created_at,
+                "principal_qugusd": safe(principal),
+                "interest_rate_apr_pct": safe(loan.interest_rate),
+                "term_months": loan.term_months,
+                "monthly_payment_qugusd": safe(loan.monthly_payment),
+                "total_interest_qugusd": safe(total_interest),
+                "total_owed_qugusd": safe(total_owed),
+                "amount_paid_qugusd": safe(amount_paid),
+                "outstanding_qugusd": safe(outstanding),
+                "principal_repaid_qugusd": safe(principal_repaid),
+                "interest_realized_qugusd": safe(interest_realized),
+                "months_due": months_due,
+                "is_late": is_late,
+                "months_behind": months_behind,
+                "next_payment_due_ts": next_due_ts,
+                "next_payment_amount_qugusd": next_due_amount.map(safe),
+                "collateral_amount": safe(loan.collateral_amount),
+                "collateral_type": loan.collateral_type,
+                "collateral_value_usd": safe(collateral_value_usd),
+                "coverage_ratio_pct": if coverage_pct.is_finite() { serde_json::json!(coverage_pct) } else { serde_json::Value::Null },
+                "at_risk": at_risk,
+            }));
+        }
+    }
+
+    // Newest first — the book reads like a ledger.
+    loans_out.sort_by(|a, b| {
+        b.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0)
+            .cmp(&a.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0))
+    });
+
+    // ── Treasury / dev-fee position (same screen, per the build request) ──
+    let founder_hex = crate::aegis_auth_middleware::FOUNDER_WALLET;
+    let mut founder_qug = 0.0f64;
+    let mut founder_qugusd = 0.0f64;
+    if let Ok(bytes) = hex::decode(founder_hex) {
+        if bytes.len() == 32 {
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&bytes);
+            founder_qug = state
+                .wallet_balances
+                .read()
+                .await
+                .get(&addr)
+                .copied()
+                .unwrap_or(0) as f64
+                / 1e24;
+            founder_qugusd = state
+                .token_balances
+                .read()
+                .await
+                .get(&(addr, q_types::QUGUSD_TOKEN_ADDRESS))
+                .copied()
+                .unwrap_or(0) as f64
+                / 1e24;
+        }
+    }
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "generated_at": now,
+        "qug_price_usd": safe(qug_price),
+        "liquidation_threshold_pct": LIQUIDATION_THRESHOLD_PCT,
+        "loans": loans_out,
+        "totals": {
+            "status_counts": status_counts,
+            "total_lent_qugusd": safe(total_lent),
+            "total_outstanding_qugusd": safe(total_outstanding),
+            "total_repaid_qugusd": safe(total_repaid),
+            "realized_interest_qugusd": safe(realized_interest),
+            "collateral_locked_qug": safe(collateral_locked_qug),
+            "collateral_locked_value_usd": safe(collateral_locked_qug * qug_price),
+            "late_count": late_count,
+            "at_risk_count": at_risk_count,
+        },
+        "treasury": {
+            "founder_wallet": format!("qnk{}", founder_hex),
+            "qug_balance": safe(founder_qug),
+            "qugusd_balance": safe(founder_qugusd),
+            "dev_fee_percent": 1.0,
+        },
+    }))))
 }
