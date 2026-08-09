@@ -1341,6 +1341,13 @@ pub struct UnifiedNetworkManager {
     discovered_peers: Arc<RwLock<HashSet<PeerId>>>,
     /// Peer addresses discovered (for connection manager bridge)
     peer_addresses: Arc<RwLock<HashMap<PeerId, Vec<Multiaddr>>>>,
+    /// v10.11.91: When a RequestBlockRangeDirect target isn't connected we start
+    /// a dial and answer ClientThrottle("dial in progress"). This records WHEN
+    /// that dial state began per peer. If it persists past DIAL_WEDGE_SECS the
+    /// dial is considered wedged (observed: server restart mid-sync → endless
+    /// Established/Closed handshake flap → every chunk throttle-spins forever)
+    /// and the request falls back to any connected peer instead.
+    dial_started: HashMap<PeerId, std::time::Instant>,
     /// Bootstrap peers that should be automatically reconnected on disconnect (v0.6.8-beta)
     bootstrap_peers: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
     /// Local peer ID
@@ -2890,6 +2897,7 @@ impl UnifiedNetworkManager {
             swarm,
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             peer_addresses: Arc::new(RwLock::new(all_peer_addresses.clone())),
+            dial_started: HashMap::new(), // v10.11.91 dial-wedge detection
             bootstrap_peers: Arc::new(RwLock::new(bootstrap_peer_map)), // v0.6.8-beta: Auto-reconnection tracking
             local_peer_id,
             peer_tx: None, // Set via set_peer_channel() after construction
@@ -6789,6 +6797,7 @@ impl UnifiedNetworkManager {
                             // without a known address! This was causing 75% chunk failures.
                             if self.swarm.is_connected(&pid) {
                                 info!("✅ [PEER CHECK] Specified peer {} is connected", pid);
+                                self.dial_started.remove(&pid); // v10.11.91: dial resolved
                                 Some(pid)
                             } else {
                                 // v2.1.7: Check if we have an address cached for this peer
@@ -6799,6 +6808,32 @@ impl UnifiedNetworkManager {
                                 };
 
                                 if has_address {
+                                    // v10.11.91: DIAL-WEDGE BREAKER. A dial that has been
+                                    // "in progress" for 30s+ is not going to connect (a server
+                                    // restart mid-sync leaves the handshake flapping
+                                    // Established→Closed indefinitely; both 2026-08-08 test
+                                    // nodes froze this way with 1,700+ throttled requests).
+                                    // Stop pinning the dead dial: clear its state so a future
+                                    // attempt re-dials fresh, and fall through to the
+                                    // round-robin fallback over peers that ARE connected —
+                                    // request-response works fine over inbound connections.
+                                    const DIAL_WEDGE_SECS: u64 = 30;
+                                    let wedged = self
+                                        .dial_started
+                                        .get(&pid)
+                                        .map(|t| t.elapsed().as_secs() >= DIAL_WEDGE_SECS)
+                                        .unwrap_or(false);
+                                    if wedged {
+                                        warn!(
+                                            "🧯 [DIAL-WEDGE] Dial to {} stuck 'in progress' for {}s+ — \
+                                             abandoning it, serving via round-robin over {} connected peer(s)",
+                                            pid, DIAL_WEDGE_SECS,
+                                            self.swarm.connected_peers().count()
+                                        );
+                                        self.dial_started.remove(&pid);
+                                        None // trigger the existing connected-peers fallback below
+                                    } else {
+                                    self.dial_started.entry(pid.clone()).or_insert_with(std::time::Instant::now);
                                     // v10.11.33: request-response does not wait for a fresh dial.
                                     // Start the dial, then ask TurboSync to retry without consuming
                                     // its chunk retry budget. Returning Some(pid) here fires
@@ -6827,6 +6862,7 @@ impl UnifiedNetworkManager {
                                         CLIENT_THROTTLE_MARKER, pid
                                     )));
                                     return;
+                                    } // v10.11.91 close !wedged arm
                                 } else {
                                     // 🚨 v2.1.7: FAIL FAST - no point trying to dial without address
                                     error!("❌ [PEER CHECK] Peer {} is NOT connected and has NO cached address!", pid);

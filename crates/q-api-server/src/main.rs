@@ -27348,9 +27348,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     // Compute sliding-window blocks/sec from atomic height (independent of
                     // update_tui_metrics, which uses cumulative-from-process-start averaging).
                     let now_inst = std::time::Instant::now();
-                    let cur_height = app_state_clone
+                    // v10.11.92: sample the SAME height the progress bar shows.
+                    // update_tui_metrics displays max(current_height_atomic,
+                    // storage contiguous), but this sampler used to read only the
+                    // atomic — so whenever progress came from the storage side the
+                    // window saw zero delta and the TUI printed "-- blk/s" while the
+                    // height counter visibly raced (observed 14M→15M with "--").
+                    let atomic_h = app_state_clone
                         .current_height_atomic
                         .load(std::sync::atomic::Ordering::Relaxed);
+                    let storage_h = app_state_clone
+                        .storage_engine
+                        .get_highest_contiguous_block()
+                        .await
+                        .unwrap_or(0);
+                    let cur_height = atomic_h.max(storage_h);
                     block_samples.push_back((now_inst, cur_height));
                     while block_samples.len() > 1
                         && now_inst.duration_since(block_samples.front().unwrap().0).as_secs_f32() > 10.0

@@ -7180,11 +7180,47 @@ impl TurboSyncManager {
         // take max(local_height, synced_through) to honor whichever advanced further.
         let synced_through = self.storage.get_synced_through_height();
         if synced_through > local_height {
-            info!(
-                "⏭️ [SYNCED-THROUGH v10.9.55] Resuming from {} (contiguous={}, persisted synced_through={})",
-                synced_through, local_height, synced_through
-            );
-            local_height = synced_through;
+            // v10.11.92: BACKFILL AUDIT before honoring the frontier pointer.
+            //
+            // synced_through is "highest range we REQUESTED", which legitimately runs
+            // ahead of contiguous on a sparse chain. But if the request stream was
+            // interrupted (peer restart, dial wedge, crash) the blocks in between were
+            // never applied, and resuming AT the frontier strands that region forever:
+            // the scheduler only asks for heights above it, and every landing batch is
+            // rejected by the 10k gap-safety cap ("[GAP SKIP REFUSED] Gap at start of
+            // batch is 14,008,735 heights"). Observed 2026-08-08: applied frozen at
+            // 1,561,000 while the pointer sat at 15.6M, permanently.
+            //
+            // Discriminator: is the block immediately above contiguous actually present?
+            //  - present  → genuine sparse/already-applied region, trust the frontier
+            //               (unchanged v10.9.55 behaviour).
+            //  - MISSING  → a real hole. Resume from contiguous so it gets refetched.
+            // Same signal the v10.11.40 BACKFILL-BEFORE-CHASE endgame guard uses.
+            let contiguous_plus_one_present = self
+                .storage
+                .get_qblock_by_height(local_height + 1)
+                .await
+                .map(|b| b.is_some())
+                .unwrap_or(false);
+
+            if contiguous_plus_one_present {
+                info!(
+                    "⏭️ [SYNCED-THROUGH v10.9.55] Resuming from {} (contiguous={}, persisted synced_through={})",
+                    synced_through, local_height, synced_through
+                );
+                local_height = synced_through;
+            } else {
+                warn!(
+                    "🩹 [BACKFILL AUDIT v10.11.92] Frontier pointer {} is {} heights above applied \
+                     contiguous {}, and block {} is MISSING — the interrupted region was never \
+                     applied. Resuming from contiguous to refetch it instead of stranding it.",
+                    synced_through,
+                    synced_through.saturating_sub(local_height),
+                    local_height,
+                    local_height + 1
+                );
+                // local_height stays at the applied contiguous tip.
+            }
         }
 
         if local_height >= target_height {
