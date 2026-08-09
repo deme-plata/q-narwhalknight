@@ -536,6 +536,65 @@ pub struct BalanceRootIntegrity {
 /// **Cost:** one full wallet-table load + one sort + 1 BLAKE3 over N
 /// entries for v1. v2 SMT root is a cached read (free). On a 12K-wallet
 /// table, total compute is well under 100ms.
+/// v10.11.93 — read the balance-root journal (height → root history).
+///
+/// The plain `/integrity/balance-root` endpoint answers for CURRENT state, which
+/// two nodes at different heights can never match. This one returns recorded
+/// (height, root) pairs so a comparison can be made at a COMMON height — the
+/// only comparison that actually proves agreement or divergence.
+///
+/// Read-only. `?height=N` returns that exact entry; otherwise the newest
+/// `?limit=` entries (default 20, max 500), newest first.
+pub async fn balance_root_journal(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    if let Some(h) = params.get("height").and_then(|v| v.trim().parse::<u64>().ok()) {
+        return match state.storage_engine.get_balance_root_snapshot(h).await {
+            Ok(Some(entry)) => {
+                let v: serde_json::Value = serde_json::from_str(&entry)
+                    .unwrap_or(serde_json::Value::String(entry));
+                Ok(Json(ApiResponse::success(serde_json::json!({
+                    "found": true, "entry": v
+                }))))
+            }
+            Ok(None) => Ok(Json(ApiResponse::success(serde_json::json!({
+                "found": false,
+                "height": h,
+                "hint": "no journal entry at that exact height — call without ?height to list recorded heights"
+            })))),
+            Err(e) => {
+                warn!("balance_root_journal read failed: {}", e);
+                Err(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        };
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(20)
+        .min(500);
+
+    match state.storage_engine.list_balance_root_snapshots(limit).await {
+        Ok(entries) => {
+            let parsed: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| serde_json::from_str(e).unwrap_or(serde_json::Value::String(e.clone())))
+                .collect();
+            Ok(Json(ApiResponse::success(serde_json::json!({
+                "count": parsed.len(),
+                "entries": parsed,
+                "note": "compare the SAME height across nodes; differing heights are expected to differ"
+            }))))
+        }
+        Err(e) => {
+            warn!("balance_root_journal list failed: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub async fn balance_root_integrity(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse<BalanceRootIntegrity>>, StatusCode> {

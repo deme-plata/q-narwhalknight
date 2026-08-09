@@ -214,11 +214,51 @@ impl Config {
         Ok(())
     }
 
+    /// v10.11.93: read a numeric env var tolerantly and fail LOUDLY-but-usefully.
+    ///
+    /// Two problems this solves, both real:
+    ///  1. Whitespace killed the node. Shell and batch scripts leak stray spaces
+    ///     into values with no way for the operator to see it — the Windows
+    ///     launcher's port loop wrote `set P2P_PORT=9001 ` (trailing space before
+    ///     the closing paren), so Q_P2P_PORT was "9001 " and startup died. A
+    ///     value the operator obviously meant as a number should be read as one.
+    ///  2. The error named nothing. Failure was the bare `invalid digit found in
+    ///     string` from ParseIntError with no variable, no value, no hint — the
+    ///     operator cannot act on that. Now the message names the variable and
+    ///     shows the offending value in quotes so the stray character is visible.
+    ///
+    /// Empty/whitespace-only is treated as unset (the var is skipped) rather than
+    /// a hard error — `set VAR=` in a script means "not configured".
+    fn parse_env_num<T>(var: &str) -> anyhow::Result<Option<T>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        match env::var(var) {
+            Err(_) => Ok(None),
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Ok(None);
+                }
+                trimmed.parse::<T>().map(Some).map_err(|e| {
+                    anyhow::anyhow!(
+                        "environment variable {}=\"{}\" is not a valid number ({}). \
+                         Check for stray spaces or quotes around the value.",
+                        var,
+                        raw,
+                        e
+                    )
+                })
+            }
+        }
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         let mut config = Self::default();
 
-        if let Ok(port) = env::var("Q_API_PORT") {
-            config.port = port.parse()?;
+        if let Some(port) = Self::parse_env_num::<u16>("Q_API_PORT")? {
+            config.port = port;
         }
 
         if let Ok(host) = env::var("Q_API_HOST") {
@@ -226,11 +266,11 @@ impl Config {
         }
 
         if let Ok(is_validator) = env::var("Q_IS_VALIDATOR") {
-            config.is_validator = is_validator.parse().unwrap_or(false);
+            config.is_validator = is_validator.trim().parse().unwrap_or(false);
         }
 
-        if let Ok(p2p_port) = env::var("Q_P2P_PORT") {
-            config.p2p_port = p2p_port.parse()?;
+        if let Some(p2p_port) = Self::parse_env_num::<u16>("Q_P2P_PORT")? {
+            config.p2p_port = p2p_port;
         }
 
         // Bootstrap peer discovery - automatic and manual

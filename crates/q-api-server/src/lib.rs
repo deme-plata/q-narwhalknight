@@ -2905,7 +2905,15 @@ impl AppState {
             di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: test dummy
-            admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
+            // v10.11.93: env-first admin wallet. Q_ADMIN_WALLET was silently ignored
+            // (only the --admin-wallet CLI flag reached AppState), so prod ran with the
+            // founder default and /admin/is-admin answered false for the operator —
+            // the Node Admin panel opened to nothing. Env now wins when set.
+            admin_wallet: std::env::var("Q_ADMIN_WALLET")
+                .ok()
+                .map(|w| w.trim().trim_start_matches("qnk").trim_start_matches("qug").to_string())
+                .filter(|w| !w.is_empty())
+                .unwrap_or_else(|| crate::aegis_auth_middleware::FOUNDER_WALLET.to_string()),
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4307,7 +4315,12 @@ impl AppState {
             di_ema: Arc::new(std::sync::atomic::AtomicU64::new(0)), // v9.0.6: DI EMA smoothing
             node_signing_key: Arc::new(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)), // 💱 v0.6.1-beta: DEX pool signing key (will be replaced in main.rs)
             node_cypher: Arc::new(q_eternal_cypher::NodeCypher::from_ed25519_key(ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng))), // v7.2.12: placeholder, replaced in main.rs
-            admin_wallet: crate::aegis_auth_middleware::FOUNDER_WALLET.to_string(),
+            // v10.11.93: env-first (see the first construction site for rationale).
+            admin_wallet: std::env::var("Q_ADMIN_WALLET")
+                .ok()
+                .map(|w| w.trim().trim_start_matches("qnk").trim_start_matches("qug").to_string())
+                .filter(|w| !w.is_empty())
+                .unwrap_or_else(|| crate::aegis_auth_middleware::FOUNDER_WALLET.to_string()),
             stripe_client: crate::payment_api::init_stripe_client().ok(),
             p2p_bytes_in: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             p2p_bytes_out: Arc::new(std::sync::atomic::AtomicU64::new(0)),

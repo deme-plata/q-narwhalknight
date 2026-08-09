@@ -5097,6 +5097,75 @@ impl QStorage {
         Ok((hash, wallet_count, total_supply))
     }
 
+    /// v10.11.93 — BALANCE ROOT JOURNAL (append-only, derived, never authoritative).
+    ///
+    /// WHY THIS EXISTS. `compute_balance_state_hash()` hashes the balance table as
+    /// it is RIGHT NOW. Two honest nodes at different heights therefore always
+    /// produce different roots, so comparing them proves nothing — "diverged" and
+    /// "different height" are indistinguishable. Nothing anywhere persisted a root
+    /// against the height it described, so cross-node integrity could not be
+    /// checked at all (measured 2026-08-09: a fresh node and prod both answered
+    /// the integrity endpoint, and the answers were incomparable by construction).
+    ///
+    /// This records (height → root, wallet_count, total_supply) so any two nodes
+    /// can later compare at a COMMON height, which is a real divergence test.
+    ///
+    /// SAFETY — this must never endanger an authoritative node's state:
+    ///  * It only ever WRITES new `balance_root_journal:` keys in CF_MANIFEST.
+    ///    Wallet balances are read, never written. There is no code path here
+    ///    that can lower, raise, or delete a balance.
+    ///  * It is derived data. Deleting the whole journal loses history, not money.
+    ///  * It is NOT consensus. No header commits to it, no block is validated
+    ///    against it, no peer can make a node act on it. It is evidence for
+    ///    operators, not a gate.
+    ///  * Callers must treat failure as non-fatal (log and continue) — a node
+    ///    must never stop producing or applying blocks because bookkeeping failed.
+    ///
+    /// Key is zero-padded so lexicographic order == numeric order for range scans.
+    pub async fn record_balance_root_snapshot(&self, height: u64) -> Result<[u8; 32]> {
+        let (root, wallet_count, total_supply) = self.compute_balance_state_hash().await?;
+        let key = format!("balance_root_journal:{:020}", height);
+        // Compact, self-describing, greppable — this is operator evidence.
+        let value = format!(
+            "{{\"height\":{},\"root_v1\":\"{}\",\"wallet_count\":{},\"total_supply\":\"{}\"}}",
+            height,
+            hex::encode(root),
+            wallet_count,
+            total_supply
+        );
+        self.hot_db
+            .put(CF_MANIFEST, key.as_bytes(), value.as_bytes())
+            .await?;
+        Ok(root)
+    }
+
+    /// Read one journal entry (raw JSON) for an exact height, if recorded.
+    pub async fn get_balance_root_snapshot(&self, height: u64) -> Result<Option<String>> {
+        let key = format!("balance_root_journal:{:020}", height);
+        Ok(self
+            .hot_db
+            .get(CF_MANIFEST, key.as_bytes())
+            .await?
+            .and_then(|v| String::from_utf8(v).ok()))
+    }
+
+    /// List recorded journal entries, newest first, capped. Used by the integrity
+    /// API so an operator (or the cross-node diff tool) can pick common heights.
+    pub async fn list_balance_root_snapshots(&self, limit: usize) -> Result<Vec<String>> {
+        let prefix = b"balance_root_journal:";
+        let mut entries: Vec<(Vec<u8>, String)> = self
+            .hot_db
+            .scan_prefix(CF_MANIFEST, prefix)
+            .await?
+            .into_iter()
+            .filter_map(|(k, v)| String::from_utf8(v).ok().map(|s| (k, s)))
+            .collect();
+        // Keys are zero-padded → lexicographic sort is numeric order.
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.truncate(limit);
+        Ok(entries.into_iter().map(|(_, v)| v).collect())
+    }
+
     /// Compute the canonical balance root for inclusion in block headers.
     ///
     /// Uses Blake3 with a domain separator and big-endian balance encoding per the

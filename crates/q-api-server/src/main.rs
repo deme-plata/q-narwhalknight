@@ -23795,6 +23795,74 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // All block data must be preserved. If pruning is ever needed,
     // it must be explicitly enabled via Q_PRUNING_MODE=adaptive env var.
     // ========================================
+    // v10.11.93: BALANCE ROOT JOURNAL RECORDER.
+    //
+    // Records (height → balance root) every Q_BALANCE_ROOT_JOURNAL_INTERVAL_BLOCKS
+    // so two nodes can later be compared at a COMMON height. Without height-stamped
+    // roots, cross-node integrity is untestable: honest nodes at different heights
+    // always disagree, so a real divergence looks identical to normal progress.
+    //
+    // Deliberately a standalone periodic task, NOT a hook in block processing:
+    //  * it can never slow, block or fail block application;
+    //  * it only reads balances and writes derived hashes under its own key
+    //    prefix — an authoritative node's balances cannot be altered by it;
+    //  * every failure is logged and swallowed.
+    // Set the interval to 0 to disable recording entirely.
+    // ========================================
+    {
+        let app_state_journal = app_state.clone();
+        tokio::spawn(async move {
+            let interval_blocks: u64 = std::env::var("Q_BALANCE_ROOT_JOURNAL_INTERVAL_BLOCKS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(10_000);
+            if interval_blocks == 0 {
+                info!("📔 [ROOT JOURNAL] Disabled (Q_BALANCE_ROOT_JOURNAL_INTERVAL_BLOCKS=0)");
+                return;
+            }
+            info!(
+                "📔 [ROOT JOURNAL] Recording balance root every {} blocks (derived data; never authoritative)",
+                interval_blocks
+            );
+            // Give the node time to open storage and settle before the first read.
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            let mut last_recorded: u64 = 0;
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                let height = app_state_journal
+                    .storage_engine
+                    .get_highest_contiguous_block()
+                    .await
+                    .unwrap_or(0);
+                if height == 0 || height < last_recorded.saturating_add(interval_blocks) {
+                    continue;
+                }
+                // Snap to the interval so independent nodes record the SAME heights
+                // and therefore have common points to compare.
+                let bucket = (height / interval_blocks) * interval_blocks;
+                if bucket <= last_recorded {
+                    continue;
+                }
+                match app_state_journal
+                    .storage_engine
+                    .record_balance_root_snapshot(bucket)
+                    .await
+                {
+                    Ok(root) => {
+                        last_recorded = bucket;
+                        info!(
+                            "📔 [ROOT JOURNAL] height {} root {} recorded",
+                            bucket,
+                            hex::encode(&root[..8])
+                        );
+                    }
+                    Err(e) => warn!("📔 [ROOT JOURNAL] record failed at {} (non-fatal): {}", bucket, e),
+                }
+            }
+        });
+    }
+
     {
         let app_state_pruning = app_state.clone();
 
@@ -26552,6 +26620,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // no-auth read-only integrity surface. Cross-diff via
         // tools/quillon-wallet-mcp/cross_node_root_diff.mjs.
         .route("/api/v1/integrity/balance-root", get(handlers::balance_root_integrity))
+        // v10.11.93: height-stamped root history — the comparable one.
+        .route("/api/v1/integrity/balance-root/journal", get(handlers::balance_root_journal))
         // v10.9.27: Prometheus-format /metrics — the diagnostic endpoint for
         // "why doesn't sync work" questions. See handlers::metrics_endpoint
         // for the full list of emitted families. No auth — metrics are
