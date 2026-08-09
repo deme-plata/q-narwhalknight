@@ -1190,6 +1190,112 @@ mod tests {
         assert_eq!(hash.len(), 32);
     }
 
+    /// v10.11.96 SYNC-WEDGE REGRESSION TEST.
+    ///
+    /// Reproduces the final-stretch sync wedge at the digest level. The producer
+    /// signs spectral signatures over `block.signing_payload()` (header hash with
+    /// `producer_signature` nulled — see `block_producer.rs:1235`). The gossip-path
+    /// verifier used to check them against `block.calculate_hash()`, which INCLUDES
+    /// the 64-byte `producer_signature`, so the two digests can never be equal for a
+    /// signed block. This test proves exactly that: a signature valid under
+    /// `signing_payload()` FAILS under `calculate_hash()`. The fix
+    /// (`main.rs:12504`) verifies against `signing_payload()`.
+    #[test]
+    fn test_spectral_sig_digest_wedge_regression() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // A signed block: producer_signature is Some(..), as it is on every live
+        // block >= HybridSignaturesV1 (19.7M). This is what makes the two digests
+        // diverge — an all-None header would hash identically both ways.
+        let mut block = QBlock {
+            header: BlockHeader {
+                height: 21_797_551,
+                phase: 21,
+                network_id: "mainnet-genesis".to_string(),
+                prev_block_hash: [7u8; 32],
+                solutions_root: [0u8; 32],
+                tx_root: [0u8; 32],
+                state_root: [0u8; 32],
+                timestamp: 1_786_270_000,
+                dag_round: 1,
+                vdf_proof: VDFProof::default(),
+                anchor_validator: None,
+                proposer: [1u8; 32],
+                producer_id: 0,
+                total_difficulty: 1000,
+                producer_public_key: None,
+                // A realistic 64-byte producer signature so calculate_hash() and
+                // signing_payload() genuinely differ.
+                producer_signature: Some(vec![0xABu8; 64]),
+                coinbase_merkle_root: None,
+                total_coinbase_reward: None,
+                coinbase_count: None,
+            },
+            mining_solutions: vec![],
+            dag_parents: vec![],
+            quantum_metadata: QuantumMetadata::default(),
+            transactions: vec![],
+            balance_updates: vec![],
+            size_bytes: 0,
+        };
+
+        // The two digests must differ for a signed block — this is the root of the bug.
+        let canonical = block.signing_payload(); // what the producer signs
+        let full_hash = block.calculate_hash(); // what the buggy verifier used
+        assert_ne!(
+            canonical, full_hash,
+            "signing_payload() and calculate_hash() must differ for a signed block"
+        );
+
+        // Producer signs the spectral signature over signing_payload().
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let ed_pub = verifying_key.to_bytes();
+        let sig = signing_key.sign(&canonical);
+
+        let mut validator = [0u8; 32];
+        validator.copy_from_slice(&ed_pub);
+        let spectral = SpectralSignature {
+            validator,
+            crypto_phase: SignaturePhase::Phase0Ed25519,
+            classical_sig: sig.to_bytes().to_vec(),
+            pqc_sig: None,
+            sqisign_sig: None,
+            spectral_coefficient: 0.0,
+            phase_deviation: 0.0,
+            timestamp: 1_786_270_000,
+        };
+        block.quantum_metadata.spectral_signatures = vec![spectral.clone()];
+
+        // BUG PATH: verifying against calculate_hash() FAILS (this is what
+        // false-rejected every gossip block on the final stretch).
+        let bug = crate::verify_spectral_signature_extended(
+            &spectral,
+            &full_hash,
+            Some(&ed_pub),
+            None,
+            None,
+        );
+        assert!(
+            bug.is_err(),
+            "regression: verifying a signing_payload() signature against calculate_hash() must FAIL"
+        );
+
+        // FIX PATH: verifying against signing_payload() SUCCEEDS.
+        let fixed = crate::verify_spectral_signature_extended(
+            &spectral,
+            &canonical,
+            Some(&ed_pub),
+            None,
+            None,
+        );
+        assert!(
+            fixed.is_ok(),
+            "fix: verifying against signing_payload() must SUCCEED, got {:?}",
+            fixed.err()
+        );
+    }
+
     #[test]
     fn test_hypergraph_distance() {
         let coord1 = HypergraphCoordinates {

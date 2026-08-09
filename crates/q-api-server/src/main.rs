@@ -12464,6 +12464,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 let mut pqc_failures: usize = 0;
                                 let mut pqc_verified: usize = 0;
 
+                                // v10.11.96 SYNC-WEDGE FIX: spectral signatures are signed
+                                // by the producer over block.signing_payload() (the header
+                                // hash with producer_signature nulled — see
+                                // block_producer.rs:1235 and pqc_hybrid_block_check at
+                                // main.rs:2087, which already verifies against the same
+                                // canonical). This inline loop previously verified against
+                                // block_hash_bytes = calculate_hash(), which INCLUDES the
+                                // 64-byte producer_signature, so the digests could never
+                                // match. Once a syncing node learned the validator key near
+                                // the tip, this check activated and false-rejected EVERY
+                                // gossip block on the final stretch, forcing it onto the
+                                // timeout-prone turbo-sync fetch path (the "final-stretch
+                                // wedge"). Verify against the canonical payload instead.
+                                // Safety: this only ACCEPTS blocks the earlier
+                                // pqc_hybrid_block_check gate (main.rs:2087) already accepts;
+                                // it cannot loosen security below that gate, which runs first
+                                // and hard-rejects. No height gate needed — the producer has
+                                // signed signing_payload() since HybridSignaturesV1 (19.7M),
+                                // and below that spectral_signatures is empty so this loop
+                                // does not run.
+                                let canonical_payload: [u8; 32] = block.signing_payload();
+
                                 for (idx, sig) in block
                                     .quantum_metadata
                                     .spectral_signatures
@@ -12503,7 +12525,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // Verify with available keys (extended verification supports all key types)
                                     match q_types::verify_spectral_signature_extended(
                                         sig,
-                                        &block_hash_bytes,
+                                        &canonical_payload,
                                         ed_key,
                                         pq_key_dil,
                                         pq_key_sqi,
