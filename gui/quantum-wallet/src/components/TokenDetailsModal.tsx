@@ -877,6 +877,65 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                 {new Date(hoveredPoint.timestamp).toLocaleString()} - Volume: {formatLargeNumber(hoveredPoint.volume)}
               </div>
             )}
+
+            {/* Branded token info — chips, blurb and whitepaper. Lives in the HEADER
+                so it is visible without scrolling; the About section 400 lines down
+                was where the original version got lost. Rendered exactly once. */}
+            {branding && (branding.features?.length || branding.description || branding.whitepaperUrl) && (
+              <div className="mt-5 pt-4 border-t border-white/10">
+                {branding.features && branding.features.length > 0 && (
+                  <>
+                    {/* "Declared" — distinct from the existing "Token Features" card
+                        grid further down, which shows features the token actually
+                        has active. Same title in both places read as a duplicate. */}
+                    <h4 className="text-[0.7rem] uppercase tracking-[0.15em] text-gray-500 mb-2">Declared Features</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {branding.features.map((f) => (
+                        <span
+                          key={f.label}
+                          title={f.caution ? 'Declared by the contract but not yet functional on-chain' : undefined}
+                          className="px-2 py-1 rounded-full text-[0.65rem]"
+                          style={{
+                            color: f.color,
+                            background: `${f.color}1A`,
+                            border: `1px solid ${f.color}33`,
+                          }}
+                        >
+                          {f.label}{f.caution ? ' *' : ''}
+                        </span>
+                      ))}
+                    </div>
+                    {branding.features.some((f) => f.caution) && (
+                      <p className="mt-2 text-[0.65rem] text-gray-500">
+                        * declared by the contract, not yet functional on-chain
+                      </p>
+                    )}
+                  </>
+                )}
+
+                {branding.description && (
+                  <p className="mt-3 text-xs leading-relaxed text-gray-400 max-w-3xl">
+                    {branding.description}
+                  </p>
+                )}
+
+                {branding.whitepaperUrl && (
+                  <a
+                    href={branding.whitepaperUrl}
+                    download
+                    className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
+                    style={{
+                      background: 'rgba(212,175,55,0.12)',
+                      color: '#d4af37',
+                      border: '1px solid rgba(212,175,55,0.25)',
+                    }}
+                  >
+                    <FileText className="w-4 h-4" />
+                    {branding.whitepaperLabel ?? 'Download Whitepaper (PDF)'}
+                  </a>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Two Column Layout: Graph + Info */}
@@ -1280,53 +1339,9 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                 {/* Branded description wins over both the curated map and API text. */}
                 <p className="text-gray-300 leading-relaxed text-sm">{branding?.description ?? TOKEN_DESCRIPTIONS[(token.symbol || '').toUpperCase()] ?? token.description}</p>
 
-                {/* Declared token features. Anything flagged `caution` is declared
-                    but NOT functional on-chain — marked so the UI never implies a
-                    working mechanism that isn't there. */}
-                {branding?.features && branding.features.length > 0 && (
-                  <div className="mt-4">
-                    <h4 className="text-[0.7rem] uppercase tracking-[0.15em] text-gray-500 mb-2">Token Features</h4>
-                    <div className="flex flex-wrap gap-2">
-                      {branding.features.map((f) => (
-                        <span
-                          key={f.label}
-                          title={f.caution ? 'Declared by the contract but not yet functional on-chain' : undefined}
-                          className="px-2 py-1 rounded-full text-[0.65rem]"
-                          style={{
-                            color: f.color,
-                            background: `${f.color}1A`,
-                            border: `1px solid ${f.color}33`,
-                          }}
-                        >
-                          {f.label}{f.caution ? ' *' : ''}
-                        </span>
-                      ))}
-                    </div>
-                    {branding.features.some((f) => f.caution) && (
-                      <p className="mt-2 text-[0.65rem] text-gray-500">
-                        * declared by the contract, not yet functional on-chain
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {branding?.whitepaperUrl && (
-                  <div className="mt-4 pt-3 border-t border-white/5">
-                    <a
-                      href={branding.whitepaperUrl}
-                      download
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
-                      style={{
-                        background: 'rgba(212,175,55,0.12)',
-                        color: '#d4af37',
-                        border: '1px solid rgba(212,175,55,0.25)',
-                      }}
-                    >
-                      <FileText className="w-4 h-4" />
-                      {branding.whitepaperLabel ?? 'Download Whitepaper (PDF)'}
-                    </a>
-                  </div>
-                )}
+                {/* Branded chips/whitepaper deliberately NOT repeated here — they
+                    render once in the header. Viktor flagged the duplicate
+                    ("its there twice") in the original pass. */}
                 {['QDUALP','QDUALN'].includes((token.symbol || '').toUpperCase()) && (
                 <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
                   <div className="text-cyan-300 text-xs font-bold uppercase tracking-wider mb-2">How qdual works · liquidation-free P / N</div>
