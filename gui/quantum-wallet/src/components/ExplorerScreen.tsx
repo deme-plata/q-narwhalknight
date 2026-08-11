@@ -1071,7 +1071,7 @@ const StatsModal = ({ networkStats, liveMetrics, hashpowerSecurity, postQuantumS
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.9 }}
-        className="bg-quantum-indigo/60 backdrop-blur-md rounded-xl border border-quantum-purple/30 p-6 max-w-6xl w-full max-h-[90vh] overflow-y-auto relative"
+        className="bg-quantum-indigo/60 backdrop-blur-md rounded-xl border border-quantum-purple/30 p-6 max-w-[144rem] w-full min-h-[85vh] max-h-[95vh] overflow-y-auto relative"
         style={{ zIndex: 1 }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -3983,7 +3983,7 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
                 {showEmissionModal && createPortal(
                   <div className="fixed inset-0 z-[99999] flex items-center justify-center" onClick={() => setShowEmissionModal(false)}>
                     <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
-                    <div className="relative w-[95vw] max-w-[1100px] max-h-[92vh] overflow-y-auto rounded-2xl border border-amber-500/40 bg-gray-950/98 backdrop-blur-xl shadow-2xl shadow-amber-900/30 scrollbar-thin scrollbar-thumb-amber-600/30"
+                    <div className="relative w-[96vw] max-w-[1560px] min-h-[82vh] max-h-[96vh] overflow-y-auto rounded-2xl border border-amber-500/40 bg-gray-950/98 backdrop-blur-xl shadow-2xl shadow-amber-900/30 scrollbar-thin scrollbar-thumb-amber-600/30"
                          onClick={(e) => e.stopPropagation()}>
                       {/* Modal Header */}
                       <div className="sticky top-0 z-10 flex items-center justify-between p-5 pb-3 bg-gray-950/95 backdrop-blur-xl border-b border-amber-500/20">
@@ -4008,7 +4008,7 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
                         </div>
                       </div>
 
-                      <div className="p-5 pt-4">
+                      <div className="p-6 pt-5 lg:columns-2 lg:gap-6 [&>*]:break-inside-avoid [&>*]:mb-5">
 
                     {/* ═══ ROW 1: Core Live Metrics — 5 columns ═══ */}
                     <div className="grid grid-cols-5 gap-2 mb-3">
@@ -4300,8 +4300,8 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
 
                     {/* ═══ ROW 6: Halving Schedule Table (compact) ═══ */}
                     <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-gray-700/30">
-                      <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Halving Schedule (64 Eras × 4yr = 256yr)</div>
-                      <table className="w-full text-[10px]">
+                      <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Halving Schedule (64 Eras × 4yr = 256yr)</div>
+                      <table className="w-full text-xs">
                         <thead>
                           <tr className="text-gray-500 border-b border-gray-700/50">
                             <th className="text-left py-1 font-medium">Era</th>
@@ -4341,6 +4341,32 @@ export default function ExplorerScreen({ isActive = false }: { isActive?: boolea
                           </tr>
                         </tbody>
                       </table>
+                    </div>
+
+                    {/* ═══ ROW 6b: BTC market-cap parity scenario (hypothetical, not a forecast) ═══ */}
+                    <div className="bg-gray-800/40 rounded-lg p-3 mb-3 border border-amber-500/20">
+                      <div className="text-xs font-semibold text-amber-400/80 uppercase tracking-wider mb-1">
+                        Scenario · QUG price if BTC = $20M in 2045
+                      </div>
+                      <div className="text-[10px] text-gray-500 mb-2 leading-relaxed">
+                        Hypothetical — not a forecast. QUG and BTC both cap at 21M coins, so at equal market cap they'd share the same price.
+                        BTC @ $20M/coin ⇒ ~$420T cap. QUG's <span className="text-amber-300/80">share of that cap</span> is the only free variable:
+                        scarcity (stock-to-flow) is identical on a ~16-year lag; adoption, liquidity &amp; trust set the ratio.
+                      </div>
+                      <div className="grid grid-cols-5 gap-2 text-center">
+                        {[
+                          { label: 'Parity 100%', pct: 1 },
+                          { label: '10% of BTC', pct: 0.1 },
+                          { label: '1% of BTC', pct: 0.01 },
+                          { label: '0.1% of BTC', pct: 0.001 },
+                          { label: '0.01% of BTC', pct: 0.0001 },
+                        ].map((s) => (
+                          <div key={s.label} className="bg-amber-500/5 rounded-lg p-2 border border-amber-500/10">
+                            <div className="text-[9px] text-gray-400 mb-0.5">{s.label}</div>
+                            <div className="text-sm font-bold text-amber-300 font-mono">{fmtUsd(20_000_000 * s.pct)}</div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
 
                     {/* ═══ ROW 7: SVG Charts — Supply Curve + S2F ═══ */}

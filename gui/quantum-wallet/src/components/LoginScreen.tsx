@@ -3,6 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Key, AlertCircle, Search, HelpCircle, X, Shield, Zap, Lock, Globe, Pickaxe, Download, Monitor, Laptop, Terminal as TerminalIcon, Blocks, Activity, Cpu, Users, Clock, ChevronDown, Hash, TrendingUp, Wallet, BookOpen, Bot, Code2, Coins, GitBranch, Network, Layers, ShieldCheck, Workflow, ArrowRight, Atom, Repeat, Eye } from 'lucide-react';
 import { qnkAPI } from '../services/api';
 import { storeWallet, walletSession, verifyPasswordHash, hasPasswordHash } from '../services/walletAuth';
+import {
+  snapshotCredentials,
+  restoreCredentials,
+  hasCredentials,
+  loadWalletList,
+  saveWalletList,
+  migrateLegacyWallet,
+} from '../services/multiWallet';
 // 2026-05-17: BIP39 validation imports for brainwallet hotfix (see validateSeedPhrase).
 import { validateMnemonic as bip39ValidateMnemonic } from '@scure/bip39';
 // @ts-ignore - exports map uses .js extension
@@ -451,6 +459,34 @@ function FloatingParticles() {
 }
 
 
+/**
+ * v10.11.83: After a successful login, copy the freshly-written global
+ * credential keys into this address's vault slot and make sure the wallet
+ * appears in the multi-wallet drawer's list.
+ *
+ * Without this, a wallet imported here is invisible to the drawer and — more
+ * importantly — has no vault slot, so switching away from it would strand it.
+ * Never throws: a vault failure must not block an otherwise-successful login.
+ */
+function registerWalletInVault(address: string, defaultName: string): void {
+  try {
+    if (!address) return;
+    snapshotCredentials(address);
+    const list = loadWalletList();
+    if (!list.some(w => w.address === address)) {
+      list.push({
+        address,
+        name: defaultName,
+        template: 'main',
+        createdAt: new Date().toISOString(),
+      });
+      saveWalletList(list);
+    }
+  } catch (e) {
+    console.warn('[LoginScreen] Vault registration failed (non-fatal):', e);
+  }
+}
+
 export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
   const [seedPhrase, setSeedPhrase] = useState('');
   const [password, setPassword] = useState('');
@@ -825,6 +861,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           wallet.dilithium5SecretKey,
           wallet.dilithium5PublicKey
         );
+        // v10.11.83: vault this wallet's credentials + register it in the
+        // multi-wallet list, so the drawer can switch back to it later.
+        registerWalletInVault(wallet.address, 'MetaMask');
 
         await new Promise(resolve => setTimeout(resolve, 500));
         onAuthenticate();
@@ -907,14 +946,46 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
           localStorage.removeItem('walletPasswordHash');
         }
       } else if (storedAddress && providedWalletAddress !== storedAddress) {
+        // v10.11.83: THIS BRANCH USED TO DESTROY THE PREVIOUS WALLET.
+        //
+        // It deleted walletEncryptedMnemonic / walletEncryptedKey /
+        // walletPasswordHash outright. Combined with the old MultiWalletDrawer
+        // — which pointed `walletAddress` at a new wallet while leaving the
+        // encrypted blobs belonging to the main wallet — logging back in with
+        // the MAIN wallet's mnemonic landed here and wiped the main wallet's
+        // credentials. That is the "multi-wallet logs me out of my main
+        // wallet" bug.
+        //
+        // The credentials are now vaulted per-address before anything is
+        // removed, so the outgoing wallet survives no matter which mnemonic
+        // the user types next.
         console.warn('⚠️ Different wallet detected (address mismatch)');
-        localStorage.removeItem('walletEncryptedMnemonic');
-        localStorage.removeItem('walletEncryptedKey');
-        localStorage.removeItem('walletAddress');
-        localStorage.removeItem('walletPublicKey');
-        localStorage.removeItem('walletEncryptedAegisKey');
-        localStorage.removeItem('walletAegisPublicKey');
-        localStorage.removeItem('walletPasswordHash');
+
+        // 1. Preserve whatever is currently in the global credential window.
+        //    migrateLegacyWallet() covers sessions that predate the vault.
+        migrateLegacyWallet();
+        snapshotCredentials(storedAddress);
+
+        // 2. If the incoming wallet is one we already hold credentials for,
+        //    this is a SWITCH, not a fresh import. Restore its vault slot
+        //    instead of clearing — the user keeps their password hash and
+        //    post-quantum keys rather than silently getting new ones.
+        if (hasCredentials(providedWalletAddress)) {
+          console.log('🔁 Known wallet — restoring its vaulted credentials instead of wiping');
+          restoreCredentials(providedWalletAddress);
+        } else {
+          // 3. Genuinely new wallet. Clear the window so storeWallet() below
+          //    writes a clean set. The previous wallet is safe in the vault.
+          localStorage.removeItem('walletEncryptedMnemonic');
+          localStorage.removeItem('walletEncryptedKey');
+          localStorage.removeItem('walletAddress');
+          localStorage.removeItem('walletPublicKey');
+          localStorage.removeItem('walletEncryptedAegisKey');
+          localStorage.removeItem('walletAegisPublicKey');
+          localStorage.removeItem('walletPasswordHash');
+        }
+
+        // Caches always go — they belong to the outgoing wallet either way.
         localStorage.removeItem('cachedBalance');
         localStorage.removeItem('cachedQugusdBalance');
         localStorage.removeItem('walletBalanceHistory');
@@ -945,6 +1016,9 @@ export default function LoginScreen({ onAuthenticate }: LoginScreenProps) {
             wallet.dilithium5SecretKey,
             wallet.dilithium5PublicKey
           );
+          // v10.11.83: vault this wallet's credentials + register it in the
+          // multi-wallet list, so the drawer can switch back to it later.
+          registerWalletInVault(wallet.address, 'Primary');
           console.log('✅ Wallet encrypted with password-protected AES-256-GCM');
           console.log('✅ AEGIS-QL post-quantum keys generated and encrypted');
           if (wallet.dilithium5SecretKey) {

@@ -1,20 +1,32 @@
 // MultiWalletDrawer — switch between multiple Quillon wallets from the topbar.
 //
-// localStorage layout:
-//   walletAddress       — currently-active wallet (string, existing)
-//   quillon:wallets     — JSON array of { address, name, template, createdAt }
-//                         (new this PR — old single-wallet sessions get auto-
-//                         migrated to a one-entry array on first open)
+// ─────────────────────────────────────────────────────────────────────────────
+// v10.11.83 REWRITE — moved onto the REAL credential path.
 //
-// The "+" button surfaces 5 templates so the user picks the *purpose* of the
-// new wallet (Savings / Trading / Mining / Agent / Faucet) rather than just
-// generating a featureless extra key. The template gets stored alongside the
-// address so other surfaces can adapt their default UI (e.g. show DCA controls
-// prominently for Trading, hide them for Savings).
+// The previous implementation switched wallets by writing two legacy
+// localStorage keys (`walletAddress`, `walletSeed`) and reloading. Those are
+// not where credentials live any more, which caused the drawer to:
 //
-// Seed generation: crypto.getRandomValues(32 bytes) → sha3_256 → ed25519
-// priv → ed25519 pubkey → 'qnk' + hex(pubkey). This matches the X-Wallet-Auth
-// derivation used everywhere else in the app + the MCP.
+//   • keep signing as the PREVIOUS wallet (walletSession was never re-seated),
+//   • create wallets that could never sign and were unrecoverable (raw entropy,
+//     no BIP39 mnemonic, no password encryption),
+//   • and — worst — leave `walletAddress` pointing at wallet B while the
+//     encrypted blobs still held wallet A, so the next login with A's mnemonic
+//     hit LoginScreen's "address mismatch" branch and DELETED A's encrypted
+//     credentials. That is the "it logs you out of the main wallet" report.
+//
+// Three prior patches (v10.11.16, v10.11.17, the 2026-05-21 auto-switch) each
+// treated a symptom at the legacy-key layer. This one moves the drawer onto
+// the same path LoginScreen uses:
+//
+//   switch  = snapshot(current) → restore(target) → loadWallet(password)
+//             → walletSession.setSession(...) → set walletAddress → reload
+//   create  = BIP39 mnemonic → storeWallet(mnemonic, password) → snapshot
+//             → SHOW THE MNEMONIC → user confirms backup → reload
+//
+// Nothing is ever deleted, so no wallet can be orphaned by a switch. See
+// services/multiWallet.ts for the vault itself.
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -32,26 +44,28 @@ import {
   Copy,
   ArrowRightLeft,
   AlertCircle,
+  Lock,
+  ShieldAlert,
+  Loader2,
 } from 'lucide-react';
-import * as ed25519 from '@noble/ed25519';
-import { sha3_256 } from '@noble/hashes/sha3.js';
-import { bytesToHex } from '@noble/hashes/utils.js';
-
-export type WalletTemplateId = 'savings' | 'trading' | 'mining' | 'agent' | 'faucet';
-
-interface WalletEntry {
-  address: string;
-  name: string;
-  template: WalletTemplateId | 'main';
-  createdAt: string;
-}
+import {
+  snapshotCredentials,
+  restoreCredentials,
+  hasCredentials,
+  clearWalletCaches,
+  loadWalletList,
+  saveWalletList,
+  migrateLegacyWallet,
+  type WalletEntry,
+  type WalletTemplateId,
+} from '../services/multiWallet';
 
 interface Template {
   id: WalletTemplateId;
   label: string;
   emoji: string;
   icon: React.ComponentType<{ className?: string }>;
-  accent: string;          // tailwind palette key
+  accent: string;
   oneLine: string;
   details: string;
 }
@@ -115,55 +129,27 @@ function paletteFor(accent: string): { bg: string; border: string; text: string;
   return m[accent] ?? m.violet;
 }
 
-/**
- * Load the wallet list from localStorage, migrating single-wallet sessions
- * to a one-entry array on first open.
- */
-function loadWallets(): WalletEntry[] {
-  try {
-    const raw = localStorage.getItem('quillon:wallets');
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch { /* corrupted — fall through */ }
-
-  const current = localStorage.getItem('walletAddress');
-  if (current) {
-    const seed: WalletEntry[] = [{ address: current, name: 'Primary', template: 'main', createdAt: new Date().toISOString() }];
-    try { localStorage.setItem('quillon:wallets', JSON.stringify(seed)); } catch {}
-    return seed;
-  }
-  return [];
-}
-
-function saveWallets(ws: WalletEntry[]): void {
-  try { localStorage.setItem('quillon:wallets', JSON.stringify(ws)); } catch {}
-}
-
-/**
- * Derive a fresh Quillon wallet from 32 random bytes. Matches the
- * X-Wallet-Auth derivation used everywhere else: sha3_256(seed-bytes) →
- * ed25519 private key → ed25519 public key → "qnk" + hex(pubkey).
- *
- * Returns BOTH the address and the seed bytes hex — the caller decides
- * how to persist the seed. For Quillon's "client-managed wallet" model
- * the seed lives in localStorage under a separate key keyed by address.
- */
-async function generateWallet(): Promise<{ address: string; seedHex: string }> {
-  const seedBytes = new Uint8Array(32);
-  crypto.getRandomValues(seedBytes);
-  const priv = sha3_256(seedBytes);
-  const pub = await ed25519.getPublicKey(priv);
-  const address = 'qnk' + bytesToHex(pub);
-  const seedHex = bytesToHex(seedBytes);
-  return { address, seedHex };
-}
-
 function truncate(addr: string): string {
   if (addr.length < 16) return addr;
   return `${addr.slice(0, 12)}…${addr.slice(-6)}`;
 }
+
+/** 16 random bytes → 12-word BIP39 phrase, via walletAuth's existing helper. */
+async function freshMnemonic(): Promise<string> {
+  const { entropyToMnemonic } = await import('../services/walletAuth');
+  const entropy = new Uint8Array(16);
+  crypto.getRandomValues(entropy);
+  const hex = Array.from(entropy).map(b => b.toString(16).padStart(2, '0')).join('');
+  return entropyToMnemonic(hex);
+}
+
+/** Which sub-flow the drawer is showing. */
+type Mode =
+  | { kind: 'list' }
+  | { kind: 'templates' }
+  | { kind: 'create-password'; template: WalletTemplateId }
+  | { kind: 'backup'; address: string; mnemonic: string; name: string }
+  | { kind: 'switch-password'; address: string; name: string };
 
 interface MultiWalletDrawerProps {
   isOpen: boolean;
@@ -173,152 +159,219 @@ interface MultiWalletDrawerProps {
 export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawerProps) {
   const [wallets, setWallets] = useState<WalletEntry[]>([]);
   const [activeAddress, setActiveAddress] = useState<string>('');
-  const [showTemplates, setShowTemplates] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>({ kind: 'list' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
+  // Password form state (shared by create + switch flows).
+  const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
+  const [backupAcknowledged, setBackupAcknowledged] = useState(false);
+
   useEffect(() => {
-    if (isOpen) {
-      setWallets(loadWallets());
-      setActiveAddress(localStorage.getItem('walletAddress') ?? '');
-      setShowTemplates(false);
-      setCreateError(null);
-    }
+    if (!isOpen) return;
+    // Vault any pre-v10.11.83 wallet before the user can touch anything.
+    // Without this, a session that already used the old drawer has global
+    // credentials belonging to a wallet with no vault slot.
+    migrateLegacyWallet();
+    setWallets(loadWalletList());
+    setActiveAddress(localStorage.getItem('walletAddress') ?? '');
+    setMode({ kind: 'list' });
+    setError(null);
+    setPassword('');
+    setPasswordConfirm('');
+    setBackupAcknowledged(false);
   }, [isOpen]);
 
-  const onSwitch = (addr: string) => {
-    if (addr === activeAddress) return;
-    try {
-      // v10.11.16 UI fix: BEFORE switching, snapshot the CURRENT wallet's
-      // seed to its per-address slot if missing. The "new wallets show
-      // original data" bug: legacy original wallet had `walletSeed`
-      // (un-suffixed key) but NO `quillon:seed:<originalAddr>`. When the
-      // user created wallet B then switched back to A, the lookup of
-      // `quillon:seed:<A>` returned null; the canonical `walletSeed`
-      // stayed as B's seed; all subsequent X-Wallet-Auth signing for "A"
-      // signed with B's key → server-visible operations all went to B
-      // → operator saw their original wallet's data on the new wallet
-      // (and vice-versa, depending on direction). This migration creates
-      // the missing per-address entry on every switch so future lookups
-      // never miss again.
-      const currentAddr = activeAddress || localStorage.getItem('walletAddress') || '';
-      const currentSeed = localStorage.getItem('walletSeed');
-      if (currentAddr && currentSeed) {
-        const existingPerAddr = localStorage.getItem(`quillon:seed:${currentAddr}`);
-        if (!existingPerAddr) {
-          localStorage.setItem(`quillon:seed:${currentAddr}`, currentSeed);
-        }
-      }
-
-      localStorage.setItem('walletAddress', addr);
-      // CRITICAL: copy the per-wallet seed (quillon:seed:<addr>) to the
-      // canonical `walletSeed` key the single-wallet auth flow reads.
-      // Without this, X-Wallet-Auth signing silently uses the OLD seed
-      // after switching → all signed calls (send, dex_swap) hit the wrong
-      // wallet on the server. This was the original "+ Wallet just opens
-      // standard wallet" bug — switch happened but the seed didn't follow.
-      const newSeed = localStorage.getItem(`quillon:seed:${addr}`);
-      if (newSeed) {
-        localStorage.setItem('walletSeed', newSeed);
-      } else {
-        // v10.11.16 UI fix: refuse to switch when we don't hold the
-        // destination wallet's seed. Pre-fix, walletSeed silently stayed
-        // as the previous wallet's seed → operator sees inherited data
-        // for the "switched-to" wallet. Better to refuse + tell the
-        // operator they need to import.
-        console.error(`[MultiWalletDrawer] No seed found for ${addr.slice(0,16)}... Cannot switch safely.`);
-        alert(
-          `Cannot switch to wallet ${addr.slice(0, 12)}…\n\n` +
-          `Its seed isn't stored locally — most likely because this wallet existed BEFORE you created a second wallet (a v10.11.16 → v10.11.17 bug overwrote the canonical seed on wallet creation without snapshotting the old one).\n\n` +
-          `To recover:\n` +
-          `1. Log out of the wallet UI.\n` +
-          `2. Log back in using the BIP39 mnemonic for ${addr.slice(0, 12)}….\n` +
-          `3. The login will re-derive the seed and write quillon:seed:${addr.slice(0, 8)}… correctly.\n` +
-          `Then switching will work.`
-        );
-        return; // abort — don't reload to a half-broken state
-      }
-    } catch {}
-    // Hard reload so all components re-read the new wallet from localStorage.
-    // Soft state-switch would require threading the address through dozens of
-    // existing hooks; reload is honest about the scope of the change.
-    window.location.reload();
+  const resetToList = () => {
+    setMode({ kind: 'list' });
+    setError(null);
+    setPassword('');
+    setPasswordConfirm('');
   };
 
-  const onPickTemplate = async (template: WalletTemplateId) => {
-    setCreating(true);
-    setCreateError(null);
+  // ---------------------------------------------------------------------------
+  // Switch
+  // ---------------------------------------------------------------------------
+
+  const beginSwitch = (entry: WalletEntry) => {
+    if (entry.address === activeAddress) return;
+
+    if (!hasCredentials(entry.address)) {
+      setError(
+        `No local credentials for "${entry.name}". This wallet was created by an older ` +
+        `build that stored only raw entropy. Import it from its recovery phrase on the ` +
+        `login screen to re-create its credentials, then switching will work.`
+      );
+      return;
+    }
+
+    setError(null);
+    setPassword('');
+    setMode({ kind: 'switch-password', address: entry.address, name: entry.name });
+  };
+
+  const confirmSwitch = async (targetAddress: string) => {
+    setBusy(true);
+    setError(null);
+
+    const previousAddress = activeAddress || localStorage.getItem('walletAddress') || '';
+
     try {
-      const { address, seedHex } = await generateWallet();
+      const { loadWallet, recoverMnemonic, walletSession } = await import('../services/walletAuth');
+
+      // 1. Protect the outgoing wallet before touching the globals.
+      if (previousAddress) snapshotCredentials(previousAddress);
+
+      // 2. Paint the target wallet into the global credential window.
+      if (!restoreCredentials(targetAddress)) {
+        throw new Error('Could not load this wallet\'s stored credentials.');
+      }
+
+      // 3. Prove the password actually opens it. If this throws we must put
+      //    the previous wallet back — leaving the target's credentials in the
+      //    globals while walletAddress still names the previous wallet is
+      //    exactly the corrupt state this rewrite exists to prevent.
+      let keyPair;
+      try {
+        keyPair = await loadWallet(password);
+      } catch {
+        if (previousAddress) restoreCredentials(previousAddress);
+        throw new Error('Incorrect password for this wallet.');
+      }
+
+      // 4. Paranoia check: the decrypted key must derive the address we asked
+      //    for. Guards against a vault slot written under the wrong address.
+      if (keyPair.address !== targetAddress) {
+        if (previousAddress) restoreCredentials(previousAddress);
+        throw new Error(
+          `Credential mismatch — the stored keys decrypt to ${keyPair.address.slice(0, 12)}…, ` +
+          `not ${targetAddress.slice(0, 12)}…. Refusing to switch.`
+        );
+      }
+
+      // 5. Mnemonic is best-effort: only used to keep "never expire" sessions
+      //    convenient. A wallet without an encrypted mnemonic still switches.
+      let mnemonic: string | undefined;
+      try {
+        mnemonic = await recoverMnemonic(password);
+      } catch {
+        mnemonic = undefined;
+      }
+
+      // 6. Commit. Order matters: session first (so nothing can observe a new
+      //    walletAddress with a stale session), then the pointer, then caches.
+      walletSession.setSession(
+        keyPair.privateKey,
+        keyPair.address,
+        mnemonic,
+        keyPair.dilithium5SecretKey,
+        keyPair.dilithium5PublicKey
+      );
+      localStorage.setItem('walletAddress', targetAddress);
+      clearWalletCaches();
+
+      // Hard reload so every hook re-reads the new wallet. A soft switch would
+      // mean threading the address through dozens of existing hooks.
+      window.location.reload();
+    } catch (e: any) {
+      setError(e?.message ?? 'Switch failed.');
+      setBusy(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Create
+  // ---------------------------------------------------------------------------
+
+  const confirmCreate = async (template: WalletTemplateId) => {
+    setBusy(true);
+    setError(null);
+
+    const previousAddress = activeAddress || localStorage.getItem('walletAddress') || '';
+
+    try {
+      if (password.length < 8) throw new Error('Password must be at least 8 characters.');
+      if (password !== passwordConfirm) throw new Error('Passwords do not match.');
+
+      const { storeWallet, walletSession } = await import('../services/walletAuth');
+
+      // 1. Protect the outgoing wallet FIRST — storeWallet() overwrites every
+      //    global credential key.
+      if (previousAddress) snapshotCredentials(previousAddress);
+
+      // 2. Real BIP39 mnemonic, so this wallet is recoverable from a phrase
+      //    like every other wallet in the app.
+      const mnemonic = await freshMnemonic();
+
+      // 3. storeWallet writes the encrypted key, mnemonic, password hash and
+      //    the PQ keypairs into the globals, and sets walletAddress.
+      const keyPair = await storeWallet(mnemonic, password, true, true, true);
+
+      // 4. Vault the new wallet immediately, so it survives the next switch.
+      snapshotCredentials(keyPair.address);
+
       const t = TEMPLATES.find(x => x.id === template)!;
-      // Default name = template label + short suffix so multiple "Trading"
-      // wallets distinguish at a glance.
-      const suffix = address.slice(-4);
       const entry: WalletEntry = {
-        address,
-        name: `${t.label} (${suffix})`,
+        address: keyPair.address,
+        name: `${t.label} (${keyPair.address.slice(-4)})`,
         template,
         createdAt: new Date().toISOString(),
       };
-      // Store the new wallet's seed under a per-address key so X-Wallet-Auth
-      // signing for THIS wallet works once it's selected.
-      try { localStorage.setItem(`quillon:seed:${address}`, seedHex); } catch {}
-      const next = [...wallets, entry];
+      const next = [...wallets.filter(w => w.address !== keyPair.address), entry];
       setWallets(next);
-      saveWallets(next);
-      setShowTemplates(false);
+      saveWalletList(next);
 
-      // v10.11.17 UI FIX: before overwriting canonical `walletSeed` with
-      // the newly created wallet's seed, snapshot the OLD wallet's seed to
-      // its per-address slot. Without this, the original main wallet's seed
-      // is destroyed the moment a new wallet is created — the user can never
-      // switch back (onSwitch's seed guard refuses on missing per-address
-      // entry; pre-guard, they'd silently sign with the wrong key).
-      try {
-        const oldAddr = (localStorage.getItem('walletAddress') || '').trim();
-        const oldSeed = localStorage.getItem('walletSeed');
-        if (oldAddr && oldSeed && oldAddr !== address) {
-          const existingPerAddr = localStorage.getItem(`quillon:seed:${oldAddr}`);
-          if (!existingPerAddr) {
-            localStorage.setItem(`quillon:seed:${oldAddr}`, oldSeed);
-          }
-        }
-      } catch {}
+      // 5. Make it active in-session.
+      walletSession.setSession(
+        keyPair.privateKey,
+        keyPair.address,
+        mnemonic,
+        keyPair.dilithium5SecretKey,
+        keyPair.dilithium5PublicKey
+      );
+      clearWalletCaches();
 
-      // FIX (2026-05-21): auto-switch to the newly created wallet. Without
-      // this, the user picked a template, saw no UI change, and reported
-      // "+ Wallet just opens the standard original wallet" — because the
-      // drawer created an entry but never made it active. Switching here
-      // also copies the seed to the canonical `walletSeed` key (see
-      // onSwitch) so signing works immediately.
-      try {
-        localStorage.setItem('walletAddress', address);
-        localStorage.setItem('walletSeed', seedHex);
-      } catch {}
-      // Hard reload — same model as onSwitch — so every hook re-reads the
-      // new wallet from localStorage. Without this, the surrounding TopBar
-      // still shows the old wallet's balance/avatar.
-      window.location.reload();
+      // 6. DO NOT reload yet — the mnemonic exists only in memory right now.
+      //    Reloading here would leave the user with a funded-able wallet they
+      //    cannot recover. Show the phrase and make them acknowledge it.
+      setPassword('');
+      setPasswordConfirm('');
+      setBackupAcknowledged(false);
+      setMode({ kind: 'backup', address: keyPair.address, mnemonic, name: entry.name });
+      setBusy(false);
     } catch (e: any) {
-      setCreateError(e?.message ?? 'Wallet generation failed.');
-    } finally {
-      setCreating(false);
+      // Creation failed partway: put the previous wallet back in the window.
+      if (previousAddress) restoreCredentials(previousAddress);
+      setError(e?.message ?? 'Wallet creation failed.');
+      setBusy(false);
     }
   };
 
-  const onCopy = async (addr: string) => {
-    try { await navigator.clipboard.writeText(addr); setCopied(addr); setTimeout(() => setCopied(null), 1200); } catch {}
+  const onCopy = async (text: string, tag: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(tag);
+      setTimeout(() => setCopied(null), 1400);
+    } catch { /* clipboard blocked — user can select manually */ }
   };
 
-  const groupedByTemplate = useMemo(() => {
-    const map: Record<string, WalletEntry[]> = {};
-    for (const w of wallets) {
-      const k = w.template === 'main' ? 'savings' : w.template;
-      (map[k] ??= []).push(w);
-    }
-    return map;
-  }, [wallets]);
+  const activeEntry = useMemo(
+    () => wallets.find(w => w.address === activeAddress),
+    [wallets, activeAddress]
+  );
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  const errorBox = error && (
+    <div className="mt-3 p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs flex items-start gap-2">
+      <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+      <span className="leading-relaxed">{error}</span>
+    </div>
+  );
 
   return (
     <AnimatePresence>
@@ -329,7 +382,7 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-[250] flex items-start justify-end p-4"
           style={{ background: 'rgba(2,4,15,0.78)', backdropFilter: 'blur(8px)' }}
-          onClick={onClose}
+          onClick={busy ? undefined : onClose}
         >
           <motion.div
             initial={{ x: 40, opacity: 0 }}
@@ -348,168 +401,346 @@ export default function MultiWalletDrawer({ isOpen, onClose }: MultiWalletDrawer
             <div className="px-5 py-4 border-b border-violet-500/15 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Wallet className="w-5 h-5 text-violet-400" />
-                <h2 className="text-base font-bold text-white">My Wallets</h2>
-                <span className="text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-300 border border-violet-500/30">
-                  {wallets.length}
-                </span>
-                {/* v10.11.17 UI: prominent green + button right in the title row.
-                    User feedback: the original "+ Wallet" pill at the bottom of
-                    the drawer wasn't intuitive enough — this is the obvious
-                    target the moment the drawer opens. */}
-                <motion.button
-                  whileHover={{ scale: 1.15, boxShadow: '0 0 20px rgba(34,197,94,0.65)' }}
-                  whileTap={{ scale: 0.95 }}
-                  onClick={() => setShowTemplates(true)}
-                  title="Create new wallet"
-                  className="ml-2 inline-flex items-center justify-center w-9 h-9 rounded-full text-white font-bold text-lg shadow-lg"
-                  style={{
-                    background: 'linear-gradient(135deg, #22c55e 0%, #15803d 100%)',
-                    boxShadow: '0 0 14px rgba(34,197,94,0.5), inset 0 -2px 4px rgba(0,0,0,0.2)',
-                    border: '1px solid rgba(74,222,128,0.6)',
-                  }}
-                >
-                  +
-                </motion.button>
+                <h2 className="text-base font-bold text-white">
+                  {mode.kind === 'backup' ? 'Save your recovery phrase' : 'My Wallets'}
+                </h2>
+                {mode.kind === 'list' && (
+                  <>
+                    <span className="text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-300 border border-violet-500/30">
+                      {wallets.length}
+                    </span>
+                    <motion.button
+                      whileHover={{ scale: 1.15, boxShadow: '0 0 20px rgba(34,197,94,0.65)' }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => { setError(null); setMode({ kind: 'templates' }); }}
+                      title="Create new wallet"
+                      className="ml-2 inline-flex items-center justify-center w-9 h-9 rounded-full text-white font-bold text-lg shadow-lg"
+                      style={{
+                        background: 'linear-gradient(135deg, #22c55e 0%, #15803d 100%)',
+                        boxShadow: '0 0 14px rgba(34,197,94,0.5), inset 0 -2px 4px rgba(0,0,0,0.2)',
+                        border: '1px solid rgba(74,222,128,0.6)',
+                      }}
+                    >
+                      +
+                    </motion.button>
+                  </>
+                )}
               </div>
-              <motion.button whileHover={{ rotate: 90, scale: 1.1 }} onClick={onClose} className="text-slate-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </motion.button>
+              {mode.kind !== 'backup' && (
+                <motion.button
+                  whileHover={{ rotate: 90, scale: 1.1 }}
+                  onClick={onClose}
+                  disabled={busy}
+                  className="text-slate-400 hover:text-white disabled:opacity-40"
+                >
+                  <X className="w-5 h-5" />
+                </motion.button>
+              )}
             </div>
 
             {/* Body */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {wallets.length === 0 ? (
-                <div className="text-center py-10 text-slate-400">
-                  <Wallet className="w-10 h-10 mx-auto mb-3 opacity-40" />
-                  <p className="text-sm">No wallets yet. Create one below.</p>
-                </div>
-              ) : (
-                wallets.map(wlt => {
-                  const isActive = wlt.address === activeAddress;
-                  const t = TEMPLATES.find(x => x.id === wlt.template) ?? { ...TEMPLATES[0], label: 'Primary', emoji: '🪙' };
-                  const palette = paletteFor(t.accent);
-                  return (
-                    <motion.div
-                      key={wlt.address}
-                      whileHover={{ y: -1 }}
-                      className={`rounded-2xl p-3 border transition-all ${isActive ? `ring-2 ${palette.ring}` : ''}`}
-                      style={{ background: palette.bg, borderColor: palette.border }}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="text-2xl">{t.emoji}</div>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <p className={`text-sm font-bold ${palette.text}`}>{wlt.name}</p>
-                              {isActive && (
-                                <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                  active
-                                </span>
-                              )}
-                            </div>
-                            <button onClick={() => onCopy(wlt.address)} className="group inline-flex items-center gap-1 text-[10px] text-slate-400 font-mono mt-0.5 hover:text-slate-200">
-                              {truncate(wlt.address)}
-                              {copied === wlt.address ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 opacity-60 group-hover:opacity-100" />}
-                            </button>
-                          </div>
-                        </div>
-                        {!isActive && (
-                          <motion.button
-                            whileHover={{ scale: 1.05 }}
-                            whileTap={{ scale: 0.95 }}
-                            onClick={() => onSwitch(wlt.address)}
-                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/25 hover:bg-violet-500/40 text-violet-100 text-[11px] font-bold transition-colors"
-                          >
-                            <ArrowRightLeft className="w-3 h-3" />
-                            Switch
-                          </motion.button>
-                        )}
-                      </div>
-                    </motion.div>
-                  );
-                })
-              )}
+            <div className="flex-1 overflow-y-auto p-4">
 
-              {/* + Add wallet button */}
-              {!showTemplates && (
-                <motion.button
-                  whileHover={{ y: -2, scale: 1.01 }}
-                  whileTap={{ scale: 0.98 }}
-                  onClick={() => setShowTemplates(true)}
-                  className="w-full mt-3 rounded-2xl border-2 border-dashed border-violet-500/30 hover:border-violet-400/60 p-4 text-violet-300 hover:text-violet-100 transition-colors flex items-center justify-center gap-2 font-bold"
-                >
-                  <Plus className="w-5 h-5" />
-                  Add wallet
-                </motion.button>
-              )}
-
-              {/* Template picker */}
-              <AnimatePresence>
-                {showTemplates && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    transition={{ duration: 0.22 }}
-                    className="mt-3 overflow-hidden"
-                  >
-                    <div className="flex items-center justify-between mb-3">
-                      <p className="text-[11px] uppercase tracking-widest font-bold text-violet-300">
-                        Pick a purpose
-                      </p>
-                      <button onClick={() => setShowTemplates(false)} className="text-[11px] text-slate-400 hover:text-slate-200">
-                        cancel
-                      </button>
+              {/* ── Wallet list ───────────────────────────────────────────── */}
+              {mode.kind === 'list' && (
+                <div className="space-y-2">
+                  {wallets.length === 0 ? (
+                    <div className="text-center py-10 text-slate-400">
+                      <Wallet className="w-10 h-10 mx-auto mb-3 opacity-40" />
+                      <p className="text-sm">No wallets yet. Create one below.</p>
                     </div>
-                    <div className="grid grid-cols-1 gap-2">
-                      {TEMPLATES.map((t, i) => {
-                        const Icon = t.icon;
-                        const palette = paletteFor(t.accent);
-                        return (
-                          <motion.button
-                            key={t.id}
-                            initial={{ opacity: 0, y: 8 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ delay: i * 0.04 }}
-                            whileHover={{ y: -2 }}
-                            whileTap={{ scale: 0.98 }}
-                            disabled={creating}
-                            onClick={() => onPickTemplate(t.id)}
-                            className="text-left rounded-xl p-3 border transition-all disabled:opacity-50"
-                            style={{ background: palette.bg, borderColor: palette.border }}
-                          >
-                            <div className="flex items-start gap-3">
+                  ) : (
+                    wallets.map(wlt => {
+                      const isActive = wlt.address === activeAddress;
+                      const t = TEMPLATES.find(x => x.id === wlt.template)
+                        ?? { ...TEMPLATES[0], label: 'Primary', emoji: '🪙' };
+                      const palette = paletteFor(t.accent);
+                      const recoverable = hasCredentials(wlt.address);
+                      return (
+                        <motion.div
+                          key={wlt.address}
+                          whileHover={{ y: -1 }}
+                          className={`rounded-2xl p-3 border transition-all ${isActive ? `ring-2 ${palette.ring}` : ''}`}
+                          style={{ background: palette.bg, borderColor: palette.border }}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3 min-w-0">
                               <div className="text-2xl">{t.emoji}</div>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <Icon className={`w-3.5 h-3.5 ${palette.text}`} />
-                                  <p className={`text-sm font-bold ${palette.text}`}>{t.label}</p>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <p className={`text-sm font-bold ${palette.text}`}>{wlt.name}</p>
+                                  {isActive && (
+                                    <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                      active
+                                    </span>
+                                  )}
+                                  {!recoverable && (
+                                    <span
+                                      title="No local credentials — import from its recovery phrase to use this wallet"
+                                      className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 inline-flex items-center gap-1"
+                                    >
+                                      <ShieldAlert className="w-2.5 h-2.5" />
+                                      needs import
+                                    </span>
+                                  )}
                                 </div>
-                                <p className="text-[11px] text-slate-300 mt-0.5">{t.oneLine}</p>
-                                <p className="text-[10px] text-slate-500 mt-1 leading-snug">{t.details}</p>
+                                <button
+                                  onClick={() => onCopy(wlt.address, wlt.address)}
+                                  className="group inline-flex items-center gap-1 text-[10px] text-slate-400 font-mono mt-0.5 hover:text-slate-200"
+                                >
+                                  {truncate(wlt.address)}
+                                  {copied === wlt.address
+                                    ? <Check className="w-3 h-3 text-emerald-400" />
+                                    : <Copy className="w-3 h-3 opacity-60 group-hover:opacity-100" />}
+                                </button>
                               </div>
-                              <Sparkles className={`w-3.5 h-3.5 ${palette.text} flex-shrink-0`} />
                             </div>
-                          </motion.button>
-                        );
-                      })}
+                            {!isActive && (
+                              <motion.button
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                                onClick={() => beginSwitch(wlt)}
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/25 hover:bg-violet-500/40 text-violet-100 text-[11px] font-bold transition-colors flex-shrink-0"
+                              >
+                                <ArrowRightLeft className="w-3 h-3" />
+                                Switch
+                              </motion.button>
+                            )}
+                          </div>
+                        </motion.div>
+                      );
+                    })
+                  )}
+
+                  <motion.button
+                    whileHover={{ y: -2, scale: 1.01 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => { setError(null); setMode({ kind: 'templates' }); }}
+                    className="w-full mt-3 rounded-2xl border-2 border-dashed border-violet-500/30 hover:border-violet-400/60 p-4 text-violet-300 hover:text-violet-100 transition-colors flex items-center justify-center gap-2 font-bold"
+                  >
+                    <Plus className="w-5 h-5" />
+                    Add wallet
+                  </motion.button>
+
+                  {errorBox}
+                </div>
+              )}
+
+              {/* ── Template picker ───────────────────────────────────────── */}
+              {mode.kind === 'templates' && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-[11px] uppercase tracking-widest font-bold text-violet-300">
+                      Pick a purpose
+                    </p>
+                    <button onClick={resetToList} className="text-[11px] text-slate-400 hover:text-slate-200">
+                      cancel
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2">
+                    {TEMPLATES.map((t, i) => {
+                      const Icon = t.icon;
+                      const palette = paletteFor(t.accent);
+                      return (
+                        <motion.button
+                          key={t.id}
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: i * 0.04 }}
+                          whileHover={{ y: -2 }}
+                          whileTap={{ scale: 0.98 }}
+                          onClick={() => {
+                            setError(null);
+                            setPassword('');
+                            setPasswordConfirm('');
+                            setMode({ kind: 'create-password', template: t.id });
+                          }}
+                          className="text-left rounded-xl p-3 border transition-all"
+                          style={{ background: palette.bg, borderColor: palette.border }}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="text-2xl">{t.emoji}</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <Icon className={`w-3.5 h-3.5 ${palette.text}`} />
+                                <p className={`text-sm font-bold ${palette.text}`}>{t.label}</p>
+                              </div>
+                              <p className="text-[11px] text-slate-300 mt-0.5">{t.oneLine}</p>
+                              <p className="text-[10px] text-slate-500 mt-1 leading-snug">{t.details}</p>
+                            </div>
+                            <Sparkles className={`w-3.5 h-3.5 ${palette.text} flex-shrink-0`} />
+                          </div>
+                        </motion.button>
+                      );
+                    })}
+                  </div>
+                  {errorBox}
+                </div>
+              )}
+
+              {/* ── Password: create ──────────────────────────────────────── */}
+              {mode.kind === 'create-password' && (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Lock className="w-4 h-4 text-violet-300" />
+                    <p className="text-sm font-bold text-white">Set a password</p>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed mb-4">
+                    This password encrypts the new wallet's keys in this browser (AES-256-GCM,
+                    PBKDF2 100k). You'll be asked for it whenever you switch to this wallet.
+                    Using the same password as your other wallets is fine.
+                  </p>
+
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    placeholder="Password (min 8 characters)"
+                    autoFocus
+                    className="w-full mb-2 px-3 py-2.5 rounded-xl bg-slate-950/70 border border-violet-500/30 text-white text-sm placeholder:text-slate-600 focus:outline-none focus:border-violet-400/70"
+                  />
+                  <input
+                    type="password"
+                    value={passwordConfirm}
+                    onChange={e => setPasswordConfirm(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !busy) confirmCreate(mode.template); }}
+                    placeholder="Confirm password"
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950/70 border border-violet-500/30 text-white text-sm placeholder:text-slate-600 focus:outline-none focus:border-violet-400/70"
+                  />
+
+                  {errorBox}
+
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={resetToList}
+                      disabled={busy}
+                      className="flex-1 py-2.5 rounded-xl text-slate-300 text-sm font-bold bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40"
+                    >
+                      Back
+                    </button>
+                    <button
+                      onClick={() => confirmCreate(mode.template)}
+                      disabled={busy || !password || !passwordConfirm}
+                      className="flex-1 py-2.5 rounded-xl text-white text-sm font-bold disabled:opacity-40 inline-flex items-center justify-center gap-2"
+                      style={{ background: 'linear-gradient(135deg, #22c55e 0%, #15803d 100%)' }}
+                    >
+                      {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {busy ? 'Creating…' : 'Create wallet'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Backup the mnemonic ───────────────────────────────────── */}
+              {mode.kind === 'backup' && (
+                <div>
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 mb-4">
+                    <div className="flex items-start gap-2">
+                      <ShieldAlert className="w-4 h-4 text-amber-300 flex-shrink-0 mt-0.5" />
+                      <p className="text-[11px] text-amber-100 leading-relaxed">
+                        <strong>{mode.name}</strong> was created. These 12 words are the ONLY way
+                        to recover it if you clear this browser or lose the password. Write them
+                        down now — they will not be shown again.
+                      </p>
                     </div>
-                    {createError && (
-                      <div className="mt-3 p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs flex items-center gap-2">
-                        <AlertCircle className="w-3.5 h-3.5" />
-                        {createError}
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5 mb-3">
+                    {mode.mnemonic.split(' ').map((word, i) => (
+                      <div
+                        key={i}
+                        className="px-2 py-1.5 rounded-lg bg-slate-950/70 border border-violet-500/25 text-center"
+                      >
+                        <span className="text-[9px] text-slate-600 mr-1">{i + 1}</span>
+                        <span className="text-[11px] font-mono text-violet-100">{word}</span>
                       </div>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={() => onCopy(mode.mnemonic, 'mnemonic')}
+                    className="w-full mb-3 py-2 rounded-xl bg-violet-500/20 hover:bg-violet-500/35 text-violet-100 text-xs font-bold inline-flex items-center justify-center gap-2"
+                  >
+                    {copied === 'mnemonic'
+                      ? <><Check className="w-3.5 h-3.5 text-emerald-400" /> Copied</>
+                      : <><Copy className="w-3.5 h-3.5" /> Copy recovery phrase</>}
+                  </button>
+
+                  <label className="flex items-start gap-2 mb-4 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={backupAcknowledged}
+                      onChange={e => setBackupAcknowledged(e.target.checked)}
+                      className="mt-0.5 accent-emerald-500"
+                    />
+                    <span className="text-[11px] text-slate-300 leading-relaxed">
+                      I have written down these 12 words somewhere safe and offline.
+                    </span>
+                  </label>
+
+                  <button
+                    onClick={() => window.location.reload()}
+                    disabled={!backupAcknowledged}
+                    className="w-full py-2.5 rounded-xl text-white text-sm font-bold disabled:opacity-40"
+                    style={{ background: 'linear-gradient(135deg, #22c55e 0%, #15803d 100%)' }}
+                  >
+                    Continue to wallet
+                  </button>
+                </div>
+              )}
+
+              {/* ── Password: switch ──────────────────────────────────────── */}
+              {mode.kind === 'switch-password' && (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Lock className="w-4 h-4 text-violet-300" />
+                    <p className="text-sm font-bold text-white">Unlock "{mode.name}"</p>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed mb-1">
+                    Enter the password for this wallet to decrypt its keys and make it active.
+                  </p>
+                  <p className="text-[10px] text-slate-600 font-mono mb-4">{truncate(mode.address)}</p>
+
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={e => setPassword(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !busy && password) confirmSwitch(mode.address); }}
+                    placeholder="Wallet password"
+                    autoFocus
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950/70 border border-violet-500/30 text-white text-sm placeholder:text-slate-600 focus:outline-none focus:border-violet-400/70"
+                  />
+
+                  {errorBox}
+
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      onClick={resetToList}
+                      disabled={busy}
+                      className="flex-1 py-2.5 rounded-xl text-slate-300 text-sm font-bold bg-slate-800/60 hover:bg-slate-700/60 disabled:opacity-40"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => confirmSwitch(mode.address)}
+                      disabled={busy || !password}
+                      className="flex-1 py-2.5 rounded-xl text-white text-sm font-bold disabled:opacity-40 inline-flex items-center justify-center gap-2"
+                      style={{ background: 'linear-gradient(135deg, #a855f7 0%, #6d28d9 100%)' }}
+                    >
+                      {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {busy ? 'Unlocking…' : 'Switch'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Footer */}
             <div className="px-5 py-3 border-t border-violet-500/15 bg-slate-950/60">
               <p className="text-[10px] text-slate-500 leading-relaxed">
-                Wallets stored locally per-browser. The seed never leaves your device.
-                Switching reloads the page so the new wallet activates everywhere.
+                {activeEntry ? `Active: ${activeEntry.name}. ` : ''}
+                Each wallet's keys are encrypted separately in this browser and never leave your
+                device. Switching asks for that wallet's password and reloads the page.
               </p>
             </div>
           </motion.div>

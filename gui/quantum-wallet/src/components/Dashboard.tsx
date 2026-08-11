@@ -12,6 +12,7 @@ import { SmileyAvatar } from './SmileyAvatar';
 import DAGKnightVisualization from './DAGKnightVisualization';
 import QNOOracleVisualization from './QNOOracleVisualization';
 import LoanApplicationModal from './LoanApplicationModal';
+import OrganizationModal from './OrganizationModal';
 import LoanApprovalModal from './LoanApprovalModal';
 import LoanPaybackModal from './LoanPaybackModal';
 import ActiveLoansCard from './ActiveLoansCard';
@@ -666,6 +667,9 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNav
   // v7.0.0: Faucet removed — all QUG earned through mining
   const [sseConnected, setSseConnected] = useState(false);
   const [showLoanModal, setShowLoanModal] = useState(false);
+  // v10.11.83: CEO-owned organization + per-member spending policy.
+  // Button sits next to "Apply for Loan" in the My Wallets header row.
+  const [showOrgModal, setShowOrgModal] = useState(false);
   const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
   const [approvedLoanDetails, setApprovedLoanDetails] = useState<any>(null);
   const [showLoanPaybackModal, setShowLoanPaybackModal] = useState(false);
@@ -679,6 +683,19 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNav
   const [activeDashboardTab, setActiveDashboardTab] = useState<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>('wallet');
   const [unreadEmailCount, setUnreadEmailCount] = useState(0);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  // v10.11.95: calendar due-event badge. "Due" = the event has entered its own
+  // reminder window and has not finished yet, so it respects the reminder_minutes
+  // the user chose per event rather than imposing a fixed lead time.
+  const [calendarDueCount, setCalendarDueCount] = useState(0);
+  const dueEventIdsRef = useRef<string[]>([]);
+  // Dismissed ids persist across reloads, so an acknowledged event does not
+  // re-badge on every poll (the email badge gets this for free from read state).
+  const [seenDueEventIds, setSeenDueEventIds] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('calendarSeenDueEvents');
+      return saved ? new Set<string>(JSON.parse(saved)) : new Set<string>();
+    } catch { return new Set<string>(); }
+  });
   const [tabOrder, setTabOrder] = useState<Array<'wallet' | 'mail' | 'calendar' | 'chat' | 'search'>>(() => {
     try {
       const saved = localStorage.getItem('dashboardTabOrder');
@@ -938,6 +955,89 @@ const Dashboard = memo(function Dashboard({ onNavigateToSend, liveBalance, onNav
     // Small delay to let EmailScreen's mark-read calls settle
     const timer = setTimeout(fetchUnread, 500);
     return () => clearTimeout(timer);
+  }, [activeDashboardTab]);
+
+  // v10.11.95: poll for calendar events that have come due, so the CALENDAR tab
+  // badges the same way MAIL does when new post arrives.
+  useEffect(() => {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    // CalendarScreen's date keys are YYYYMMDD with no separators - match exactly.
+    const dateKey = (d: Date) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+
+    const checkDue = async () => {
+      try {
+        const now = Math.floor(Date.now() / 1000);
+        // Must reach back far enough to still SEE an event that is inside the
+        // missed-grace period (an all-day event ending 23:59 plus 24h grace can be
+        // ~2 days past its start date), and forward far enough for a long reminder.
+        const from = new Date(Date.now() - 3 * 86400_000);
+        const to = new Date(Date.now() + 2 * 86400_000);
+        const res = await qnkAPI.getCalendarEvents(dateKey(from), dateKey(to));
+        const events: any[] = Array.isArray(res?.data) ? res.data : [];
+
+        const due = events.filter((ev) => {
+          if (!ev || typeof ev.start_time !== 'number') return false;
+          // Already-executed scheduled transactions are history, not a reminder.
+          if (ev.scheduled_tx?.executed) return false;
+          // Lead time = the largest reminder the user set on this event; 15 min default.
+          const lead = Array.isArray(ev.reminder_minutes) && ev.reminder_minutes.length > 0
+            ? Math.max(...ev.reminder_minutes.filter((m: any) => typeof m === 'number'))
+            : 15;
+          const windowOpens = ev.start_time - lead * 60;
+
+          // When the event itself is over.
+          let eventEnds: number;
+          if (ev.all_day) {
+            // All-day events are stored at local midnight — they run to end of that day.
+            const d = new Date(ev.start_time * 1000);
+            d.setHours(23, 59, 59, 999);
+            eventEnds = Math.floor(d.getTime() / 1000);
+          } else if (typeof ev.end_time === 'number' && ev.end_time > ev.start_time) {
+            eventEnds = ev.end_time;
+          } else {
+            eventEnds = ev.start_time;
+          }
+
+          // A notification you can miss is not a notification. The badge does NOT
+          // expire when the event does — it keeps flagging for a grace period, and
+          // is cleared by ACKNOWLEDGEMENT (opening the CALENDAR tab), exactly like an
+          // unread email stays unread until you read it. Without this, a midnight
+          // event stopped badging before the user was awake to see it.
+          const MISSED_GRACE_SECS = 24 * 3600;
+          return now >= windowOpens && now <= eventEnds + MISSED_GRACE_SECS;
+        });
+
+        const dueIds: string[] = due.map((ev) => String(ev.id)).filter(Boolean);
+        dueEventIdsRef.current = dueIds;
+        setCalendarDueCount(dueIds.filter((id) => !seenDueEventIds.has(id)).length);
+      } catch {
+        // Offline or unauthenticated - leave the badge as-is rather than flashing 0.
+      }
+    };
+
+    checkDue();
+    const interval = setInterval(checkDue, 60_000);
+    const onCalendarChanged = () => { checkDue(); };
+    window.addEventListener('calendar-event-changed', onCalendarChanged);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('calendar-event-changed', onCalendarChanged);
+    };
+  }, [seenDueEventIds]);
+
+  // Opening the CALENDAR tab acknowledges whatever is due right now.
+  useEffect(() => {
+    if (activeDashboardTab !== 'calendar') return;
+    if (dueEventIdsRef.current.length === 0) { setCalendarDueCount(0); return; }
+    setSeenDueEventIds((prev) => {
+      const next = new Set(prev);
+      dueEventIdsRef.current.forEach((id) => next.add(id));
+      try {
+        localStorage.setItem('calendarSeenDueEvents', JSON.stringify(Array.from(next).slice(-200)));
+      } catch {}
+      return next;
+    });
+    setCalendarDueCount(0);
   }, [activeDashboardTab]);
 
   // v7.3.4: Persist tab order changes
@@ -3183,10 +3283,9 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
 
   return (
     <div className="space-y-8 relative">
-      {/* Persistent quantum particle background at 10% opacity */}
-      <div className="fixed inset-0 z-0 pointer-events-none" style={{ opacity: 0.1 }}>
-        <QuantumLoader backgroundOnly />
-      </div>
+      {/* Persistent quantum particle background removed — QuantumLoader (non-inline) roots
+          at fixed inset-0 z-[9999], so it floated the loader animation on top of the loaded
+          dashboard ("loading animation still visible after loading"). 2026-07-10 */}
 
       {/* Quillon Graph welcome modal (features + AI/MCP intro) */}
       {showWelcomeModal && (
@@ -3242,6 +3341,7 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                 const isActive = activeDashboardTab === tabId;
                 const isMail = tabId === 'mail';
                 const isChat = tabId === 'chat';
+                const isCalendar = tabId === 'calendar';
                 return (
                   <motion.button
                     key={tabId}
@@ -3359,6 +3459,52 @@ Transactions (recent): ${recentTransactions.slice(0, 10).length}`;
                           >
                             <span className="text-[9px] font-black text-white leading-none" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.4)' }}>
                               {unreadEmailCount > 99 ? '99+' : unreadEmailCount}
+                            </span>
+                          </motion.div>
+                        </div>
+                      )}
+                      {/* v10.11.95: calendar due-event badge — amber, so it reads as
+                          "something is scheduled" rather than the pink "new mail". */}
+                      {isCalendar && calendarDueCount > 0 && (
+                        <div className="absolute -top-2.5 -right-3 pointer-events-none">
+                          {/* Outer pulsing ring */}
+                          <motion.div
+                            className="absolute inset-0 rounded-full"
+                            style={{
+                              width: 20, height: 20,
+                              background: 'radial-gradient(circle, rgba(255, 170, 40, 0.5), transparent 70%)',
+                              filter: 'blur(3px)',
+                              transform: 'translate(-3px, -3px)',
+                            }}
+                            animate={{ scale: [1, 1.8, 1], opacity: [0.7, 0, 0.7] }}
+                            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+                          />
+                          {/* Second pulse ring offset */}
+                          <motion.div
+                            className="absolute inset-0 rounded-full"
+                            style={{
+                              width: 18, height: 18,
+                              border: '1px solid rgba(255, 200, 90, 0.6)',
+                              transform: 'translate(-2px, -2px)',
+                            }}
+                            animate={{ scale: [1, 2.2, 1], opacity: [0.5, 0, 0.5] }}
+                            transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut', delay: 0.5 }}
+                          />
+                          {/* Badge core */}
+                          <motion.div
+                            className="relative flex items-center justify-center rounded-full"
+                            style={{
+                              minWidth: 16, height: 16,
+                              padding: '0 4px',
+                              background: 'linear-gradient(135deg, #F59E0B, #FBBF24, #F59E0B)',
+                              boxShadow: '0 0 8px rgba(245, 158, 11, 0.8), 0 0 16px rgba(245, 158, 11, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.3)',
+                              border: '1.5px solid rgba(255, 220, 150, 0.5)',
+                            }}
+                            animate={{ scale: [1, 1.12, 1] }}
+                            transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                          >
+                            <span className="text-[9px] font-black text-slate-900 leading-none">
+                              {calendarDueCount > 99 ? '99+' : calendarDueCount}
                             </span>
                           </motion.div>
                         </div>
@@ -3946,6 +4092,28 @@ We thank the community members who reported degraded sync speeds and helped us r
                 >
                   <DollarSign className="w-4 h-4" />
                   Apply for Loan
+                </motion.button>
+
+                {/* v10.11.83: Multi-Sig / Organization — CEO wallet creates an
+                    org and gives each member their own spending limits.
+                    Sits directly next to Apply for Loan per operator request. */}
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => {
+                    console.log('🏛️ Multi-Sig button clicked - opening organization modal');
+                    setShowOrgModal(true);
+                  }}
+                  className="px-4 py-2 rounded-xl transition-colors text-sm font-medium flex items-center gap-2"
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.2), rgba(217, 70, 239, 0.15))',
+                    border: '2px solid rgba(168, 85, 247, 0.3)',
+                    color: 'rgb(216, 180, 254)'
+                  }}
+                  title="Organization & multi-signature policy"
+                >
+                  <Shield className="w-4 h-4" />
+                  Multi-Sig
                 </motion.button>
 
               </div>
@@ -4999,6 +5167,13 @@ We thank the community members who reported degraded sync speeds and helped us r
           walletAddress={walletAddress}
         />
       )}
+
+      {/* v10.11.83: Organization & Multi-Sig — opened from the button next to
+          Apply for Loan. CEO wallet, members, per-member spending limits. */}
+      <OrganizationModal
+        isOpen={showOrgModal}
+        onClose={() => setShowOrgModal(false)}
+      />
 
       {/* Loan Approval Modal - Triggered by SSE loan-approved event */}
       {showLoanApprovalModal && approvedLoanDetails && (

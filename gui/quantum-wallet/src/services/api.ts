@@ -904,7 +904,9 @@ class QNarwhalKnightAPI {
    * Authenticated request - automatically signs with wallet private key
    * Requires wallet to be unlocked in session or uses stored mnemonic
    */
-  private async authenticatedRequest<T>(
+  // v10.11.97: made public so standalone helpers (e.g. qcredit lock/unlock/claim)
+  // can reuse the real Ed25519 path-signed X-Wallet-Auth flow instead of hand-rolling it.
+  async authenticatedRequest<T>(
     endpoint: string,
     options?: RequestInit,
     passwordPrompt?: () => Promise<string>,
@@ -3695,40 +3697,40 @@ export async function getQCreditPosition(authHeaders: Record<string, string>, ba
   return data.data;
 }
 
-export async function lockQCredit(wallet: string, amount: string, tier: string, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
-  const url = baseUrl || getConnectionInfo().apiBaseUrl;
-  const resp = await fetch(`${url}/api/v1/qcredit/lock`, {
+// v10.11.97: the backend qcredit lock/unlock/claim endpoints now REQUIRE a real
+// Ed25519 X-Wallet-Auth signed over the exact path (they were unauthenticated). The
+// old code here sent a fake header (raw wallet address) and only worked because the
+// endpoint ignored auth. Route through authenticatedRequest, which signs
+// /api/v1/qcredit/* with the unlocked session key. The trailing authHeaders/baseUrl
+// params are kept (ignored) so existing call sites still type-check.
+export async function lockQCredit(wallet: string, amount: string, tier: string, _authHeaders?: Record<string, string>, _baseUrl?: string): Promise<any> {
+  const resp = await qnkAPI.authenticatedRequest<any>('/v1/qcredit/lock', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, amount, tier }),
   });
-  const data = await readQCreditJson(resp, 'QCREDIT lock');
-  if (!data.success) throw new Error(data.error || 'Failed to lock QUG');
-  return data.data;
+  if (!resp.success) throw new Error(resp.error || 'Failed to lock QUG');
+  return resp.data;
 }
 
-export async function unlockQCredit(wallet: string, position_index: number, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
-  const url = baseUrl || getConnectionInfo().apiBaseUrl;
-  const resp = await fetch(`${url}/api/v1/qcredit/unlock`, {
+export async function unlockQCredit(wallet: string, position_index: number, _authHeaders?: Record<string, string>, _baseUrl?: string): Promise<any> {
+  const resp = await qnkAPI.authenticatedRequest<any>('/v1/qcredit/unlock', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
-  const data = await readQCreditJson(resp, 'QCREDIT unlock');
-  if (!data.success) throw new Error(data.error || 'Failed to unlock position');
-  return data.data;
+  if (!resp.success) throw new Error(resp.error || 'Failed to unlock position');
+  return resp.data;
 }
 
-export async function claimQCreditYield(wallet: string, position_index: number, authHeaders?: Record<string, string>, baseUrl?: string): Promise<any> {
-  const url = baseUrl || getConnectionInfo().apiBaseUrl;
-  const resp = await fetch(`${url}/api/v1/qcredit/claim`, {
+export async function claimQCreditYield(wallet: string, position_index: number, _authHeaders?: Record<string, string>, _baseUrl?: string): Promise<any> {
+  const resp = await qnkAPI.authenticatedRequest<any>('/v1/qcredit/claim', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet, position_index }),
   });
-  const data = await readQCreditJson(resp, 'QCREDIT claim');
-  if (!data.success) throw new Error(data.error || 'Failed to claim yield');
-  return data.data;
+  if (!resp.success) throw new Error(resp.error || 'Failed to claim yield');
+  return resp.data;
 }
 
 // ─────────────────────────────────────────────────────────────────

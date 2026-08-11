@@ -79,6 +79,38 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
   const isStaking = transaction.type === 'staking_reward';
   const isReflection = transaction.type === 'reflection_reward';
 
+  // ── v10.11.90 AMOUNT DISPLAY FIX ───────────────────────────────────────────
+  // Symptom: a 176,000 QUGUSD transfer rendered as "+0.00 QUG".
+  //
+  // Cause 1 — DOUBLE DIVISION. Dashboard.tsx:1661 already converts the raw
+  // base-unit amount to display units (`rawAmount / 1e24`, QUG is 24-decimal).
+  // This modal then divided by 1e10 a second time, so every amount was scaled
+  // down by 10^10: 176,000 → 0.0000176 → rounds to "0.00". Every non-zero
+  // transfer this modal has ever shown was wrong; only very large sums escaped
+  // rounding to zero. `transaction.amount` is ALREADY in display units — every
+  // call site (the two API mappings plus the mining/loan paths) passes it that
+  // way, so there is nothing left to divide by here.
+  //
+  // Cause 2 — HARDCODED TICKER. The unit was always `TICKER_SYMBOL` ("QUG"),
+  // so a QUGUSD transfer claimed to be QUG. Token transfers carry their own
+  // symbol; use it when present.
+  //
+  // NOTE: we deliberately do NOT set `type: 'token_transfer'` upstream —
+  // `isReceive` (line above) is derived from `type`, so doing that would make
+  // every token transfer render as an outgoing "-" in red. Direction and
+  // denomination are separate concerns and are kept that way.
+  const unitSymbol = transaction.tokenSymbol || TICKER_SYMBOL;
+  const isTokenDenominated = !!transaction.tokenSymbol && transaction.tokenSymbol !== TICKER_SYMBOL;
+  const displayAmount = transaction.amount || 0;
+
+  // USD estimate. Dollar stables are ~$1; QUG keeps the project's long-standing
+  // 0.01 placeholder. For any other token we have no price here, so we omit the
+  // estimate entirely rather than print a confidently wrong number.
+  const usdRate: number | null =
+    /^(QUGUSD|USDC|USDT|DAI)$/i.test(unitSymbol) ? 1
+    : unitSymbol === TICKER_SYMBOL ? 0.01
+    : null;
+
   return (
     <AnimatePresence>
       {isOpen && (
@@ -145,7 +177,7 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                   }`}>
                     {isMining ? '⛏️ Mining Reward' :
                      isContract ? '📜 Contract Deployment' :
-                     isToken ? `🪙 ${transaction.tokenSymbol || 'Token'} Transfer` :
+                     (isToken || isTokenDenominated) ? `🪙 ${transaction.tokenSymbol || 'Token'} ${isReceive ? 'Received' : 'Sent'}` :
                      isStaking ? `🎁 Staking Reward` :
                      isReflection ? `💎 Reflection Reward` :
                      isSwap ? `🔄 Swap${transaction.tokenIn && transaction.tokenOut ? ` (${transaction.tokenIn} → ${transaction.tokenOut})` : ''}` :
@@ -186,11 +218,13 @@ export default function TransactionDetailsModal({ transaction, isOpen, onClose }
                 ) : (
                   <div>
                     <p className={`text-3xl font-bold ${isReceive ? 'text-green-400' : 'text-red-400'}`}>
-                      {isReceive ? '+' : '-'}{((transaction.amount || 0) / 1e10).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {TICKER_SYMBOL}
+                      {isReceive ? '+' : '-'}{displayAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 })} {unitSymbol}
                     </p>
-                    <p className="text-sm text-amber-300/60 mt-1">
-                      ≈ ${(((transaction.amount || 0) / 1e10) * 0.01).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
-                    </p>
+                    {usdRate !== null && (
+                      <p className="text-sm text-amber-300/60 mt-1">
+                        ≈ ${(displayAmount * usdRate).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                      </p>
+                    )}
                   </div>
                 )}
               </div>

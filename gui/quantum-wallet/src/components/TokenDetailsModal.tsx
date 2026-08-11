@@ -3,6 +3,7 @@ import { X, TrendingUp, TrendingDown, ExternalLink, Info, Droplet, Zap, Shield, 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import TokenIcon from './TokenIcon';
+import { getTokenBranding } from '../data/tokenBranding';
 import { qnkAPI, getQCreditStatus, getQCreditPosition, getQCreditTiers, lockQCredit, unlockQCredit, claimQCreditYield } from '../services/api';
 import type { QCreditStatus, QCreditPosition, QCreditPositionResponse, QCreditTier } from '../services/api';
 
@@ -778,6 +779,10 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
   // Early return if no token - this prevents the modal from rendering at all
   if (!token) return null;
 
+  // Per-token branding (logo / banner / description / chips). Undefined for
+  // unbranded tokens, which then render exactly as they did before.
+  const branding = getTokenBranding(token.symbol);
+
   const modalContent = (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
@@ -802,11 +807,22 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
           {/* Header */}
           <div className="relative z-10 p-6 border-b border-white/10">
             <div className="flex items-start justify-between">
-              <div className="flex items-center gap-4">
-                <div className="w-16 h-16 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-2xl flex items-center justify-center shadow-lg">
-                  <TokenIcon symbol={token.symbol} icon={token.icon} logoUrl={(token as any).logoUrl} size={48} />
-                </div>
-                <div>
+              <div className="flex items-center gap-4 min-w-0 flex-1">
+                {/* Branded tokens get a larger logo with no gradient tile behind it,
+                    so artwork with its own background is not boxed in or shrunk. */}
+                {branding?.logoUrl ? (
+                  <img
+                    src={branding.logoUrl}
+                    alt={`${token.symbol} logo`}
+                    className="w-24 h-24 rounded-2xl object-cover shadow-lg flex-shrink-0"
+                    style={{ border: '1px solid rgba(255,255,255,0.12)' }}
+                  />
+                ) : (
+                  <div className="w-16 h-16 bg-gradient-to-br from-quantum-cyan to-quantum-purple rounded-2xl flex items-center justify-center shadow-lg flex-shrink-0">
+                    <TokenIcon symbol={token.symbol} icon={token.icon} logoUrl={(token as any).logoUrl} size={48} />
+                  </div>
+                )}
+                <div className="min-w-0">
                   <h2 className="text-3xl font-black text-white">{token.name}</h2>
                   <div className="flex items-center gap-3 mt-1">
                     <span className="text-lg text-gray-400">{token.symbol}</span>
@@ -817,6 +833,22 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
                     )}
                   </div>
                 </div>
+                {/* Banner sits BESIDE the name (not above it) per the original
+                    layout. `contain` shows the whole artwork rather than cropping,
+                    which was the "I can't see the full banner" complaint. */}
+                {branding?.bannerUrl && (
+                  <img
+                    src={branding.bannerUrl}
+                    alt={`${token.symbol} banner`}
+                    className="hidden md:block flex-1 min-w-0 max-h-24 rounded-xl ml-2"
+                    style={{
+                      objectFit: 'contain',
+                      objectPosition: 'left center',
+                      border: '1px solid rgba(255,255,255,0.10)',
+                      background: 'rgba(255,255,255,0.02)',
+                    }}
+                  />
+                )}
               </div>
               <button
                 onClick={onClose}
@@ -1245,7 +1277,56 @@ export default function TokenDetailsModal({ token, onClose }: TokenDetailsModalP
               {/* Description */}
               <div>
                 <h3 className="text-xl font-bold text-white mb-4">About {token.name}</h3>
-                <p className="text-gray-300 leading-relaxed text-sm">{TOKEN_DESCRIPTIONS[(token.symbol || '').toUpperCase()] ?? token.description}</p>
+                {/* Branded description wins over both the curated map and API text. */}
+                <p className="text-gray-300 leading-relaxed text-sm">{branding?.description ?? TOKEN_DESCRIPTIONS[(token.symbol || '').toUpperCase()] ?? token.description}</p>
+
+                {/* Declared token features. Anything flagged `caution` is declared
+                    but NOT functional on-chain — marked so the UI never implies a
+                    working mechanism that isn't there. */}
+                {branding?.features && branding.features.length > 0 && (
+                  <div className="mt-4">
+                    <h4 className="text-[0.7rem] uppercase tracking-[0.15em] text-gray-500 mb-2">Token Features</h4>
+                    <div className="flex flex-wrap gap-2">
+                      {branding.features.map((f) => (
+                        <span
+                          key={f.label}
+                          title={f.caution ? 'Declared by the contract but not yet functional on-chain' : undefined}
+                          className="px-2 py-1 rounded-full text-[0.65rem]"
+                          style={{
+                            color: f.color,
+                            background: `${f.color}1A`,
+                            border: `1px solid ${f.color}33`,
+                          }}
+                        >
+                          {f.label}{f.caution ? ' *' : ''}
+                        </span>
+                      ))}
+                    </div>
+                    {branding.features.some((f) => f.caution) && (
+                      <p className="mt-2 text-[0.65rem] text-gray-500">
+                        * declared by the contract, not yet functional on-chain
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {branding?.whitepaperUrl && (
+                  <div className="mt-4 pt-3 border-t border-white/5">
+                    <a
+                      href={branding.whitepaperUrl}
+                      download
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-colors"
+                      style={{
+                        background: 'rgba(212,175,55,0.12)',
+                        color: '#d4af37',
+                        border: '1px solid rgba(212,175,55,0.25)',
+                      }}
+                    >
+                      <FileText className="w-4 h-4" />
+                      {branding.whitepaperLabel ?? 'Download Whitepaper (PDF)'}
+                    </a>
+                  </div>
+                )}
                 {['QDUALP','QDUALN'].includes((token.symbol || '').toUpperCase()) && (
                 <div className="mt-4 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-4">
                   <div className="text-cyan-300 text-xs font-bold uppercase tracking-wider mb-2">How qdual works · liquidation-free P / N</div>

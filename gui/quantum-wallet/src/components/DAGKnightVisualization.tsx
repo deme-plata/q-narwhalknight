@@ -653,7 +653,7 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
         // Scale and glow effects
         const scale = isNewBlock ? 0.5 + (0.5 * animationProgress) : 1.0;
         const opacity = isNewBlock ? 0.5 + 0.5 * animationProgress : 1.0;
-        const glowIntensity = isNewBlock ? 30 * (1 - animationProgress) + 10 : (isSelected ? 20 : 8);
+        const glowIntensity = isNewBlock ? 18 * (1 - animationProgress) + 6 : (isSelected ? 14 : 6);
 
         const scaledSize = BLOCK_SIZE * scale;
         const scaledX = x + (BLOCK_SIZE - scaledSize) / 2;
@@ -685,18 +685,29 @@ export default function DAGKnightVisualization({ currentHeight }: DAGKnightVisua
 
         // Block content (only if not too small)
         if (scale > 0.7) {
-          // Height number
-          ctx.fillStyle = '#ffffff';
-          ctx.font = `bold ${Math.round(12 * scale)}px Inter, system-ui, sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(`${block.height}`, x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2 - 4);
+          ctx.lineJoin = 'round';
+          ctx.shadowBlur = 0; // never glow the labels — keep them crisp/readable
 
-          // TX count badge
+          // Height number — dark outline so the block's glow can't wash it out
+          const hx = x + BLOCK_SIZE / 2, hy = y + BLOCK_SIZE / 2 - 4;
+          ctx.font = `bold ${Math.round(12 * scale)}px Inter, system-ui, sans-serif`;
+          ctx.lineWidth = Math.max(2.5, 3.5 * scale);
+          ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+          ctx.strokeText(`${block.height}`, hx, hy);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(`${block.height}`, hx, hy);
+
+          // TX count badge — same dark outline for contrast
           if (block.txCount > 0) {
+            const tx = x + BLOCK_SIZE / 2, ty = y + BLOCK_SIZE / 2 + 12;
             ctx.font = `${Math.round(8 * scale)}px Inter, system-ui, sans-serif`;
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.9)';
-            ctx.fillText(`${block.txCount} tx`, x + BLOCK_SIZE / 2, y + BLOCK_SIZE / 2 + 12);
+            ctx.lineWidth = Math.max(2, 2.5 * scale);
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.75)';
+            ctx.strokeText(`${block.txCount} tx`, tx, ty);
+            ctx.fillStyle = 'rgba(52, 211, 153, 0.95)';
+            ctx.fillText(`${block.txCount} tx`, tx, ty);
           }
         }
 

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 
 interface ActiveLoan {
   loan_id: string;
+  borrower_address: string;
   loan_amount: number;
   collateral_amount: number;
   collateral_type: string;
@@ -12,7 +13,15 @@ interface ActiveLoan {
   monthly_payment: number;
   status: string;
   created_at: number;
+  amount_paid?: number | string;
 }
+
+// Compare two qnk-addresses tolerating an optional "qnk" prefix + case.
+const sameAddr = (a?: string, b?: string): boolean => {
+  if (!a || !b) return false;
+  const norm = (s: string) => s.toLowerCase().replace(/^qnk/, '');
+  return norm(a) === norm(b);
+};
 
 interface ActiveLoansCardProps {
   onPayback?: (loanId: string) => void;
@@ -35,11 +44,15 @@ const ActiveLoansCard: React.FC<ActiveLoansCardProps> = ({ onPayback }) => {
       const data = await response.json();
 
       if (data.success && Array.isArray(data.data?.applications)) {
-        // Filter for approved loans only
-        const approved = data.data.applications.filter(
-          (loan: ActiveLoan) => loan.status === 'approved'
+        // v10.11.83 FIX: only show THIS wallet's approved loans. Previously we filtered by
+        // status alone, so every user saw every approved loan on the network (e.g. another
+        // wallet's loan appeared as "Active" with a Make Payment button on all accounts).
+        const myAddress = localStorage.getItem('walletAddress') || '';
+        const mine = data.data.applications.filter(
+          (loan: ActiveLoan) =>
+            loan.status === 'approved' && sameAddr(loan.borrower_address, myAddress)
         );
-        setActiveLoans(approved);
+        setActiveLoans(mine);
       }
     } catch (error) {
       console.error('Failed to load active loans:', error);

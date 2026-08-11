@@ -36,20 +36,25 @@
     <script>
     /* ADAPTIVE FIT-TO-WIDTH ZOOM — makes the whole UI fit the viewport at the
        user's 100% browser zoom (no more manual zoom-out to 50%). Applies a CSS
-       `zoom` on <html> scaled to viewport width. Reversible: delete this block.
-       Tune DESIGN_WIDTH if it's slightly too big (raise) or too small (lower).
-       rocky 2026-07-02 */
+       `zoom` on the #root APP CONTAINER (NOT <html>) scaled to viewport width.
+       Zooming #root (not <html>) is critical: modals portal to <body> and use
+       position:fixed — a `zoom` on <html>/<body> becomes their containing block
+       and mis-positions every modal/dropdown. Keeping the zoom on #root lets the
+       body-level portals stay unzoomed and position against the real viewport.
+       Reversible: delete this block. Tune DESIGN_WIDTH if too big (raise)/small (lower).
+       rocky 2026-07-02, modal-fix 2026-07-06 */
     (function(){
       var DESIGN_WIDTH = 3840; /* the width the full-size (zoom 1) layout is drawn for */
       var MIN = 0.4;           /* never shrink below this */
       var MOBILE = 820;        /* below this, let the app's own mobile layout run */
       function fit(){
-        var el = document.documentElement, w = window.innerWidth;
+        var el = document.getElementById('root'); if (!el) return;
+        var w = window.innerWidth;
         if (w < MOBILE) { el.style.zoom = ''; return; }
         el.style.zoom = Math.max(MIN, Math.min(1, w / DESIGN_WIDTH));
       }
       window.addEventListener('resize', fit, { passive: true });
-      fit();
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fit); else fit();
     })();
     </script>
   </head>

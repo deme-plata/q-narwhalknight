@@ -30,7 +30,7 @@ import { getConnectionInfo } from '../services/api';
 // POST routes (approve/reject/mint/etc.). Pre-fix the bankHeaders just
 // stuffed the bare wallet address into X-Wallet-Auth — AEGIS-QL middleware
 // requires Ed25519-signed JSON, so every approve_loan returned 401.
-import { keypairFromMnemonic, generateAuthHeader } from '../services/walletAuth';
+import { keypairFromMnemonic, generateAuthHeader, walletSession } from '../services/walletAuth';
 
 const MASTER_WALLET = 'efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723';
 
@@ -1456,6 +1456,9 @@ export default function DeployControlPanel() {
   const [bankAtRisk, setBankAtRisk] = useState<any[]>([]);
   const [bankReserves, setBankReserves] = useState<any>(null);
   const [bankMessages, setBankMessages] = useState<any[]>([]);
+  // v10.11.94 BANK BOOK: lender's portfolio view — derived per-loan repayment
+  // state + totals + treasury from GET /quillon-bank/admin/portfolio.
+  const [bankBook, setBankBook] = useState<any>(null);
   const [bankLoading, setBankLoading] = useState(false);
   const [bankSection, setBankSection] = useState<string>('dashboard');
   const [bankCmdLog, setBankCmdLog] = useState<Array<{ cmd: string; result: string; ok: boolean; ts: number }>>([]);
@@ -1767,12 +1770,14 @@ export default function DeployControlPanel() {
     if (!isMaster) return;
     setBankLoading(true);
     try {
-      const [metricsR, loansR, riskR, reservesR, msgsR] = await Promise.all([
+      const [metricsR, loansR, riskR, reservesR, msgsR, bookR] = await Promise.all([
         fetch('/api/v1/quillon-bank/metrics', { headers: bankHeaders }).catch(() => null),
         fetch('/api/v1/quillon-bank/lending/applications', { headers: bankHeaders }).catch(() => null),
         fetch('/api/v1/quillon-bank/lending/at-risk', { headers: bankHeaders }).catch(() => null),
         fetch('/api/v1/quillon-bank/treasury/reserves', { headers: bankHeaders }).catch(() => null),
         fetch('/api/v1/quillon-bank/messages/admin/list', { headers: bankHeaders }).catch(() => null),
+        // v10.11.94 bank book (needs a v94+ node; older nodes 404 → bankBook stays null)
+        fetch('/api/v1/quillon-bank/admin/portfolio', { headers: bankHeaders }).catch(() => null),
       ]);
 
       if (metricsR?.ok) {
@@ -1794,6 +1799,9 @@ export default function DeployControlPanel() {
       if (msgsR?.ok) {
         // Same unwrap fix as loans (server response is { data: { messages: [...] } }).
         try { const j = await msgsR.json(); const d = j?.data?.messages ?? j?.messages ?? j?.data ?? j; setBankMessages(Array.isArray(d) ? d : []); } catch {}
+      }
+      if (bookR?.ok) {
+        try { const j = await bookR.json(); setBankBook(j?.data ?? j); } catch {}
       }
     } catch {}
     setBankLoading(false);
@@ -1924,37 +1932,54 @@ export default function DeployControlPanel() {
       // founder auth so we can leave GETs alone.
       if (method !== 'GET') {
         try {
-          // walletMnemonic / walletSeed convention: the wallet stores its
-          // mnemonic in localStorage when imported, the per-address seed
-          // in `quillon:seed:<addr>`, and `walletSeed` as the canonical
-          // active seed. For Ed25519 signing we need the private key —
-          // try the canonical seed path first.
-          const seed = localStorage.getItem('walletSeed');
-          const mnemonic = localStorage.getItem('walletMnemonic');
+          // v10.11.83 FIX: founder-only POST routes (approve_loan, mint, ...) sit
+          // behind the AuthenticatedWallet extractor, which does
+          // serde_json::from_str on X-Wallet-Auth. Previously bankAction rebuilt
+          // the key from localStorage 'walletSeed'/'walletMnemonic' — but those
+          // keys are only written by the MultiWalletDrawer, so a founder who
+          // logged in normally had neither → privateKey was null → we sent a bare
+          // ADDRESS string as X-Wallet-Auth → the server tried to JSON-parse it and
+          // returned "401 Invalid authentication JSON: expected value at line 1
+          // column 1". Every founder loan approval failed here.
+          //
+          // Fix: sign from walletSession (the canonical in-memory session populated
+          // on ANY login and used by every other signed component, e.g.
+          // XListCrowdfundModal/ChatScreen). Fall back to the localStorage-seed
+          // derivation only if the session is somehow unavailable.
           let privateKey: Uint8Array | null = null;
-          if (seed) {
-            // seed is 64-char hex per multi-wallet drawer's generateWallet().
-            // Derive priv via SHA3-256(seed_string_utf8) — matches the
-            // server's import_wallet derivation at handlers.rs:2562.
-            const sha3 = await import('@noble/hashes/sha3');
-            const utils = await import('@noble/hashes/utils');
-            privateKey = sha3.sha3_256(utils.utf8ToBytes(seed));
-          } else if (mnemonic) {
-            const kp = await keypairFromMnemonic(mnemonic);
-            privateKey = kp.privateKey;
+          let signAddress = walletAddress.startsWith('qnk') ? walletAddress : `qnk${walletAddress}`;
+          const session = walletSession.getSession();
+          if (session?.privateKey && session?.address) {
+            privateKey = session.privateKey;
+            signAddress = session.address;
+          } else {
+            const seed = localStorage.getItem('walletSeed');
+            const mnemonic = localStorage.getItem('walletMnemonic');
+            if (seed) {
+              // seed is 64-char hex per multi-wallet drawer's generateWallet().
+              // Derive priv via SHA3-256(seed_string_utf8) — matches the
+              // server's import_wallet derivation at handlers.rs:2562.
+              const sha3 = await import('@noble/hashes/sha3');
+              const utils = await import('@noble/hashes/utils');
+              privateKey = sha3.sha3_256(utils.utf8ToBytes(seed));
+            } else if (mnemonic) {
+              const kp = await keypairFromMnemonic(mnemonic);
+              privateKey = kp.privateKey;
+            }
           }
           if (privateKey) {
             const authHeader = await generateAuthHeader(
               privateKey,
-              walletAddress.startsWith('qnk') ? walletAddress : `qnk${walletAddress}`,
+              signAddress,
               path.replace(/^\/api\/v1/, '/api/v1'), // server expects full path
               'Ed25519',
             );
             headers['X-Wallet-Auth'] = authHeader;
           } else {
-            // Fall back to legacy bare-address header (still 401 on protected
-            // routes but useful for log/debug paths)
-            headers['X-Wallet-Auth'] = walletAddress;
+            // No key material available — surface a clear reason instead of
+            // sending a bare address that the server rejects as invalid JSON.
+            addBankLog(cmd, 'Cannot sign request: wallet session unavailable. Please re-unlock your wallet and retry.', false);
+            return;
           }
         } catch (e: any) {
           addBankLog(cmd, `Auth header generation failed: ${e?.message ?? e}`, false);
@@ -1972,11 +1997,18 @@ export default function DeployControlPanel() {
       const text = await resp.text();
       let parsed: any;
       try { parsed = JSON.parse(text); } catch { parsed = text; }
-      if (resp.ok) {
+      // A business-logic failure comes back as HTTP 200 with { success:false, message }
+      // (e.g. approve_loan rejecting an under-collateralized or already-approved loan).
+      // Treat success:false as an error so the reason renders red instead of green.
+      const okBody = resp.ok && !(parsed && typeof parsed === 'object' && parsed.success === false);
+      if (okBody) {
         addBankLog(cmd, typeof parsed === 'string' ? parsed : JSON.stringify(parsed.data || parsed, null, 2), true);
         fetchBankData();
       } else {
-        addBankLog(cmd, `Error ${resp.status}: ${typeof parsed === 'string' ? parsed : JSON.stringify(parsed)}`, false);
+        const reason = typeof parsed === 'string'
+          ? parsed
+          : (parsed?.message || parsed?.error || JSON.stringify(parsed));
+        addBankLog(cmd, resp.ok ? reason : `Error ${resp.status}: ${reason}`, false);
       }
     } catch (e: any) {
       addBankLog(cmd, `Network error: ${e.message}`, false);
@@ -3760,6 +3792,7 @@ export default function DeployControlPanel() {
                     { id: 'dashboard', icon: Eye, label: 'Dashboard' },
                     { id: 'mint', icon: Banknote, label: 'Mint/Burn' },
                     { id: 'loans', icon: FileText, label: 'Loans' },
+                    { id: 'book', icon: BarChart3, label: 'Bank Book' },
                     { id: 'messages', icon: Send, label: 'Messages' },
                     { id: 'treasury', icon: Wallet, label: 'Treasury' },
                     { id: 'log', icon: Terminal, label: 'Command Log' },
@@ -3778,6 +3811,11 @@ export default function DeployControlPanel() {
                       {s.id === 'loans' && bankLoans.filter(l => l.status === 'pending').length > 0 && (
                         <span className="ml-0.5 px-1 rounded-full bg-red-500/30 text-red-300 text-[8px] font-bold">
                           {bankLoans.filter(l => l.status === 'pending').length}
+                        </span>
+                      )}
+                      {s.id === 'book' && ((bankBook?.totals?.late_count ?? 0) + (bankBook?.totals?.at_risk_count ?? 0)) > 0 && (
+                        <span className="ml-0.5 px-1 rounded-full bg-red-500/30 text-red-300 text-[8px] font-bold">
+                          {(bankBook?.totals?.late_count ?? 0) + (bankBook?.totals?.at_risk_count ?? 0)}
                         </span>
                       )}
                       {s.id === 'messages' && bankMessages.filter((m: any) => !m.read && m.from !== 'Bank').length > 0 && (
@@ -4089,6 +4127,128 @@ export default function DeployControlPanel() {
                         </div>
                       )}
                     </div>
+                  </div>
+                )}
+
+                {/* ─── Bank Book Section (v10.11.94 lender portfolio) ─── */}
+                {bankSection === 'book' && (
+                  <div className="space-y-3">
+                    {!bankBook ? (
+                      <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-4 text-center">
+                        <div className="text-[11px] text-amber-200/50">Bank book unavailable</div>
+                        <div className="text-[9px] text-amber-200/30 mt-1">
+                          Requires node v10.11.94+ (admin portfolio endpoint) and admin access. Hit Refresh after upgrading.
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        {/* Portfolio totals */}
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { label: 'Total Lent', value: `${(bankBook.totals?.total_lent_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} QUGUSD`, color: 'text-amber-300' },
+                            { label: 'Outstanding', value: `${(bankBook.totals?.total_outstanding_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} QUGUSD`, color: 'text-orange-300' },
+                            { label: 'Repaid', value: `${(bankBook.totals?.total_repaid_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} QUGUSD`, color: 'text-emerald-300' },
+                            { label: 'Interest Earned', value: `${(bankBook.totals?.realized_interest_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUGUSD`, color: 'text-emerald-300' },
+                            { label: 'Collateral Locked', value: `${(bankBook.totals?.collateral_locked_qug ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} QUG ($${(bankBook.totals?.collateral_locked_value_usd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })})`, color: 'text-blue-300' },
+                            { label: 'Late / At-Risk', value: `${bankBook.totals?.late_count ?? 0} late · ${bankBook.totals?.at_risk_count ?? 0} at-risk`, color: (bankBook.totals?.late_count || bankBook.totals?.at_risk_count) ? 'text-red-300' : 'text-emerald-300' },
+                          ].map(t => (
+                            <div key={t.label} className="rounded-lg border border-slate-700/30 bg-slate-800/30 p-2">
+                              <div className="text-[8px] text-amber-200/40 uppercase">{t.label}</div>
+                              <div className={`text-[11px] font-semibold ${t.color} truncate`} title={t.value}>{t.value}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Treasury position (same screen, per the build request) */}
+                        <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Landmark className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="text-[10px] font-semibold text-emerald-200/80 uppercase">Master Bank Treasury (dev-fee wallet)</span>
+                            <span className="ml-auto text-[8px] font-mono text-emerald-200/40">{bankBook.treasury?.founder_wallet?.slice(0, 16)}…</span>
+                          </div>
+                          <div className="grid grid-cols-4 gap-2 text-center">
+                            <div>
+                              <div className="text-[8px] text-emerald-200/40 uppercase">QUG</div>
+                              <div className="text-[11px] font-semibold text-emerald-300">{(bankBook.treasury?.qug_balance ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                            </div>
+                            <div>
+                              <div className="text-[8px] text-emerald-200/40 uppercase">QUGUSD</div>
+                              <div className="text-[11px] font-semibold text-emerald-300">{(bankBook.treasury?.qugusd_balance ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</div>
+                            </div>
+                            <div>
+                              <div className="text-[8px] text-emerald-200/40 uppercase">Dev Fee</div>
+                              <div className="text-[11px] font-semibold text-emerald-300">{bankBook.treasury?.dev_fee_percent ?? 1}%</div>
+                            </div>
+                            <div>
+                              <div className="text-[8px] text-emerald-200/40 uppercase">QUG Price</div>
+                              <div className="text-[11px] font-semibold text-emerald-300">${(bankBook.qug_price_usd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Loan ledger */}
+                        <div className="rounded-lg border border-slate-700/30 bg-slate-800/20 p-3">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <BarChart3 className="w-3.5 h-3.5 text-blue-400" />
+                            <span className="text-[10px] font-semibold text-blue-200/80 uppercase">Loan Ledger ({(bankBook.loans ?? []).length})</span>
+                            <span className="ml-auto text-[8px] text-amber-200/30">coverage = collateral value ÷ outstanding · liquidation at {bankBook.liquidation_threshold_pct ?? 120}%</span>
+                          </div>
+                          {(bankBook.loans ?? []).length === 0 ? (
+                            <div className="text-center py-3 text-[10px] text-amber-200/30">No loans on the book</div>
+                          ) : (
+                            <div className="space-y-1.5 max-h-80 overflow-y-auto">
+                              {(bankBook.loans ?? []).map((ln: any) => {
+                                const statusColor = ln.status === 'approved' ? 'text-emerald-300 bg-emerald-500/20' : ln.status === 'pending' ? 'text-amber-300 bg-amber-500/20' : ln.status === 'paid' ? 'text-blue-300 bg-blue-500/20' : 'text-red-300 bg-red-500/20';
+                                const cov = ln.coverage_ratio_pct;
+                                const covColor = cov == null ? 'text-amber-200/40' : cov < 120 ? 'text-red-300' : cov < 150 ? 'text-amber-300' : 'text-emerald-300';
+                                const paidPct = ln.total_owed_qugusd > 0 ? Math.min(100, (ln.amount_paid_qugusd / ln.total_owed_qugusd) * 100) : 0;
+                                // Rocky's pre-rotation wallet whose seed leaked publicly (rotated 2026-06-17) —
+                                // anything from it must be treated as attacker-reachable, never auto-approved.
+                                const leakedWallet = ln.borrower_address?.startsWith('qnk7154929a');
+                                return (
+                                  <div key={ln.loan_id} className={`p-2 rounded-lg border ${ln.is_late ? 'bg-red-500/5 border-red-500/30' : 'bg-slate-800/30 border-slate-700/20'}`}>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className={`px-1 py-0.5 rounded ${statusColor} text-[8px] font-bold uppercase`}>{ln.status}</span>
+                                      {ln.is_late && (
+                                        <span className="px-1 py-0.5 rounded bg-red-500/30 text-red-300 text-[8px] font-bold">LATE · {ln.months_behind} mo behind</span>
+                                      )}
+                                      {ln.at_risk && (
+                                        <span className="px-1 py-0.5 rounded bg-red-500/30 text-red-300 text-[8px] font-bold">COLLATERAL AT RISK</span>
+                                      )}
+                                      {leakedWallet && (
+                                        <span className="px-1 py-0.5 rounded bg-red-500/40 text-red-200 text-[8px] font-bold" title="This borrower address is the retired Rocky wallet whose seed leaked publicly (rotated 2026-06-17). Do not approve or disburse to it.">⚠ LEAKED-SEED WALLET</span>
+                                      )}
+                                      <span className="text-[9px] font-mono text-amber-200/50 truncate">{ln.borrower_address?.slice(0, 20)}…</span>
+                                      <span className="ml-auto text-[8px] text-amber-200/30 font-mono">{ln.loan_id?.slice(0, 8)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-4 gap-x-3 gap-y-0.5 mt-1.5 text-[9px]">
+                                      <div><span className="text-amber-200/30">Principal </span><span className="text-amber-200/70">{(ln.principal_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span></div>
+                                      <div><span className="text-amber-200/30">Outstanding </span><span className="text-orange-300">{(ln.outstanding_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span></div>
+                                      <div><span className="text-amber-200/30">Paid </span><span className="text-emerald-300">{(ln.amount_paid_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}</span><span className="text-amber-200/30"> (of which interest {(ln.interest_realized_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })})</span></div>
+                                      <div><span className="text-amber-200/30">Terms </span><span className="text-amber-200/70">{ln.term_months}mo @ {(ln.interest_rate_apr_pct ?? 0).toFixed(1)}%</span></div>
+                                      <div><span className="text-amber-200/30">Collateral </span><span className="text-blue-300">{(ln.collateral_amount ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} {ln.collateral_type}</span></div>
+                                      <div><span className="text-amber-200/30">Coverage </span><span className={covColor}>{cov == null ? '—' : `${cov.toFixed(0)}%`}</span></div>
+                                      <div className="col-span-2">
+                                        <span className="text-amber-200/30">Next due </span>
+                                        <span className={ln.is_late ? 'text-red-300' : 'text-amber-200/70'}>
+                                          {ln.next_payment_due_ts
+                                            ? `${new Date(ln.next_payment_due_ts * 1000).toLocaleDateString()} · ${(ln.next_payment_amount_qugusd ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} QUGUSD`
+                                            : ln.status === 'approved' ? 'fully covered' : '—'}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    {/* Repayment progress */}
+                                    <div className="mt-1.5 h-1 rounded-full bg-slate-700/40 overflow-hidden">
+                                      <div className={`h-full ${ln.is_late ? 'bg-red-400/70' : 'bg-emerald-400/70'}`} style={{ width: `${paidPct}%` }} />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 

@@ -229,6 +229,39 @@ export default function EmailScreen() {
   const composeRef = useRef<HTMLTextAreaElement>(null);
 
   // ============================================================================
+  // Full-page height — compensate for the adaptive fit-to-width `zoom` on #root
+  // (index.html). CSS `zoom` scales rendered sizes, so `100vh` in layout px
+  // renders at only ~42% of the screen on a typical desktop (zoom = w/3840).
+  // Measure the real available height in layout units instead: distance from
+  // this element's top to the bottom of the visible viewport, divided by zoom.
+  // ============================================================================
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [rootHeight, setRootHeight] = useState<string>('calc(100vh - 120px)');
+  useEffect(() => {
+    const compute = () => {
+      const el = rootRef.current;
+      if (!el) return;
+      const appRoot = document.getElementById('root');
+      const zoom = appRoot && (appRoot.style as any).zoom
+        ? parseFloat((appRoot.style as any).zoom) || 1
+        : 1;
+      const topRendered = Math.max(0, el.getBoundingClientRect().top);
+      const available = (window.innerHeight - topRendered) / zoom - 24;
+      if (available > 400) setRootHeight(`${Math.round(available)}px`);
+    };
+    compute();
+    // Re-measure after banners/token bar settle their layout
+    const t1 = window.setTimeout(compute, 300);
+    const t2 = window.setTimeout(compute, 1200);
+    window.addEventListener('resize', compute);
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.removeEventListener('resize', compute);
+    };
+  }, []);
+
+  // ============================================================================
   // Data Fetching
   // ============================================================================
 
@@ -533,8 +566,10 @@ export default function EmailScreen() {
 
   return (
     <div
+      ref={rootRef}
       className="h-[calc(100vh-120px)] flex rounded-2xl overflow-hidden"
       style={{
+        height: rootHeight,
         background: 'linear-gradient(135deg, rgba(10,14,26,0.98), rgba(14,20,35,0.98), rgba(10,14,26,0.98))',
         border: '1px solid rgba(34, 211, 238, 0.1)',
         boxShadow: '0 0 60px rgba(255,215,0,0.04), 0 0 120px rgba(0,229,255,0.03), inset 0 1px 0 rgba(255,255,255,0.03)',

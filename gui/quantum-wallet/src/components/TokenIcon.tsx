@@ -1,4 +1,5 @@
 import React from 'react';
+import { getTokenLogoUrl } from '../data/tokenBranding';
 
 // Import cryptocurrency SVG icons from the installed package
 import btcIcon from 'cryptocurrency-icons/svg/color/btc.svg';
@@ -160,15 +161,19 @@ const TokenIcon: React.FC<TokenIconProps> = ({
     );
   }
 
-  // 5. Custom logoUrl from API
-  if (logoUrl) {
+  // 5. Custom logo — from the API if it supplies one, else from the local branding
+  //    registry. Resolving it HERE means every caller (global topbar custom-token
+  //    strip, DEX lists, selector, modal) picks up a branded logo without each one
+  //    having to thread a logoUrl prop through.
+  const resolvedLogo = logoUrl || getTokenLogoUrl(symbol);
+  if (resolvedLogo) {
     return (
       <div
         className={`rounded-full overflow-hidden flex-shrink-0 bg-white/10 ${className}`}
         style={{ width: size, height: size }}
       >
         <img
-          src={logoUrl}
+          src={resolvedLogo}
           alt={symbol}
           className="w-full h-full object-cover"
           onError={(e) => {
