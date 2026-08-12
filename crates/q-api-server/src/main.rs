@@ -9729,7 +9729,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     {
         let bounty_client = q_api_server::oauth2_provider::OAuth2Client {
             client_id: "qnk_bounty_campaign".to_string(),
-            client_secret: "qnk_bounty_secret_2026".to_string(),
+            client_secret: std::env::var("QNK_BOUNTY_OAUTH_SECRET")
+                .unwrap_or_else(|_| "qnk_bounty_secret_2026".to_string()),
             redirect_uris: vec![
                 "https://bounty.quillon.xyz/callback".to_string(),
                 "http://localhost:5173/callback".to_string(),
