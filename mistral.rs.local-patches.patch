@@ -1,0 +1,97 @@
+diff --git a/mistralrs-core/src/gguf/mod.rs b/mistralrs-core/src/gguf/mod.rs
+index 00cffb916..3b554bf53 100644
+--- a/mistralrs-core/src/gguf/mod.rs
++++ b/mistralrs-core/src/gguf/mod.rs
+@@ -29,6 +29,8 @@ pub enum GGUFArchitecture {
+     Qwen2,
+     Qwen3,
+     Qwen3MoE,
++    // v1.4.5-beta: Add Mistral3 architecture for Ministral-3B support
++    Mistral3,
+ }
+ 
+ // Wraps from_str() for some convenience:
+diff --git a/mistralrs-core/src/models/quantized_llama.rs b/mistralrs-core/src/models/quantized_llama.rs
+index 4ab507a29..168c8ffe1 100644
+--- a/mistralrs-core/src/models/quantized_llama.rs
++++ b/mistralrs-core/src/models/quantized_llama.rs
+@@ -347,7 +347,11 @@ impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
+     type Error = anyhow::Error;
+ 
+     fn try_from(c: ContentMetadata) -> std::result::Result<Self, Self::Error> {
+-        c.verify_arch("llama")?;
++        // v1.4.5-beta: Accept both llama and mistral3 architectures
++        // Mistral3 (Ministral-3B) uses the same architecture as Llama
++        if c.verify_arch("llama").is_err() {
++            c.verify_arch("mistral3")?;
++        }
+ 
+         let required = [
+             "attention.head_count",
+@@ -403,10 +407,18 @@ impl ModelConfig::FromGGUF for ModelWeights {
+         attention_mechanism: AttentionImplementation,
+         dtype: DType,
+     ) -> Result<Self> {
++        // v1.4.5-beta: Dynamic architecture detection for llama/mistral3
++        let meta = ct.get_metadata();
++        let arch_name: String = meta
++            .get("general.architecture")
++            .cloned()
++            .and_then(|v| v.to_string().ok().cloned())
++            .unwrap_or_else(|| "llama".to_string());
++
+         // Parameter extraction from metadata.
+         let metadata = ContentMetadata {
+-            path_prefix: "llama",
+-            metadata: ct.get_metadata(),
++            path_prefix: &arch_name,
++            metadata: meta,
+         };
+         let PropsGGUF {
+             n_expert,
+diff --git a/mistralrs-core/src/pipeline/gguf.rs b/mistralrs-core/src/pipeline/gguf.rs
+index 88bb53a5b..71b1fb3d0 100644
+--- a/mistralrs-core/src/pipeline/gguf.rs
++++ b/mistralrs-core/src/pipeline/gguf.rs
+@@ -445,6 +445,8 @@ impl Loader for GGUFLoader {
+         let model = match self.kind {
+             ModelKind::GgufQuantized { .. } => match arch {
+                 GGUFArchitecture::Llama => Model::Llama(QLlama::try_from(model_config)?),
++                // v1.4.5-beta: Mistral3 (Ministral-3B) uses Llama architecture
++                GGUFArchitecture::Mistral3 => Model::Llama(QLlama::try_from(model_config)?),
+                 GGUFArchitecture::Phi2 => Model::Phi2(QPhi::try_from(model_config)?),
+                 GGUFArchitecture::Phi3 => Model::Phi3(QPhi3::try_from(model_config)?),
+                 GGUFArchitecture::Starcoder2 => {
+@@ -457,6 +459,8 @@ impl Loader for GGUFLoader {
+             },
+             ModelKind::GgufAdapter { adapter, .. } => match arch {
+                 GGUFArchitecture::Llama => Model::XLoraLlama(XLoraQLlama::try_from(model_config)?),
++                // v1.4.5-beta: Mistral3 with adapters
++                GGUFArchitecture::Mistral3 => Model::XLoraLlama(XLoraQLlama::try_from(model_config)?),
+                 GGUFArchitecture::Phi3 => Model::XLoraPhi3(XLoraQPhi3::try_from(model_config)?),
+                 a => bail!(
+                     "Unsupported architecture `{a:?}` for GGUF {kind}",
+diff --git a/mistralrs-core/src/utils/gguf_metadata.rs b/mistralrs-core/src/utils/gguf_metadata.rs
+index 21dc2b945..b858a342c 100644
+--- a/mistralrs-core/src/utils/gguf_metadata.rs
++++ b/mistralrs-core/src/utils/gguf_metadata.rs
+@@ -265,7 +265,8 @@ impl DeviceMappedModelLoader for GgufDeviceMapLoaderInner<'_, '_> {
+         _matformer_config: Option<&MatformerSliceConfig>,
+     ) -> Result<usize> {
+         let size_in_bytes = match self.arch {
+-            GGUFArchitecture::Llama => {
++            // v1.4.5-beta: Mistral3 uses the same tensor structure as Llama
++            GGUFArchitecture::Llama | GGUFArchitecture::Mistral3 => {
+                 let token_embd = tensor_info_size_in_bytes!(
+                     self.model.tensor_info("token_embd.weight")?,
+                     DType::F32
+@@ -362,7 +363,8 @@ impl DeviceMappedModelLoader for GgufDeviceMapLoaderInner<'_, '_> {
+         _matformer_config: Option<&MatformerSliceConfig>,
+     ) -> Result<Vec<usize>> {
+         let size_in_bytes = match self.arch {
+-            GGUFArchitecture::Llama => {
++            // v1.4.5-beta: Mistral3 uses the same tensor structure as Llama
++            GGUFArchitecture::Llama | GGUFArchitecture::Mistral3 => {
+                 let attn_norm = tensor_info_size_in_bytes!(
+                     self.model.tensor_info("blk.0.attn_norm.weight")?,
+                     DType::F32

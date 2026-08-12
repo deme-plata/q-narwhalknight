@@ -3,6 +3,9 @@ mistral.rs/
 logs/
 *.log
 node_data/
+*.bak
+*.bak-*
+*.pre-*.bak
 data*/
 windows-release/*.exe
 windows-release/*.zip

@@ -1,0 +1,23 @@
+# Windows cross-compile image for q-api-server (v10.11.92+).
+# Derived from Dockerfile.windows-api, minus wine/wine64 — those are only useful
+# for RUNNING the exe, and their GUI/mesa recommends 404 on this host (the same
+# trap noted for the sigil-top wine gate). Cross-compiling needs only mingw-w64.
+FROM rust:latest
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    mingw-w64 \
+    gcc-mingw-w64-x86-64 \
+    llvm-dev \
+    libclang-dev \
+    clang \
+    cmake \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add x86_64-pc-windows-gnu
+
+RUN mkdir -p ~/.cargo && \
+    printf '[target.x86_64-pc-windows-gnu]\nlinker = "x86_64-w64-mingw32-gcc"\nar = "x86_64-w64-mingw32-ar"\n' >> ~/.cargo/config.toml
+
+WORKDIR /workspace

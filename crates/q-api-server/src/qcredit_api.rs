@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::AppState;
+use q_api_server::wallet_auth::AuthenticatedWallet;
 use q_types::Address;
 
 /// Parse a wallet hex string (with or without "qnk" prefix) into Address
@@ -183,12 +184,21 @@ pub async fn get_position(
 /// POST /api/v1/qcredit/lock — lock QUG, mint QCREDIT
 pub async fn lock_qug(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
     Json(req): Json<LockRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let address = match parse_wallet(&req.wallet) {
         Ok(a) => a,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+    // v10.11.97 SECURITY: this endpoint deducts QUG from / mints QCREDIT to `wallet`.
+    // It was UNAUTHENTICATED — anyone could lock any wallet's QUG by naming it in the
+    // body. Require the caller to prove ownership via X-Wallet-Auth (Ed25519).
+    if auth.address != address {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: X-Wallet-Auth wallet does not match the target wallet".into(),
+        )));
+    }
     let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
@@ -277,12 +287,20 @@ pub async fn lock_qug(
 /// POST /api/v1/qcredit/unlock — burn QCREDIT, return QUG + yield
 pub async fn unlock_position(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
     Json(req): Json<UnlockRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let address = match parse_wallet(&req.wallet) {
         Ok(a) => a,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+    // v10.11.97 SECURITY: returns QUG + yield to `wallet` and burns its QCREDIT.
+    // Require X-Wallet-Auth ownership proof (was unauthenticated).
+    if auth.address != address {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: X-Wallet-Auth wallet does not match the target wallet".into(),
+        )));
+    }
     let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
@@ -339,12 +357,20 @@ pub async fn unlock_position(
 /// POST /api/v1/qcredit/claim — claim accrued yield without unlocking
 pub async fn claim_yield(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedWallet,
     Json(req): Json<ClaimRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let address = match parse_wallet(&req.wallet) {
         Ok(a) => a,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+    // v10.11.97 SECURITY: credits accrued yield to `wallet`. Require X-Wallet-Auth
+    // ownership proof (was unauthenticated).
+    if auth.address != address {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: X-Wallet-Auth wallet does not match the target wallet".into(),
+        )));
+    }
     let wallet_hex = hex::encode(address);
     let now = chrono::Utc::now().timestamp() as u64;
 
