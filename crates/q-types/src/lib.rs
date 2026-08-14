@@ -2582,6 +2582,31 @@ impl Transaction {
         hasher.finalize().into()
     }
 
+    /// v10.10.0: Canonical signable hash — postcard-serializes the transaction
+    /// with the `signature` field zeroed, so the signer can compute the hash
+    /// of the about-to-be-signed tx, sign it, attach the signature, and the
+    /// verifier can independently re-derive the same hash by re-zeroing the
+    /// signature field before serializing.
+    ///
+    /// This replaces `hash()` as the canonical signing target for
+    /// non-coinbase transactions submitted via /api/v1/agent/submit and
+    /// /api/v1/transactions. The pre-existing `hash()` is preserved for
+    /// tx_id / mempool indexing purposes (where signature inclusion is
+    /// desired so each variant of the same tx has a unique id).
+    ///
+    /// Companion: `verify_ed25519_signature` is updated in the same patch to
+    /// call this method instead of `hash()` when verifying.
+    pub fn signable_payload(&self) -> [u8; 32] {
+        let mut canonical = self.clone();
+        canonical.signature = Vec::new();
+        // id is also derived data — zero it for canonicalization
+        canonical.id = TxHash::default();
+        let mut hasher = Sha3_256::new();
+        let encoded = postcard::to_allocvec(&canonical).unwrap();
+        hasher.update(&encoded);
+        hasher.finalize().into()
+    }
+
     /// v1.0.60-beta: Check if this is a coinbase (mining reward) transaction
     /// Coinbase transactions have from == [0u8; 32] (zero address)
     pub fn is_coinbase(&self) -> bool {
@@ -2893,10 +2918,18 @@ impl Transaction {
 
         let signature = Signature::from_bytes(&signature_bytes);
 
-        // Use tx_hash as message (matches existing signing in send_transaction)
-        let tx_hash = self.hash();
+        // v10.10.0: Canonical signing target is signable_payload (signature
+        // field zeroed). Backwards compatibility: pre-activation blocks were
+        // signed against self.hash() which has a chicken-and-egg property
+        // that no client-side signer can satisfy correctly; only the
+        // OAuth-mediated /transactions/send server-side signer ever produced
+        // signatures for this path, and those skipped this verify entirely
+        // by inserting directly into the mempool. So switching the verifier
+        // to signable_payload does not invalidate any historical block —
+        // it only enables a path that has never functioned before.
+        let canonical = self.signable_payload();
 
-        verifying_key.verify(&tx_hash, &signature)
+        verifying_key.verify(&canonical, &signature)
             .map_err(|e| format!("Ed25519 signature verification failed: {}", e))?;
 
         Ok(())
