@@ -285,6 +285,7 @@ pub mod dca_api; // ✅ v2.4.8-beta - Dollar Cost Averaging for automated recurr
 pub mod limit_order_api; // ✅ v10.4.9 - Price-triggered one-shot swaps (limit orders)
 pub mod perpetual_api; // ✅ v2.5.0-beta - Perpetual futures with 10x leverage (long/short)
 pub mod handlers;
+pub mod balance_proof_api; // 2026-08-17 - light-client Merkle proof endpoint for balance_root_v2
 pub mod startup_progress; // ✅ v1.4.15-beta - Startup progress tracker for frontend UI
 pub mod adaptive_confirmations; // ✅ v1.4.4-beta - ML-adaptive confirmation with retail-first instant finality
 pub mod staking_security; // ✅ v1.4.4-beta - Staking/slashing security with insurance pool for instant payments

@@ -22,7 +22,7 @@ use axum::{
 use anyhow::Context;
 use clap::{Arg, ArgAction, Command};
 use q_api_server::{
-    aegis_auth_middleware, chat_api, verification_api, handlers,
+    aegis_auth_middleware, chat_api, verification_api, handlers, balance_proof_api,
     node_setup, oauth2_provider, payment_api, streaming, update_stats, AppState, Config, ConsoleVisualizer, LiquidityPool,
     recursive_proofs_api,  // ✨ v1.4.0-beta: Recursive SNARKs for light client bootstrap
 };
@@ -26704,6 +26704,10 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/v1/integrity/balance-root", get(handlers::balance_root_integrity))
         // v10.11.93: height-stamped root history — the comparable one.
         .route("/api/v1/integrity/balance-root/journal", get(handlers::balance_root_journal))
+        // 2026-08-17: light-client Merkle proof — the piece that lets anyone
+        // verify a single balance against root_v2_smt without trusting this
+        // node further than trusting the root. See balance_proof_api.rs.
+        .route("/api/v1/proof/balance/:address", get(balance_proof_api::balance_proof))
         // v10.9.27: Prometheus-format /metrics — the diagnostic endpoint for
         // "why doesn't sync work" questions. See handlers::metrics_endpoint
         // for the full list of emitted families. No auth — metrics are
