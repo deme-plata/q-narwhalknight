@@ -100,6 +100,37 @@ pub struct TokenStakePosition {
     pub total_rewards_claimed: u128,
 }
 
+/// v10.11.101 AUTO-STAKE: passive holder yield — no lock, no manual "stake"
+/// action. Any wallet holding a token whose contract declares `staking: true`
+/// earns a flat APY (AUTO_STAKE_APY_BPS) just by holding, checkpointed lazily
+/// (see auto_stake_pending_rewards / contracts_api.rs's checkpoint+claim
+/// handlers) rather than by hooking every balance-mutating code path — a
+/// deliberately narrow, low-risk design for money-adjacent code. Distinct
+/// from the older TokenStakePosition (explicit lock-for-a-term staking),
+/// which stays available but is no longer the primary UX.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AutoStakeCheckpoint {
+    /// Token balance as of the last checkpoint (mint/claim/first-seen).
+    pub balance_at_checkpoint: u128,
+    /// Unix seconds of the last checkpoint.
+    pub checkpoint_time: u64,
+}
+
+/// Flat APY for automatic holder staking, in basis points. 1000 = 10%.
+pub const AUTO_STAKE_APY_BPS: u128 = 1000;
+
+impl AutoStakeCheckpoint {
+    /// Reward accrued since this checkpoint, given the CURRENT time. Does not
+    /// mutate anything — pure computation, safe to call from a public read.
+    pub fn pending_reward(&self, now: u64) -> u128 {
+        let elapsed = now.saturating_sub(self.checkpoint_time) as u128;
+        let seconds_per_year: u128 = 365 * 24 * 3600;
+        (self.balance_at_checkpoint.saturating_mul(AUTO_STAKE_APY_BPS) / 10000)
+            .saturating_mul(elapsed)
+            / seconds_per_year
+    }
+}
+
 impl TokenFeeConfig {
     /// Calculate total fee percentage
     pub fn total_fee_bps(&self) -> u64 {
@@ -1084,6 +1115,7 @@ impl QStorage {
         Ok(crate::transaction::QTransaction::new(
             self.hot_db_concrete.clone(),
             tx_id,
+            self.balance_smt.clone(),
         ))
     }
 
@@ -3205,7 +3237,33 @@ impl QStorage {
                         Ok(Some(height))
                     }
                     Ok(None) => {
-                        // 🚨 CORRUPTION DETECTED - pointer points to missing block!
+                        // 2026-08-15: before declaring corruption, check whether this height
+                        // is a CONFIRMED permanent gap (known_gaps — peer-corroborated, trust-
+                        // quorum-accepted absence, see advance_contiguous_tip). This v1.1.9
+                        // check predates known_gaps entirely and has no notion of "the pointer
+                        // legitimately sits on a height that will never have a block" — every
+                        // known-gap landing looked identical to real corruption to it.
+                        //
+                        // Without this guard, tick_contiguity_advance() (called every 5-10s by
+                        // the background tick AND by every STATE DIVERGENCE auto-resync) reads
+                        // this function first: it "repairs" the pointer back down past the gap,
+                        // then immediately re-derives it forward past the SAME known gap via
+                        // advance_contiguous_tip()'s own (correct) known_gaps-aware logic, then
+                        // persists it back up — paying the full cost of a corruption scan every
+                        // single tick, forever, for a gap that was never actually corrupt.
+                        // Measured: 200k+ iterations and ~495GB of wasted RocksDB I/O on a 3GB
+                        // test DB in a few hours once a large known-gap skip-jump landed the
+                        // pointer inside a confirmed gap (crates/q-network's PARTIAL-RESPONSE
+                        // GAP fix — see project_quillon_node_data_integrity_gap_2026_08_09
+                        // memory — made this reachable for the first time by correctly reporting
+                        // gaps that used to be silently dropped).
+                        if self.known_gaps.contains(height) {
+                            return Ok(Some(height));
+                        }
+
+                        // 🚨 CORRUPTION DETECTED - pointer points to missing block, and it is
+                        // NOT a known permanent gap. This is the real corruption case the
+                        // v1.1.9 check was written for (a save failure left a hole).
                         error!("🚨 [v1.1.9] CORRUPTION DETECTED: Pointer height {} has no block!", height);
                         error!("🔧 [v1.1.9] Auto-repairing pointer by scanning backwards...");
 
@@ -4736,6 +4794,10 @@ impl QStorage {
         // This overrides the default set_sync(false) in write_options()
         self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
 
+        // 2026-08-16 PHASE 1: this is the hot single-wallet path (bootstrap
+        // sync, gossip replay all land here) — keep balance_root_v2 live.
+        self.update_balance_smt_best_effort(&[(*address, amount)]);
+
         // 🔒 PRIVACY-PRESERVING: Log only cryptographic hash of address
         use blake3::hash;
         let addr_hash = hash(address);
@@ -4765,6 +4827,8 @@ impl QStorage {
         let key = format!("wallet_balance_{}", hex::encode(address));
         let value = amount.to_le_bytes();
         self.hot_db.put_sync(CF_MANIFEST, key.as_bytes(), &value).await?;
+        // 2026-08-16 PHASE 1: DEX swap / consensus debit path — keep balance_root_v2 live.
+        self.update_balance_smt_best_effort(&[(*address, amount)]);
         Ok(())
     }
 
@@ -4988,10 +5052,59 @@ impl QStorage {
         }
     }
 
+    /// 2026-08-16 PHASE 1 (balance_root_v2 SMT activation): update the balance
+    /// SMT with a set of ACTUALLY-written (address, amount) pairs.
+    ///
+    /// Called after the wallet-balance batch write has already committed, not
+    /// composed into the same `rocksdb::WriteBatch` via `BalanceSmt::apply_to_batch`
+    /// (which the struct's doc comment at its `balance_smt` field says was the
+    /// original design intent). Reason: doing that atomically means teaching the
+    /// shared `KVStore::write_batch` trait method — used by many unrelated
+    /// call sites across this crate — about the SMT, which is a much larger
+    /// blast radius than this phase calls for. Instead this is called as a
+    /// second, immediately-following step.
+    ///
+    /// Consequence: in the narrow window between the balance write committing
+    /// and this call running, a hard kill would leave the SMT very slightly
+    /// behind the real balance table. This is an acceptable tradeoff FOR NOW:
+    /// the SMT is a derived read structure with no consensus role yet
+    /// (BalanceRootV2's upgrade-gate activation height is u64::MAX — see
+    /// crates/q-consensus-guard/src/upgrade_gate.rs), and
+    /// `rebuild_balance_smt_from_wallet_table()` already exists as an offline
+    /// recovery tool for exactly this kind of drift. Revisit true atomic
+    /// composition before BalanceRootV2 is ever scheduled for real activation.
+    ///
+    /// Never fails the caller: an SMT update problem must not block or roll
+    /// back a real balance write, which is the actual source of truth. Errors
+    /// are logged loudly instead.
+    fn update_balance_smt_best_effort(&self, updates: &[([u8; 32], u128)]) {
+        if updates.is_empty() {
+            return;
+        }
+        match self.balance_smt.update_batch(updates) {
+            Ok(_new_root) => {
+                debug!(
+                    "📊 [BALANCE-SMT] Applied {} update(s), new root cached",
+                    updates.len()
+                );
+            }
+            Err(e) => {
+                error!(
+                    "🚨 [BALANCE-SMT] update_batch failed for {} entries: {} — \
+                     balance_root_v2 will read stale until the next successful \
+                     update or an operator runs rebuild_balance_smt_from_wallet_table()",
+                    updates.len(),
+                    e
+                );
+            }
+        }
+    }
+
     /// Save multiple wallet balances atomically with SYNC to guarantee disk write
     /// v2.5.0: Accepts u128 balances (16 bytes each)
     pub async fn save_wallet_balances(&self, balances: &HashMap<[u8; 32], u128>) -> Result<()> {
         let mut batch_ops = Vec::new();
+        let mut smt_updates: Vec<([u8; 32], u128)> = Vec::with_capacity(balances.len());
 
         // 🔴 [BALANCE WRITE DEBUG] Log each wallet in batch with old-vs-new
         for (address, amount) in balances {
@@ -5019,10 +5132,16 @@ impl QStorage {
             let key = format!("wallet_balance_{}", hex::encode(address));
             let value = amount.to_le_bytes().to_vec(); // 16 bytes for u128
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
+            smt_updates.push((*address, *amount));
         }
 
         // CRITICAL: write_batch now uses fsync to survive hard kills (fixed in kv.rs)
         self.hot_db.write_batch(batch_ops).await?;
+
+        // 2026-08-16 PHASE 1: keep balance_root_v2 live. Only the entries that
+        // actually made it past the max-wins guard above — matches exactly
+        // what was just persisted, not the raw (possibly-rejected) input map.
+        self.update_balance_smt_best_effort(&smt_updates);
 
         // 🔒 PRIVACY-PRESERVING: Log only aggregate count, not individual balances
         // v2.10.0: Updated to u128 for 24 decimal precision
@@ -5052,12 +5171,17 @@ impl QStorage {
         balances: &HashMap<[u8; 32], u128>,
     ) -> Result<()> {
         let mut batch_ops = Vec::new();
+        let mut smt_updates: Vec<([u8; 32], u128)> = Vec::with_capacity(balances.len());
         for (address, amount) in balances {
             let key = format!("wallet_balance_{}", hex::encode(address));
             let value = amount.to_le_bytes().to_vec();
             batch_ops.push((CF_MANIFEST, key.into_bytes(), value));
+            smt_updates.push((*address, *amount));
         }
         self.hot_db.write_batch(batch_ops).await?;
+        // 2026-08-16 PHASE 1: authoritative path has no max-wins filter, so
+        // every entry that was just written (incl. debits) goes to the SMT too.
+        self.update_balance_smt_best_effort(&smt_updates);
         let total_balance: u128 = balances.values().sum();
         info!(
             "💰 [AUTHORITATIVE] SYNCED {} wallet balances (incl. debits) total={} QUG",
@@ -5761,6 +5885,44 @@ impl QStorage {
             }
         }
         Ok(positions)
+    }
+
+    /// Save an auto-stake checkpoint (v10.11.101 automatic holder staking).
+    /// checkpoint_key format: "wallet_address:contract_address" (lowercase),
+    /// same convention as save_stake_position.
+    pub async fn save_auto_stake_checkpoint(&self, checkpoint_key: &str, checkpoint: &crate::AutoStakeCheckpoint) -> Result<()> {
+        let key = format!("auto_stake_checkpoint_{}", checkpoint_key);
+        let value = serde_json::to_vec(checkpoint)?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        debug!(
+            "🌱 Saved auto-stake checkpoint: {} (balance={}, time={})",
+            checkpoint_key, checkpoint.balance_at_checkpoint, checkpoint.checkpoint_time
+        );
+        Ok(())
+    }
+
+    /// Load all auto-stake checkpoints from storage
+    pub async fn load_auto_stake_checkpoints(&self) -> Result<HashMap<String, crate::AutoStakeCheckpoint>> {
+        let mut checkpoints = HashMap::new();
+        let prefix = b"auto_stake_checkpoint_";
+
+        match self.hot_db.scan_prefix(CF_MANIFEST, prefix).await {
+            Ok(entries) => {
+                for (key_bytes, value) in entries {
+                    if let Ok(key_str) = String::from_utf8(key_bytes) {
+                        let checkpoint_key = key_str.trim_start_matches("auto_stake_checkpoint_");
+                        if let Ok(checkpoint) = serde_json::from_slice::<crate::AutoStakeCheckpoint>(&value) {
+                            checkpoints.insert(checkpoint_key.to_string(), checkpoint);
+                        }
+                    }
+                }
+                info!("🌱 Loaded {} auto-stake checkpoints from storage", checkpoints.len());
+            }
+            Err(e) => {
+                warn!("Failed to scan auto-stake checkpoints: {}", e);
+            }
+        }
+        Ok(checkpoints)
     }
 
     /// Save token fee configuration
@@ -6628,6 +6790,7 @@ impl QStorage {
         // 2. Import checkpoint data — write each wallet to CF_MANIFEST + in-memory HashMap
         let mut total: u128 = 0;
         let mut count = 0usize;
+        let mut smt_updates: Vec<([u8; 32], u128)> = Vec::new();
         {
             let mut wb = wallet_balances.write().await;
             wb.clear();
@@ -6641,12 +6804,15 @@ impl QStorage {
                         let mut addr = [0u8; 32];
                         addr.copy_from_slice(&addr_bytes);
                         wb.insert(addr, balance);
+                        smt_updates.push((addr, balance));
                     }
                 }
                 total = total.saturating_add(balance);
                 count += 1;
             }
         }
+        // 2026-08-16 PHASE 1: genesis-checkpoint import bypasses save_wallet_balance* too.
+        self.update_balance_smt_best_effort(&smt_updates);
 
         // 3. v10.4.15: Verify import integrity (count + total supply)
         if count != CHECKPOINT_WALLET_COUNT {
@@ -10396,6 +10562,9 @@ impl QStorage {
         self.hot_db.write_batch(batch).await
             .context("Atomic DEX debit write_batch failed")?;
 
+        // 2026-08-16 PHASE 1: DEX debit bypasses save_wallet_balance* — keep balance_root_v2 live.
+        self.update_balance_smt_best_effort(&[(addr_array, new_balance)]);
+
         // 🔴 [BALANCE WRITE DEBUG] Atomic DEX debit
         error!(
             "🔴 [BALANCE WRITE] atomic_subtract_and_record_dex_debit(): wallet={} old={} new={} delta=-{} caller=DEX_ATOMIC_DEBIT height=N/A",
@@ -10475,6 +10644,9 @@ impl QStorage {
         ];
         self.hot_db.write_batch(batch).await
             .context("Atomic DEX credit write_batch failed")?;
+
+        // 2026-08-16 PHASE 1: DEX credit bypasses save_wallet_balance* — keep balance_root_v2 live.
+        self.update_balance_smt_best_effort(&[(addr_array, new_balance)]);
 
         // 🔴 [BALANCE WRITE DEBUG] Atomic DEX credit
         warn!(
@@ -10810,6 +10982,9 @@ impl QStorage {
                 (CF_MANIFEST, applied_key.as_bytes().to_vec(), desired_net.to_le_bytes().to_vec()),
             ];
             self.hot_db.write_batch(batch).await?;
+
+            // 2026-08-16 PHASE 1: reconciliation loop bypasses save_wallet_balance* too.
+            self.update_balance_smt_best_effort(&[(addr_bytes, new_balance)]);
 
             adjusted += 1;
             info!("  🔧 [DEX ADJUST v10.3.1] Wallet {}...: {} → {} QUG (delta: {}, debited: {}, credited: {})",

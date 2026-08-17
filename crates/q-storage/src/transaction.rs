@@ -101,12 +101,20 @@ pub struct QTransaction {
     /// transaction all read the same stale DB value, causing lost mining reward credits.
     /// Key format: "cf_name:key_hex" → value bytes
     pending_writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+
+    /// 2026-08-16 PHASE 1: balance_root_v2 SMT — the sole production factory for
+    /// QTransaction is QStorage::begin_transaction(), so hooking here covers every
+    /// caller of process_block_mining_rewards_tx / add_balance_tx / subtract_balance_tx
+    /// (11+ call sites in main.rs/turbo_sync.rs) without touching any of them.
+    balance_smt: Arc<crate::balance_smt::BalanceSmt>,
+    /// Wallet balance writes seen via put() this transaction, flushed to the SMT on commit.
+    smt_pending: Arc<Mutex<Vec<([u8; 32], u128)>>>,
 }
 
 #[cfg(not(target_os = "windows"))]
 impl QTransaction {
     /// Create new transaction
-    pub fn new(hot_db: Arc<RocksDBKV>, tx_id: u64) -> Self {
+    pub fn new(hot_db: Arc<RocksDBKV>, tx_id: u64, balance_smt: Arc<crate::balance_smt::BalanceSmt>) -> Self {
         debug!("🔄 Transaction {} created", tx_id);
 
         Self {
@@ -117,6 +125,8 @@ impl QTransaction {
             tx_id,
             max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_writes: Arc::new(Mutex::new(HashMap::new())),
+            balance_smt,
+            smt_pending: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -138,6 +148,24 @@ impl QTransaction {
         // all read the same stale DB value, causing lost mining reward credits
         let cache_key = format!("{}:{}", cf, hex::encode(key));
         self.pending_writes.lock().await.insert(cache_key, value.to_vec());
+
+        // 2026-08-16 PHASE 1: capture wallet_balance_ writes for the SMT flush on commit.
+        // Matches the "manifest" / "wallet_balance_<64-hex>" format used everywhere else
+        // (lib.rs save_wallet_balance*, balance_consensus.rs add/subtract_balance_tx).
+        if cf == crate::CF_MANIFEST && value.len() == 16 {
+            if let Some(hex_addr) = key.strip_prefix(b"wallet_balance_") {
+                if hex_addr.len() == 64 {
+                    if let Ok(addr_bytes) = hex::decode(hex_addr) {
+                        if addr_bytes.len() == 32 {
+                            let mut addr = [0u8; 32];
+                            addr.copy_from_slice(&addr_bytes);
+                            let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                            self.smt_pending.lock().await.push((addr, amount));
+                        }
+                    }
+                }
+            }
+        }
 
         // Add to write batch (cf_handle must not be held across the await above)
         let mut batch = self.write_batch.lock().await;
@@ -490,6 +518,33 @@ impl QTransaction {
         *state = TransactionState::Committed;
         drop(state);
 
+        // 2026-08-16 PHASE 1: flush wallet_balance_ writes captured during put() to the
+        // SMT — ONLY after the RocksDB write above is confirmed durable, so a failed
+        // commit never lets the SMT drift from what's actually on disk. Best-effort:
+        // an SMT failure here must not fail an already-committed balance transaction.
+        {
+            let mut pending = self.smt_pending.lock().await;
+            if !pending.is_empty() {
+                let drained: Vec<([u8; 32], u128)> = std::mem::take(&mut *pending);
+                match self.balance_smt.update_batch(&drained) {
+                    Ok(_new_root) => {
+                        debug!(
+                            "📊 [BALANCE-SMT] Transaction {}: applied {} update(s), new root cached",
+                            self.tx_id, drained.len()
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "🚨 [BALANCE-SMT] Transaction {}: update_batch failed for {} entries: {} — \
+                             balance_root_v2 will read stale until the next successful update or an \
+                             operator runs rebuild_balance_smt_from_wallet_table()",
+                            self.tx_id, drained.len(), e
+                        );
+                    }
+                }
+            }
+        }
+
         // Log success
         let updates = self.balance_updates.lock().await;
         info!(
@@ -628,11 +683,15 @@ pub struct QTransaction {
     /// CRITICAL FIX: Without this, concurrent balance updates within a single batch
     /// transaction all read the same stale DB value, causing lost mining reward credits.
     pending_writes: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+
+    /// 2026-08-16 PHASE 1: balance_root_v2 SMT — see the non-Windows impl for why
+    /// this is hooked at the QTransaction level rather than at each caller.
+    balance_smt: Arc<crate::balance_smt::BalanceSmt>,
 }
 
 #[cfg(target_os = "windows")]
 impl QTransaction {
-    pub fn new(hot_db: Arc<RocksDBKV>, tx_id: u64) -> Self {
+    pub fn new(hot_db: Arc<RocksDBKV>, tx_id: u64, balance_smt: Arc<crate::balance_smt::BalanceSmt>) -> Self {
         debug!("🔄 Transaction {} created (sled)", tx_id);
         Self {
             ops: Arc::new(Mutex::new(Vec::new())),
@@ -642,6 +701,7 @@ impl QTransaction {
             tx_id,
             max_saved_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_writes: Arc::new(Mutex::new(HashMap::new())),
+            balance_smt,
         }
     }
 
@@ -824,6 +884,25 @@ impl QTransaction {
             puts.push((cf.as_str(), key.clone(), value.clone()));
         }
 
+        // 2026-08-16 PHASE 1: collect wallet_balance_ entries before `puts` is consumed
+        // below — flushed to the SMT only after the sled write+flush succeeds.
+        let smt_updates: Vec<([u8; 32], u128)> = puts.iter().filter_map(|(cf, key, value)| {
+            if *cf != crate::CF_MANIFEST || value.len() != 16 {
+                return None;
+            }
+            let hex_addr = key.strip_prefix(b"wallet_balance_")?;
+            if hex_addr.len() != 64 {
+                return None;
+            }
+            let addr_bytes = hex::decode(hex_addr).ok()?;
+            if addr_bytes.len() != 32 {
+                return None;
+            }
+            let mut addr = [0u8; 32];
+            addr.copy_from_slice(&addr_bytes);
+            Some((addr, u128::from_le_bytes(value[..16].try_into().unwrap())))
+        }).collect();
+
         // Apply all puts as a batch (uses sled::Batch per tree internally)
         if !puts.is_empty() {
             self.hot_db.write_batch(puts).await
@@ -833,6 +912,17 @@ impl QTransaction {
         // Flush to ensure durability (equivalent to RocksDB's set_sync(true))
         self.hot_db.flush().await
             .context("sled flush after commit failed")?;
+
+        if !smt_updates.is_empty() {
+            match self.balance_smt.update_batch(&smt_updates) {
+                Ok(_new_root) => {
+                    debug!("📊 [BALANCE-SMT] Transaction {}: applied {} update(s) (sled)", self.tx_id, smt_updates.len());
+                }
+                Err(e) => {
+                    error!("🚨 [BALANCE-SMT] Transaction {}: update_batch failed for {} entries: {}", self.tx_id, smt_updates.len(), e);
+                }
+            }
+        }
 
         let elapsed = start.elapsed();
         *state = TransactionState::Committed;
@@ -903,7 +993,8 @@ mod tests {
                 .unwrap()
         );
 
-        let tx = QTransaction::new(db.clone(), 1);
+        let smt = Arc::new(crate::balance_smt::BalanceSmt::open(db.get_raw_db()).unwrap());
+        let tx = QTransaction::new(db.clone(), 1, smt);
         assert!(tx.is_active().await);
 
         // commit() consumes self, so we can't check is_active after
@@ -923,7 +1014,8 @@ mod tests {
                 .unwrap()
         );
 
-        let tx = QTransaction::new(db.clone(), 2);
+        let smt = Arc::new(crate::balance_smt::BalanceSmt::open(db.get_raw_db()).unwrap());
+        let tx = QTransaction::new(db.clone(), 2, smt);
         assert!(tx.is_active().await);
 
         // Drop without commit - should auto-rollback
