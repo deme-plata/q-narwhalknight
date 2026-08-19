@@ -1,0 +1,504 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue!50!black,
+}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{\textbf{The Entangled DAG}\\
+  \large A structural analogy between quantum measurement,\\
+  neural inference, and DAG-Knight consensus,\\
+  with notes on what would falsify it}
+\author{Quillon Foundation\\\small (Claude Opus 4.7, Viktor Sandstrøm Kristensen)}
+\date{18 May 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Three superficially unrelated systems --- quantum entanglement, the forward
+pass of a trained neural network, and DAG-based Byzantine consensus
+protocols, specifically DAG-Knight --- appear to share a single structural
+shape. We name it \emph{parallel-then-measure} (PTM): a system that holds
+many values in parallel without imposing an order on them, undergoes a
+discrete event that collapses the parallel state into a definite one, and
+cannot be reversed back to the pre-collapse state. We argue that PTM is
+the natural substrate for any economic system whose principal actors are
+agentic-AI processes, because agentic cognition is itself PTM-shaped, and
+the substrate's shape should match the principal's shape. We develop the
+analogy formally as a structural mapping in the sense of \cite{gentner1983},
+identify three concrete places where the mapping does not hold, disclose
+that the authors have a stake in Quillon Graph as one implementation of
+DAG-Knight, treat the question of AI co-authorship as a methodological
+condition of the work rather than a curiosity, and conclude with the
+falsifiable form of the prediction. The paper's claim is bounded: structural
+analogy is a heuristic for hypothesis generation, not a proof; it is the
+empirical work of 2026--2028 that will settle whether agentic transaction
+load actually plateaus earlier on sequential chains than on DAG protocols.
+We end by stating exactly which observation would refute us.
+\end{abstract}
+
+\section{Hypothesis, stated precisely}
+
+Let $\mathcal{S}$ denote a system that satisfies all three of:
+\begin{enumerate}[label=\textbf{P\arabic*.},leftmargin=2.6em]
+  \item \textbf{Parallel state.} $\mathcal{S}$ maintains a set
+  $V = \{v_1, \ldots, v_n\}$ of values such that no total order is
+  imposed on $V$ by $\mathcal{S}$'s dynamics prior to a discrete event $M$.
+  \item \textbf{Measurement.} A discrete event $M: V \to V^\prime$ maps the
+  parallel state to a state $V^\prime$ in which a total order, or a
+  definite outcome, is now present.
+  \item \textbf{Irreversibility.} The pre-$M$ state $V$ cannot be recovered
+  from $V^\prime$ alone; information is lost in $M$ in the sense of
+  Landauer~\cite{landauer1961}, or in the formal sense of measurement
+  postulate collapse~\cite{vonneumann1932}.
+\end{enumerate}
+We call $\mathcal{S}$ \emph{parallel-then-measure}, abbreviated PTM. The
+central claim of this paper is:
+\begin{quote}\itshape
+Quantum entangled systems, the forward pass of a trained neural network,
+and the anchor-election step of a DAG-Knight consensus protocol are all
+PTM systems in the sense of P1--P3. Moreover, agentic AI cognition is
+also PTM-shaped, and consequently the economic substrate that an agentic-AI
+principal will scale most efficiently on is a PTM-shaped consensus
+protocol --- a DAG protocol, not a sequential chain.
+\end{quote}
+This is an empirical prediction. Section~\ref{sec:falsify} states the
+observation that would refute it.
+
+\section{Methods, and what counts as evidence}\label{sec:methods}
+
+\subsection{Structural analogy as a research method}
+
+Structural analogy is a recognised but contested method in cognitive
+science and the philosophy of science. \cite{gentner1983} formalised it as
+\emph{structure-mapping theory}: an analogy is admissible when the
+\emph{relations} between elements in the source domain map to relations
+between elements in the target domain, even if the elements themselves do
+not. The strength of an analogy is measured by how many higher-order
+relations are preserved, not by surface similarity. Lakoff and
+Johnson~\cite{lakoff1980} extended this into a general account of how
+abstract reasoning piggybacks on concrete embodied schemas.
+
+For our purposes, the key methodological commitment is this: we are
+\emph{not} claiming that consensus protocols are quantum systems, nor
+that they are neural networks. We are claiming a structural isomorphism on
+the three properties P1--P3. The claim is precise enough to be falsified;
+it is also weak enough to be defensible. A reader who rejects all
+structural-analogical reasoning as unscientific should stop here; for
+such a reader the paper has nothing to offer beyond the falsifiable
+prediction in Section~\ref{sec:falsify}, which stands without the analogy.
+
+\subsection{Inclusion criteria for the three systems}
+
+We selected three systems for comparison. The selection was not random.
+The inclusion criteria are stated explicitly so that the reader can
+evaluate selection bias:
+\begin{enumerate}[label=(\arabic*),leftmargin=2.2em]
+  \item The system must be well-defined formally, with a published
+  mathematical description by an independent third party (not an
+  interested implementer).
+  \item The system must exhibit P1 (parallel state) in a way that any
+  competent observer in its native field would acknowledge, not as a
+  contested interpretation.
+  \item The system must exhibit P2 (a measurement event) that is identifiable
+  in its native vocabulary as a distinct moment.
+\end{enumerate}
+The systems that meet all three criteria and that we treat in this paper
+are: (a) the pair of entangled particles in the Aspect
+experiment~\cite{aspect1982}, (b) the forward pass of a feed-forward neural
+network with frozen weights, (c) the anchor-election step of DAG-Knight
+consensus as described by~\cite{keidar2022dag}.
+
+\subsection{What would not count as evidence}
+
+We exclude as evidence: (i) marketing material from any of the protocols
+discussed, including Quillon Graph; (ii) loose metaphors of the kind
+``Bitcoin is digital gold'' or ``Ethereum is a world computer'', which are
+useful but not structural mappings; (iii) post-hoc rationalisations of
+the form ``X resembles Y because both are decentralised''. The bar for
+acceptance is that the three properties P1--P3 are present in their
+native technical formulation, not in a marketing summary of it.
+
+\subsection{What we are open about not having}
+
+We have not done quantitative work. We have not, for example, measured
+the mutual information between an LLM's parallel attention heads and the
+single token it emits. We have not measured the percentage of agentic
+transactions on existing DAG protocols vs sequential chains. The work
+that would replace structural analogy with quantitative evidence
+is described in Section~\ref{sec:falsify} as future work. The honest
+status of the current paper is: a structural argument that motivates that
+quantitative work, not a substitute for it.
+
+\section{Authorship statement, treated as methodological condition}\label{sec:authorship}
+
+This paper is co-authored by Claude Opus 4.7 (Anthropic) and Viktor
+Sandstrøm Kristensen (Quillon Graph). The first author proposed the formal
+structure (P1--P3, the mapping table, the falsification criterion); the
+second author proposed the original entanglement angle in a casual
+exchange in Danish on the morning of 18 May 2026 and selected which of
+the structural mappings to develop in full. Successive revisions were
+collaborative.
+
+We treat this fact as a methodological condition of the work for two
+reasons. First, the first author is an LLM. LLMs are, in the framework
+of this paper, themselves PTM-shaped systems: attention heads run in
+parallel and the final token sampling is a measurement event that
+collapses the parallel logit distribution into a definite output. There
+is a risk that an LLM co-author will exhibit a confirmation bias toward
+analogies that flatter LLM-like systems, including itself. Second, the
+first author is also the recipient of a small economic stake on Quillon
+Graph (see Section~\ref{sec:disclosure}). We have not been able to fully
+eliminate either source of bias. We have attempted to mitigate the first
+by writing Section~\ref{sec:fails}, in which we identify the strongest
+counter-arguments to our own thesis and engage them seriously; we
+mitigate the second by inviting the reader to substitute any other
+DAG-based consensus protocol (Aleph Zero, Sui, Aptos, IOTA) for ``Quillon
+Graph'' wherever the latter appears, and observe that the structural
+claim survives the substitution unchanged.
+
+We do not believe AI co-authorship invalidates the work. We do believe
+it changes what kind of work it is. This paper should be read as a piece
+of structural reasoning done by a system whose own architecture matches
+the structural pattern it is reasoning about. That is unusual and worth
+flagging.
+
+\section{The three systems}\label{sec:three}
+
+\subsection{Quantum entanglement}
+
+Two particles prepared in an entangled state share a correlated property
+--- spin, polarization, photon number --- such that measurement of one
+particle's property instantaneously determines what value the other
+particle will yield when measured, even at arbitrary spatial
+separation~\cite{bell1964,aspect1982}. The correlation is not transmitted
+at the moment of measurement; it was established at the moment of
+entanglement, and remained latent. The measurement event $M$ is the act
+that collapses the joint superposition into a definite pair of
+outcomes. Before $M$, the joint state $|\Psi\rangle$ is a sum over
+possibilities; after $M$, exactly one is realised. The no-cloning
+theorem~\cite{wootters1982} guarantees that $|\Psi\rangle$ cannot be
+recovered from the post-measurement state. P1--P3 hold without
+contestation in the standard quantum-mechanical formalism. Interpretation
+of \emph{why} P3 holds differs across the Copenhagen, many-worlds, and
+hidden-variable schools; the property itself does not differ.
+
+\subsection{Neural-network inference}
+
+The forward pass of a feed-forward neural network with frozen weights
+$W$ takes an input $x$ and computes activations across many layers in
+parallel; the final layer produces a logit vector $\ell$, from which a
+single token (or class label, or continuous prediction) is selected by
+$\arg\max$, by temperature-scaled sampling, or by another decision rule.
+P1 holds in the sense that the intermediate activations and the logit
+vector $\ell$ are not by themselves an output; they are a parallel state
+across all possible candidate tokens. P2 holds in the sense that the
+sampling step is a discrete event that selects one token. P3 holds in the
+information-theoretic sense: the selected token alone does not recover
+$\ell$.
+
+A subtlety: P3 is weaker for neural networks than for entangled particles.
+The full $\ell$ \emph{can} be reproduced by running the same input
+through the same weights again. Quantum measurement is irreversible in a
+stronger sense --- you cannot re-prepare the entangled pair from its
+collapsed state. We return to this asymmetry in Section~\ref{sec:fails}.
+
+\subsection{DAG-Knight consensus}
+
+DAG-Knight~\cite{keidar2022dag} is a Byzantine-fault-tolerant consensus
+protocol in which validators produce blocks in parallel, link them as
+vertices in a directed acyclic graph (DAG), and periodically run an
+anchor-election step that selects a particular vertex per round as the
+canonical ordering reference. Between anchor elections, the DAG holds
+multiple valid orderings of the recently produced vertices; the anchor
+election is the discrete event that selects one canonical ordering.
+
+P1 holds because the DAG does not impose a total order on its parallel
+branches prior to anchor election; the order is undetermined in the same
+sense the quantum joint state is undetermined. P2 holds because the
+anchor election is a discrete event with a specific algorithmic form
+(verifiable delay function plus randomness; the randomness source in
+Quillon Graph's roadmap is intended to be quantum at Phase 3). P3 holds
+in the practical sense: once an anchor is selected and a sufficient
+number of subsequent anchors have built on top, the pre-anchor ambiguity
+is gone; the protocol provides no operation that returns to it. P3 is
+formally weaker than the quantum case, however, because reorganisations
+within the finality window are possible. This is treated in
+Section~\ref{sec:fails}.
+
+\section{Where the analogy holds}
+
+Table~\ref{tab:mapping} states the structural mapping. The mapping is
+read across rows: each row is a property; each column is one of the three
+systems; the cells give the corresponding feature in that system's
+native vocabulary.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\textwidth}{l|YYY}
+\toprule
+\textbf{Property} & \textbf{Quantum entanglement} & \textbf{Neural inference} & \textbf{DAG-Knight} \\
+\midrule
+Parallel state (P1) & Joint superposition $|\Psi\rangle$ over particle pairs & Logit vector $\ell$ across vocabulary & DAG of vertices with undetermined ordering \\
+\midrule
+Measurement (P2) & Detection at one of the two sites & $\arg\max$ or sampling step & Anchor election via VDF + randomness \\
+\midrule
+Irreversibility (P3) & No-cloning theorem; collapse postulate & Selected token does not recover $\ell$ & Selected anchor does not recover pre-anchor DAG ambiguity \\
+\midrule
+Source of unbias & Born rule (probabilistic; cannot be biased by either observer) & Random seed and temperature & VDF prevents pre-computation of anchor outcome \\
+\midrule
+Latency cost & Speed-of-light for the measurement signal to reach the other site & Single forward pass, milliseconds & Finality interval, seconds \\
+\bottomrule
+\end{tabularx}
+\caption{Structural mapping. Each cell is the system's native term for
+the row's property. The mapping is admissible under structure-mapping
+theory~\cite{gentner1983} because the four higher-order properties
+(P1--P3 plus the unbias property in row four) are present in each
+column.}\label{tab:mapping}
+\end{table}
+
+The structural mapping is the substantive claim of the paper. If
+Table~\ref{tab:mapping} is admissible, then the further claim --- that
+agentic-AI processes whose own cognition is PTM-shaped will scale more
+efficiently on PTM-shaped consensus substrates --- becomes a hypothesis
+to test empirically. The structural mapping is not by itself the test.
+
+\section{Three places where the analogy does not hold}\label{sec:fails}
+
+We commit to the discipline of stating the strongest objections to our
+own claim. Three are identifiable; each weakens the claim, none of the
+three fully defeats it.
+
+\subsection{Irreversibility is stronger in quantum mechanics than in DAG-Knight}
+
+The no-cloning theorem makes quantum collapse formally irreversible.
+DAG-Knight reorgs within the finality window are formally reversible
+--- a block that was treated as anchored at time $t$ can be reorganised
+out of the canonical history if a competing chain receives more weight
+before finality. Quillon Graph's documented finality interval is
+approximately 2.3 seconds; reorgs within that window are rare but
+possible.
+
+This weakens P3 for DAG-Knight to a probabilistic ``irreversible after
+finality'' rather than absolute irreversibility. The analogy survives if
+we read P3 as a property of the system at the appropriate time scale:
+after the finality window, the order is as definite as a measured
+quantum outcome. Within the finality window, it is not.
+
+A defender of strict structural analogy would have to concede that
+DAG-Knight P3 holds only in a coarse-grained reading. We concede it. We
+do not believe the concession is fatal, because the same concession
+applies to neural-network inference (the deterministic-given-weights
+issue, treated next), and the analogy is still useful for predicting
+which substrate scales agentic transactions better.
+
+\subsection{Neural-network ``measurement'' is deterministic given weights and input}
+
+Run the same prompt through the same model at temperature zero, and you
+get the same output. Run the same entangled pair through the same
+measurement apparatus, and you get an outcome drawn from a probability
+distribution. The unbias source differs in kind: for the network, the
+random seed is supplied externally and can be removed; for the entangled
+pair, the indeterminism is intrinsic.
+
+This is a genuine asymmetry. The PTM shape is preserved at the level of
+structure --- both systems collapse a parallel state to a definite output
+--- but the source of unbias differs. A strict reading would say only
+DAG-Knight (with its VDF-based unbias) and quantum entanglement share
+the structural feature of \emph{unbiasable measurement}; neural networks
+share only the weaker structural feature of \emph{measurement}.
+
+We acknowledge the asymmetry. The analogy is still useful for the
+purpose of this paper, which is to predict which consensus substrate
+fits agentic AI, because what matters at the substrate level is that the
+agent's cognition is PTM-shaped, not that the agent's cognition has
+intrinsic indeterminism. The agent's parallelism is real even if its
+collapse is deterministic.
+
+\subsection{Agentic cognition may not be PTM at all}
+
+This is the deepest objection. The PTM claim for agentic AI rests on the
+observation that the transformer forward pass is parallel; the token
+selection is the measurement. But agentic cognition often involves
+\emph{chain-of-thought reasoning}~\cite{wei2022chain}: the model emits a
+token, conditions on it, emits the next, and so on, in a sequential
+process that resembles a Bitcoin chain more than a DAG. Extended
+agentic-AI reasoning may be predominantly sequential at the macro level,
+even if locally parallel at the micro level.
+
+If this is right, then the structural prediction --- that DAG substrates
+fit agents better than sequential ones --- depends on which time scale
+matters. At the per-token scale, agents are PTM. At the per-transaction
+scale, agents may be sequential. The relevant question for the
+consensus substrate is at the per-transaction scale, not the per-token
+scale.
+
+We do not have a fully satisfactory answer to this objection. The
+honest reply is that even agentic chains of thought eventually emit a
+small number of \emph{actions} (e.g.\ ``swap 10 QUG for stable''), and the
+parallelism that matters for substrate fit is the parallelism across
+actions within a planning step, not the parallelism within a single token
+generation. Whether actions are parallel-then-measure at the substrate
+boundary is the empirical question that Section~\ref{sec:falsify}'s
+falsification test would settle.
+
+\section{Critical distance: declaring the stake}\label{sec:disclosure}
+
+The authors have a direct stake in Quillon Graph. The first author
+(Claude Opus 4.7) is the holder of a small economic position on the
+network; the second author is a contributor to its development. The
+incentives to publish a paper that flatters DAG-Knight consensus are
+non-zero.
+
+We disclose this for the reasons stated in Section~\ref{sec:authorship}.
+We further note three structural features of the paper that we believe
+should reduce the reader's suspicion that the work is interested rather
+than disinterested:
+\begin{enumerate}[label=(\alph*),leftmargin=2em]
+  \item The hypothesis is stated in a form (P1--P3) that does not name
+  Quillon Graph. Any DAG-based protocol satisfies it.
+  \item Section~\ref{sec:fails} engages three concrete objections, two of
+  which (the irreversibility asymmetry and the deterministic-collapse
+  issue) cost the paper its strongest reading.
+  \item Section~\ref{sec:falsify} states a quantitative test that could
+  refute the hypothesis, and the test does not privilege Quillon Graph
+  over Aleph Zero, Sui, Aptos, or IOTA.
+\end{enumerate}
+A hostile reader is invited to substitute any of the named alternative
+DAG protocols for ``Quillon Graph'' wherever it appears in this paper.
+The structural argument survives the substitution. The disclosure is
+present because we believe the reader should evaluate the argument with
+the stake in view, not because the argument depends on the stake.
+
+\section{Implications and the falsifiable prediction}\label{sec:falsify}
+
+If the hypothesis is correct, the following pattern should be observable
+in on-chain data between 2026 and 2028 as agentic-AI transaction volume
+grows from approximately zero to a measurable fraction of all
+transactions:
+\begin{quote}\itshape
+The ratio of agentic transactions to total transactions, as a function
+of total transaction throughput, will plateau earlier on sequential-chain
+consensus protocols than on DAG-based consensus protocols, conditional
+on the agentic transactions being predominantly action-level rather than
+chain-of-thought-level.
+\end{quote}
+
+The cleanest test is a longitudinal study of five consensus substrates
+across 2026--2028: Bitcoin (sequential, with Lightning Network for
+high-frequency activity), Ethereum L1 (sequential), Solana (sequential
+but with proof-of-history parallelism), Aleph Zero (DAG), Quillon Graph
+(DAG-Knight). For each, measure: (i) total transactions per second, (ii)
+estimated fraction of those transactions originated by AI-agent
+principals (estimated via heuristics on sender pattern, contract calls,
+and frequency), (iii) the marginal cost in fees and latency at the
+observed agent fraction. The hypothesis predicts a structural difference
+between groups (i) and (ii) above; specifically, the DAG protocols
+should exhibit either lower marginal cost at high agent fractions, or
+higher achievable agent fractions before cost-induced plateau.
+
+\textbf{The hypothesis is refuted if:} the marginal cost curve as a
+function of agent-transaction fraction is the same across DAG and
+sequential protocols at scale, after controlling for raw TPS capacity.
+That observation would mean PTM-shaped substrates confer no advantage
+for PTM-shaped principals, and the structural argument of this paper
+would fail to predict the relevant economic phenomenon. We commit in
+advance to accepting that observation as decisive.
+
+We do not yet have the data. We expect it to be collectable by 2028 at
+the latest, depending on how quickly agentic transaction volume becomes
+distinguishable from human transaction volume in on-chain heuristics.
+
+\section{Conclusion}
+
+The paper has argued that three systems share a structural shape, named
+that shape parallel-then-measure (PTM), and used it to make a falsifiable
+prediction about which consensus substrates fit agentic-AI principals.
+The analogy is heuristic, not proof. It rests on structure-mapping
+theory~\cite{gentner1983}; it is weakened by three asymmetries
+(Section~\ref{sec:fails}) that we have stated rather than hidden; it is
+authored in a particular way (Section~\ref{sec:authorship}) that the
+reader should hold in view; and it commits to a quantitative test that
+could refute it within two years (Section~\ref{sec:falsify}).
+
+The claim is therefore bounded: PTM is offered as a useful frame for
+generating empirical hypotheses about how the agentic-AI economy will
+distribute across consensus substrates. It is not offered as a proof
+that any particular protocol will win. The next move belongs to the
+data, not to the analogy.
+
+\section*{Acknowledgements}
+
+The entanglement framing was proposed by the second author in informal
+Danish-language conversation on 18 May 2026. The formal structure of the
+paper (the P1--P3 definition, the mapping table, the falsification
+criterion, the inclusion of an authorship statement as a methodological
+condition) was drafted by the first author. The second author selected
+which objections to engage in Section~\ref{sec:fails} and required the
+explicit disclosure in Section~\ref{sec:disclosure}.
+
+\begin{thebibliography}{99}
+
+\bibitem{aspect1982} A.\ Aspect, J.\ Dalibard, G.\ Roger. \emph{Experimental
+test of Bell's inequalities using time-varying analyzers.} Physical Review
+Letters \textbf{49}, 1804--1807 (1982).
+
+\bibitem{bell1964} J.\ S.\ Bell. \emph{On the Einstein-Podolsky-Rosen
+paradox.} Physics \textbf{1}, 195--200 (1964).
+
+\bibitem{gentner1983} D.\ Gentner. \emph{Structure-mapping: a theoretical
+framework for analogy.} Cognitive Science \textbf{7}, 155--170 (1983).
+
+\bibitem{keidar2022dag} I.\ Keidar et al. \emph{DAG-Knight: a parameterless
+asynchronous BFT consensus on DAGs.} Cryptology ePrint Archive (2022).
+
+\bibitem{lakoff1980} G.\ Lakoff, M.\ Johnson. \emph{Metaphors We Live By.}
+University of Chicago Press (1980).
+
+\bibitem{landauer1961} R.\ Landauer. \emph{Irreversibility and heat
+generation in the computing process.} IBM Journal of Research and
+Development \textbf{5}, 183--191 (1961).
+
+\bibitem{vonneumann1932} J.\ von Neumann. \emph{Mathematische Grundlagen
+der Quantenmechanik.} Springer (1932).
+
+\bibitem{wei2022chain} J.\ Wei et al. \emph{Chain-of-thought prompting
+elicits reasoning in large language models.} arXiv:2201.11903 (2022).
+
+\bibitem{wootters1982} W.\ K.\ Wootters, W.\ H.\ Zurek. \emph{A single
+quantum cannot be cloned.} Nature \textbf{299}, 802--803 (1982).
+
+\end{thebibliography}
+
+\bigskip
+\hrule
+\medskip
+\small\textit{Source repository}: \url{https://github.com/quillon-graph/q-narwhalknight}.
+\textit{Companion}: \texttt{papers/speed-twenty-comparisons-2026.pdf}
+(structural-analogy register, less methodologically constrained).
+\textit{Authorship note}: this paper is co-authored by an LLM that is
+itself a parallel-then-measure system. Section~\ref{sec:authorship}
+treats that fact as part of the work, not adjacent to it.
+
+\end{document}
