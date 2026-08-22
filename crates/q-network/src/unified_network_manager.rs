@@ -6248,17 +6248,34 @@ impl UnifiedNetworkManager {
                         }
 
                         // 🔧 v0.6.8-beta: Automatic reconnection for bootstrap peers
+                        // 2026-08-22 fix: only redial when THIS was the peer's LAST connection
+                        // (num_established == 0). Previously this redialed unconditionally on
+                        // every single ConnectionClosed, even when num_established > 0 proved
+                        // other transports to the same peer were still open (the exact case the
+                        // DISCONNECT-redundant log branch above already detects) — a redial
+                        // storm that piles up duplicate raw TCP connections to the same
+                        // bootstrap peer (each one eventually admission-capped by
+                        // max_established_per_peer, but only AFTER completing its TCP
+                        // handshake), independently confirmed live: happysrv had 210 of 242
+                        // established sockets to one peer while connected_peer_count stayed ~4.
                         let bootstrap_peers = self.bootstrap_peers.read().await;
-                        if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
-                            warn!("🔄 [AUTO-RECONNECT] Bootstrap peer disconnected - reconnecting to {}", peer_id);
-                            let addr = multiaddr.clone();
-                            drop(bootstrap_peers);
+                        if num_established == 0 {
+                            if let Some(multiaddr) = bootstrap_peers.get(&peer_id) {
+                                warn!("🔄 [AUTO-RECONNECT] Bootstrap peer fully disconnected - reconnecting to {}", peer_id);
+                                let addr = multiaddr.clone();
+                                drop(bootstrap_peers);
 
-                            if let Err(e) = self.swarm.dial(addr.clone()) {
-                                error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
-                            } else {
-                                info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                                if let Err(e) = self.swarm.dial(addr.clone()) {
+                                    error!("❌ [AUTO-RECONNECT] Failed to redial bootstrap peer {} at {}: {}", peer_id, addr, e);
+                                } else {
+                                    info!("✅ [AUTO-RECONNECT] Redialing bootstrap peer {} at {}", peer_id, addr);
+                                }
                             }
+                        } else {
+                            debug!(
+                                "🔇 [AUTO-RECONNECT-skip] peer={} still has {} other transport(s) open, not redialing",
+                                peer_id, num_established
+                            );
                         }
                     }
                     _ => {}
@@ -6833,29 +6850,51 @@ impl UnifiedNetworkManager {
                                         self.dial_started.remove(&pid);
                                         None // trigger the existing connected-peers fallback below
                                     } else {
+                                    // 2026-08-22 fix: RequestBlockRangeDirect fires from up to
+                                    // 16-32 concurrent turbo-sync chunk-fetch workers, typically
+                                    // all targeting the same highest-tip peer. Before this fix,
+                                    // EVERY call that landed here (peer still not connected, not
+                                    // yet wedged) re-issued swarm.dial() on the same cached
+                                    // addresses — a burst of duplicate dials to one peer on every
+                                    // concurrent retry. dial_started already tracked "a dial is in
+                                    // flight" (for the 30s wedge-timeout above) but nothing used
+                                    // that to SKIP the redundant dial calls. Fix: only actually
+                                    // call swarm.dial() on the genuinely first attempt (no prior
+                                    // dial_started entry); subsequent concurrent callers still get
+                                    // the same throttle response and retry later, but don't pile
+                                    // on more raw TCP connection attempts to a dial already
+                                    // in progress.
+                                    let already_dialing = self.dial_started.contains_key(&pid);
                                     self.dial_started.entry(pid.clone()).or_insert_with(std::time::Instant::now);
-                                    // v10.11.33: request-response does not wait for a fresh dial.
-                                    // Start the dial, then ask TurboSync to retry without consuming
-                                    // its chunk retry budget. Returning Some(pid) here fires
-                                    // send_request immediately and produces DialFailure before the
-                                    // async dial can connect.
-                                    let to_dial: Vec<libp2p::Multiaddr> = match self.peer_addresses.try_read() {
-                                        Ok(addrs) => addrs.get(&pid).cloned().unwrap_or_default(),
-                                        Err(_) => Vec::new(),
-                                    };
-                                    info!(
-                                        "🔗 [PEER CHECK] Peer {} not connected — dialing {} cached addr(s)",
-                                        pid,
-                                        to_dial.len()
-                                    );
-                                    for addr in to_dial {
-                                        match self.swarm.dial(addr.clone()) {
-                                            Ok(()) => debug!("[PEER CHECK] dial submitted: {} -> {}", pid, addr),
-                                            Err(e) => debug!(
-                                                "[PEER CHECK] dial {} -> {} skipped (likely in-progress): {:?}",
-                                                pid, addr, e
-                                            ),
+                                    if !already_dialing {
+                                        // v10.11.33: request-response does not wait for a fresh dial.
+                                        // Start the dial, then ask TurboSync to retry without consuming
+                                        // its chunk retry budget. Returning Some(pid) here fires
+                                        // send_request immediately and produces DialFailure before the
+                                        // async dial can connect.
+                                        let to_dial: Vec<libp2p::Multiaddr> = match self.peer_addresses.try_read() {
+                                            Ok(addrs) => addrs.get(&pid).cloned().unwrap_or_default(),
+                                            Err(_) => Vec::new(),
+                                        };
+                                        info!(
+                                            "🔗 [PEER CHECK] Peer {} not connected — dialing {} cached addr(s)",
+                                            pid,
+                                            to_dial.len()
+                                        );
+                                        for addr in to_dial {
+                                            match self.swarm.dial(addr.clone()) {
+                                                Ok(()) => debug!("[PEER CHECK] dial submitted: {} -> {}", pid, addr),
+                                                Err(e) => debug!(
+                                                    "[PEER CHECK] dial {} -> {} skipped (likely in-progress): {:?}",
+                                                    pid, addr, e
+                                                ),
+                                            }
                                         }
+                                    } else {
+                                        debug!(
+                                            "🔇 [PEER CHECK-skip] Peer {} already has a dial in flight, not re-dialing",
+                                            pid
+                                        );
                                     }
                                     let _ = response_tx.send(Err(anyhow::anyhow!(
                                         "{}: dial in progress for peer {}",
