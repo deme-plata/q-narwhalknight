@@ -11119,6 +11119,50 @@ impl QStorage {
         Ok(written)
     }
 
+    /// 2026-08-22: Persist a producer endorsement that the CALLER has already
+    /// verified (see `ProducerEndorsement::verify`). Storage does not re-check
+    /// signatures; it is a dumb store. Keyed by subject, so re-receiving the
+    /// same endorsement is idempotent.
+    pub async fn save_producer_endorsement(
+        &self,
+        endorsement: &q_types::producer_endorsement::ProducerEndorsement,
+    ) -> Result<()> {
+        let key = format!(
+            "producer_endorsement:{}",
+            hex::encode(endorsement.subject_node_id)
+        );
+        let value = serde_json::to_vec(endorsement)
+            .context("failed to serialize producer endorsement")?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        info!(
+            "🔐 [PRODUCER ENROLL] Persisted endorsement for producer {}… (endorsed by {}…)",
+            hex::encode(&endorsement.subject_node_id[..8]),
+            hex::encode(&endorsement.endorser_node_id[..8])
+        );
+        Ok(())
+    }
+
+    /// 2026-08-22: Load all persisted producer endorsements.
+    ///
+    /// The caller MUST re-verify each one against its trusted set at load time —
+    /// an endorsement is never trusted merely because it is on local disk.
+    pub async fn load_producer_endorsements(
+        &self,
+    ) -> Result<Vec<q_types::producer_endorsement::ProducerEndorsement>> {
+        let mut out = Vec::new();
+        for (_key, value) in self
+            .hot_db
+            .scan_prefix(CF_MANIFEST, b"producer_endorsement:")
+            .await?
+        {
+            match serde_json::from_slice::<q_types::producer_endorsement::ProducerEndorsement>(&value) {
+                Ok(e) => out.push(e),
+                Err(e) => warn!("⚠️ [PRODUCER ENROLL] Skipping unparseable stored endorsement: {}", e),
+            }
+        }
+        Ok(out)
+    }
+
     /// One-time migration: Retroactively compute DEX QUG adjustment counters
     /// from existing CF_SWAP_HISTORY records.
     ///

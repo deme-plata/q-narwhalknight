@@ -340,6 +340,13 @@ pub mod unified_zk_validator;
 /// v3.7.4: Validator Registry with Dilithium5 post-quantum signatures
 pub mod validator_registry;
 
+/// 2026-08-22: Decentralized producer enrollment.
+/// A new node's PQC-004 producer key is accepted network-wide when an
+/// ALREADY-AUTHORIZED producer signs an endorsement for it — replacing the
+/// static, manually-distributed `Q_PRODUCER_DILITHIUM_PUBKEY_HEX` allowlist
+/// (which required editing every node in the network to add one producer).
+pub mod producer_endorsement;
+
 /// v8.5.0: P2P Update Announcement Protocol
 /// Cryptographically signed software update announcements via gossipsub
 /// with quorum verification (2-of-3 trusted bootstrap signers)
