@@ -11004,6 +11004,121 @@ impl QStorage {
         Ok(adjusted)
     }
 
+    /// 2026-08-22: Export the DEX QUG debit/credit counters for state-sync propagation.
+    ///
+    /// WHY THIS EXISTS: the counters above solve "a balance rebuild on THIS node loses
+    /// DEX effects, because DEX swaps are not blockchain transactions" — but they are
+    /// node-local, so they solve nothing for a DIFFERENT node syncing from scratch.
+    /// A fresh node replays only blocks, never sees the DEX debits/credits, and ends up
+    /// with permanently-too-high balances (measured: 43,706 QUG across 1,073 wallets vs
+    /// the authoritative node). The only cross-node reconciliation path (state-sync
+    /// merge) is max-wins, so a too-high balance can never be corrected downward and the
+    /// divergence is permanent rather than self-healing.
+    ///
+    /// Exporting these lets a fresh node feed its own (already idempotent)
+    /// `apply_dex_qug_adjustments()` and converge on the authoritative balances.
+    ///
+    /// NOTE: deliberately does NOT export `dex_applied_net:` — that tracks what the
+    /// LOCAL node has already applied and is the idempotency guard. Importing a peer's
+    /// applied-net would make the importing node believe adjustments were already
+    /// applied locally when they were not, silently skipping them.
+    ///
+    /// Returns (debited, credited), each wallet_hex -> decimal-string u128.
+    pub async fn export_dex_qug_counters(
+        &self,
+    ) -> Result<(HashMap<String, String>, HashMap<String, String>)> {
+        let mut debited = HashMap::new();
+        let mut credited = HashMap::new();
+
+        for (key, value) in self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_debited:").await? {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_debited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        debited.insert(wallet_hex, amount.to_string());
+                    }
+                }
+            }
+        }
+
+        for (key, value) in self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_credited:").await? {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_credited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        credited.insert(wallet_hex, amount.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok((debited, credited))
+    }
+
+    /// 2026-08-22: Import peer-provided DEX QUG counters (see `export_dex_qug_counters`).
+    ///
+    /// Max-wins per counter: these are CUMULATIVE monotonic totals, so a higher value is
+    /// strictly newer information and a lower one is a stale snapshot. This keeps the
+    /// import safe against out-of-order/older peer snapshots — it can never walk a
+    /// counter backwards and thereby re-credit an already-applied debit.
+    ///
+    /// Does NOT touch balances directly; `apply_dex_qug_adjustments()` (idempotent, via
+    /// the `dex_applied_net:` tracker) does that on the next startup pass.
+    ///
+    /// Returns the number of counter entries actually advanced.
+    pub async fn import_dex_qug_counters(
+        &self,
+        debited: &HashMap<String, String>,
+        credited: &HashMap<String, String>,
+    ) -> Result<u64> {
+        let mut written = 0u64;
+        let mut batch: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+
+        for (prefix, src) in [
+            ("dex_qug_debited:", debited),
+            ("dex_qug_credited:", credited),
+        ] {
+            for (wallet_hex, amount_str) in src.iter() {
+                // Only accept well-formed 32-byte hex wallet ids — never let a peer
+                // inject arbitrary manifest keys through this path.
+                if wallet_hex.len() != 64 || hex::decode(wallet_hex).map(|b| b.len() != 32).unwrap_or(true) {
+                    continue;
+                }
+                let incoming: u128 = match amount_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if incoming == 0 {
+                    continue;
+                }
+                let key = format!("{}{}", prefix, wallet_hex);
+                let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+                    Some(bytes) if bytes.len() == 16 => {
+                        u128::from_le_bytes(bytes[..16].try_into().unwrap())
+                    }
+                    _ => 0u128,
+                };
+                if incoming > current {
+                    batch.push((CF_MANIFEST, key.into_bytes(), incoming.to_le_bytes().to_vec()));
+                    written += 1;
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            self.hot_db.write_batch(batch).await?;
+            info!(
+                "🔄 [DEX ADJUST] Imported {} DEX QUG counter entries from peer state-sync \
+                 (apply_dex_qug_adjustments will reconcile balances)",
+                written
+            );
+        }
+
+        Ok(written)
+    }
+
     /// One-time migration: Retroactively compute DEX QUG adjustment counters
     /// from existing CF_SWAP_HISTORY records.
     ///

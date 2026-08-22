@@ -52,6 +52,20 @@ pub struct FullStateSnapshot {
     /// Fresh nodes apply these AFTER block-derived balances to get the authoritative value.
     #[serde(default)]
     pub finality_records: Vec<q_types::BalanceFinalityRecord>,
+    /// 2026-08-22: Cumulative DEX QUG debit/credit counters, wallet_hex -> u128 decimal string.
+    ///
+    /// DEX swaps are NOT blockchain transactions (see `record_dex_qug_debit` in q-storage):
+    /// their balance effects are applied API-side on the executing node and tracked only in
+    /// these node-local counters. A fresh node replays blocks alone, never learns about them,
+    /// and lands on permanently-too-high balances that the max-wins merge can never correct
+    /// downward. Propagating the counters lets the receiving node's own idempotent
+    /// `apply_dex_qug_adjustments()` reconcile to the authoritative balances.
+    ///
+    /// `#[serde(default)]` keeps this backward/forward compatible with peers on older builds.
+    #[serde(default)]
+    pub dex_qug_debited: HashMap<String, String>,
+    #[serde(default)]
+    pub dex_qug_credited: HashMap<String, String>,
 }
 
 // ============================================================================
@@ -129,6 +143,22 @@ pub async fn get_full_state(
         Vec::new()
     };
 
+    // 2026-08-22: export the DEX QUG counters so a fresh node can reconcile the
+    // balance effects of DEX swaps, which are not blockchain transactions and are
+    // therefore invisible to block replay. Non-fatal: an error here degrades to the
+    // previous (counter-less) behavior rather than failing the whole snapshot.
+    let (dex_qug_debited, dex_qug_credited) = match app_state
+        .storage_engine
+        .export_dex_qug_counters()
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            warn!("⚠️ [STATE SYNC] Failed to export DEX QUG counters: {} — serving snapshot without them", e);
+            (HashMap::new(), HashMap::new())
+        }
+    };
+
     let snapshot = FullStateSnapshot {
         contracts,
         liquidity_pools,
@@ -140,6 +170,8 @@ pub async fn get_full_state(
         timestamp: chrono::Utc::now().timestamp() as u64,
         network_id: Some(our_network_id),
         finality_records,
+        dex_qug_debited,
+        dex_qug_credited,
     };
 
     let elapsed = start.elapsed();
@@ -1247,6 +1279,43 @@ async fn do_http_state_sync(app_state: &Arc<AppState>, our_port: u16) {
               before_count, snapshot.wallet_balances.len(), peer_url);
 
         let result = merge_http_snapshot(app_state, &snapshot).await;
+
+        // 2026-08-22: import the peer's DEX QUG counters and reconcile.
+        //
+        // This is the piece that lets a fresh node converge on the authoritative
+        // balances WITHOUT needing a configured trusted-authority overwrite: DEX swap
+        // effects are not blockchain transactions, so block replay leaves this node's
+        // balances too high, and the max-wins wallet merge above can only ever raise a
+        // balance — never lower it — so the divergence is otherwise permanent.
+        //
+        // Counter import is max-wins on monotonic cumulative totals (safe against stale
+        // snapshots); the balance reconciliation itself is the pre-existing idempotent
+        // apply_dex_qug_adjustments(), which no-ops when there is nothing new to apply.
+        if !snapshot.dex_qug_debited.is_empty() || !snapshot.dex_qug_credited.is_empty() {
+            match app_state
+                .storage_engine
+                .import_dex_qug_counters(&snapshot.dex_qug_debited, &snapshot.dex_qug_credited)
+                .await
+            {
+                Ok(0) => {
+                    debug!("🔄 [DEX ADJUST] Peer DEX counters already current — nothing to import");
+                }
+                Ok(n) => {
+                    info!(
+                        "🔄 [DEX ADJUST] Imported {} DEX QUG counter entries from {} — reconciling balances",
+                        n, peer_url
+                    );
+                    match app_state.storage_engine.apply_dex_qug_adjustments().await {
+                        Ok(adjusted) => info!(
+                            "✅ [DEX ADJUST] Reconciled {} wallet balance(s) from imported DEX counters",
+                            adjusted
+                        ),
+                        Err(e) => warn!("⚠️ [DEX ADJUST] Failed to apply DEX adjustments: {}", e),
+                    }
+                }
+                Err(e) => warn!("⚠️ [DEX ADJUST] Failed to import DEX counters from {}: {}", peer_url, e),
+            }
+        }
 
         // v10.5.4: Log wallet count AFTER merge to confirm balances were populated.
         let after_count = {
