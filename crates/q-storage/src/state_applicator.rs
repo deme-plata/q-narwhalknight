@@ -30,10 +30,18 @@ use crate::{
     CF_CONTRACTS, CF_CONTRACT_STORAGE, CF_VAULTS, CF_ORACLE_PRICES,
     CF_AI_CREDITS_V2, CF_AI_PROVIDERS, CF_PROPOSALS, CF_DELEGATIONS,
     CF_STAKES, CF_VALIDATORS, CF_SYSTEM_PARAMS, CF_NONCES, CF_STATE_ROOTS,
-    CF_PROTOCOL_FEES,
+    CF_PROTOCOL_FEES, CF_MANIFEST,
     state_processor::{TokenMetadata, PoolState, VaultState},
 };
-use q_types::{FOUNDER_WALLET, DEX_PROTOCOL_FEE_BPS, BPS_DIVISOR};
+use q_types::{FOUNDER_WALLET, DEX_PROTOCOL_FEE_BPS, BPS_DIVISOR, QUG_TOKEN_ADDRESS};
+
+/// Legacy wallet-balance key format, must match `save_wallet_balance` in lib.rs
+/// EXACTLY (`format!("wallet_balance_{}", hex::encode(address))`, CF_MANIFEST,
+/// little-endian u128) — this is the storage `compute_balance_root_for_block`
+/// and `/api/v1/integrity/balance-root` actually read via `load_wallet_balances`.
+fn legacy_wallet_balance_key(account: &[u8; 32]) -> Vec<u8> {
+    format!("wallet_balance_{}", hex::encode(account)).into_bytes()
+}
 
 /// StateApplicator applies state changes to RocksDB column families
 pub struct StateApplicator {
@@ -429,6 +437,26 @@ impl StateApplicator {
         let new_balance = current.saturating_add(amount);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
+        // 2026-08-13: bridge native-QUG credits into the legacy wallet_balance_*
+        // storage too. compute_balance_root_for_block()/load_wallet_balances()
+        // (the source of /api/v1/integrity/balance-root and total_supply_qug)
+        // read ONLY that storage, never CF_TOKEN_BALANCES — so without this,
+        // every credit processed via this path (bulk/turbo sync in particular)
+        // is invisible to balance-root/total-supply even though it lands here
+        // correctly. Read-then-add on the CURRENT on-disk legacy value, same
+        // batch — never a blind overwrite of a precomputed target, so this
+        // cannot go stale the way a snapshot-based writer could.
+        if token == &QUG_TOKEN_ADDRESS {
+            if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
+                let legacy_key = legacy_wallet_balance_key(account);
+                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
+                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
+                    .unwrap_or(0);
+                let legacy_new = legacy_current.saturating_add(amount);
+                batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
+            }
+        }
+
         Ok(())
     }
 
@@ -467,6 +495,26 @@ impl StateApplicator {
 
         let new_balance = current - amount;
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
+
+        // 2026-08-13: mirror the debit into legacy wallet_balance_* — see the
+        // matching comment in apply_balance_credit for why. Uses saturating_sub
+        // (never bails) rather than mirroring the hard insufficient-balance
+        // check above: the PRIMARY balance-sufficiency gate is the
+        // CF_TOKEN_BALANCES check already passed by this point; the legacy
+        // mirror may currently be out of sync (that IS the bug this bridges),
+        // so refusing to apply a real, already-validated debit just because
+        // the shadow copy hasn't caught up yet would re-introduce a NEW
+        // divergence instead of closing the existing one.
+        if token == &QUG_TOKEN_ADDRESS {
+            if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
+                let legacy_key = legacy_wallet_balance_key(account);
+                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
+                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
+                    .unwrap_or(0);
+                let legacy_new = legacy_current.saturating_sub(amount);
+                batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
+            }
+        }
 
         Ok(())
     }
@@ -1187,13 +1235,29 @@ mod tests {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Create column families
-        let cfs: Vec<rocksdb::ColumnFamilyDescriptor> = crate::STATE_SYNC_COLUMN_FAMILIES
+        // Create column families — include CF_MANIFEST too: the legacy
+        // wallet_balance_* bridge (2026-08-13) writes there, and it's not in
+        // STATE_SYNC_COLUMN_FAMILIES (a real production DB always has it via
+        // save_wallet_balance, but a bare STATE_SYNC_COLUMN_FAMILIES test DB
+        // would not — the bridge's `if let Some(...)` guard would then
+        // silently no-op, giving a false-green test).
+        let mut cf_names: Vec<&str> = crate::STATE_SYNC_COLUMN_FAMILIES.to_vec();
+        cf_names.push(CF_MANIFEST);
+        let cfs: Vec<rocksdb::ColumnFamilyDescriptor> = cf_names
             .iter()
             .map(|name| rocksdb::ColumnFamilyDescriptor::new(*name, rocksdb::Options::default()))
             .collect();
 
         Arc::new(DB::open_cf_descriptors(&opts, path, cfs).unwrap())
+    }
+
+    /// Read the legacy wallet_balance_* value directly, matching
+    /// save_wallet_balance's on-disk format exactly (CF_MANIFEST, LE u128).
+    fn read_legacy_wallet_balance(db: &Arc<DB>, account: &[u8; 32]) -> u128 {
+        let cf = db.cf_handle(CF_MANIFEST).expect("CF_MANIFEST must exist");
+        db.get_cf(&cf, legacy_wallet_balance_key(account)).unwrap()
+            .map(|v| u128::from_le_bytes(v[..16].try_into().unwrap()))
+            .unwrap_or(0)
     }
 
     #[test]
@@ -1242,5 +1306,97 @@ mod tests {
 
         let result = applicator.apply_changes(&changes, 1);
         assert!(result.is_err());
+    }
+
+    /// 2026-08-13: the actual fix under test. A native-QUG credit/debit must
+    /// land in BOTH CF_TOKEN_BALANCES (the new pipeline's own store) AND the
+    /// legacy wallet_balance_* storage (what compute_balance_root_for_block /
+    /// /api/v1/integrity/balance-root / total_supply_qug actually read) —
+    /// staying in sync is the whole point.
+    #[test]
+    fn test_qug_credit_bridges_to_legacy_wallet_balance() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false);
+        let account = [7u8; 32];
+
+        let changes = vec![StateChange::BalanceCredit {
+            account,
+            token: QUG_TOKEN_ADDRESS,
+            amount: 500,
+        }];
+        applicator.apply_changes(&changes, 1).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&account, &QUG_TOKEN_ADDRESS).unwrap(), 500,
+            "CF_TOKEN_BALANCES side must still work exactly as before");
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 500,
+            "legacy wallet_balance_* must now ALSO reflect the credit — this is the fix");
+    }
+
+    #[test]
+    fn test_qug_debit_bridges_to_legacy_wallet_balance() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false);
+        let account = [8u8; 32];
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account, token: QUG_TOKEN_ADDRESS, amount: 1000,
+        }], 1).unwrap();
+        applicator.apply_changes(&[StateChange::BalanceDebit {
+            account, token: QUG_TOKEN_ADDRESS, amount: 300,
+        }], 2).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&account, &QUG_TOKEN_ADDRESS).unwrap(), 700);
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 700,
+            "legacy wallet_balance_* must track the debit too, not just credits");
+    }
+
+    /// A non-QUG token (e.g. a custom token or LP token routed through the
+    /// generic BalanceCredit/Debit path) must NOT touch wallet_balance_* —
+    /// the bridge is QUG-specific by design, not a blanket redirect.
+    #[test]
+    fn test_non_qug_token_does_not_touch_legacy_wallet_balance() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false);
+        let account = [9u8; 32];
+        let custom_token = [42u8; 32]; // definitely not QUG_TOKEN_ADDRESS
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account, token: custom_token, amount: 999,
+        }], 1).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&account, &custom_token).unwrap(), 999);
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 0,
+            "a non-QUG token credit must not leak into wallet_balance_*");
+    }
+
+    /// Simulates the REAL bug scenario: legacy storage starts ALREADY behind
+    /// CF_TOKEN_BALANCES (the exact drift this fix exists to stop from
+    /// growing) — the bridge must still apply the delta correctly on top of
+    /// whatever's currently on disk, not assume a synced starting point.
+    #[test]
+    fn test_bridge_converges_even_when_legacy_already_diverged() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false);
+        let account = [10u8; 32];
+
+        // Simulate pre-existing drift: CF_TOKEN_BALANCES has 5000, legacy has
+        // only 1000 (as if earlier blocks were bulk-synced pre-fix).
+        {
+            let cf = db.cf_handle(CF_TOKEN_BALANCES).unwrap();
+            let mut key = account.to_vec();
+            key.extend_from_slice(&QUG_TOKEN_ADDRESS);
+            db.put_cf(&cf, &key, &5000u128.to_le_bytes()).unwrap();
+            let mcf = db.cf_handle(CF_MANIFEST).unwrap();
+            db.put_cf(&mcf, legacy_wallet_balance_key(&account), &1000u128.to_le_bytes()).unwrap();
+        }
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account, token: QUG_TOKEN_ADDRESS, amount: 200,
+        }], 1).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&account, &QUG_TOKEN_ADDRESS).unwrap(), 5200);
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 1200,
+            "bridge must apply the delta on top of whatever legacy currently holds, \
+             not assume the two stores started in sync");
     }
 }
