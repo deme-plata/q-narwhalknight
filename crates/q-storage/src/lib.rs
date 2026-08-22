@@ -5531,8 +5531,11 @@ impl QStorage {
                 if let Ok(Some(value)) = db.get_cf(&cf, &cf_key) {
                     // State sync storage: check for 16-byte u128 first, then 8-byte u64
                     if value.len() >= 16 {
-                        // New u128 format (big-endian for state sync consistency)
-                        let amount = u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
+                        // 2026-08-22: was from_be_bytes — the ONLY writer of CF_TOKEN_BALANCES
+                        // (StateApplicator::apply_balance_credit/debit, state_applicator.rs)
+                        // uses to_le_bytes(); the mismatched BE read silently byte-swapped every
+                        // value here into astronomically wrong amounts.
+                        let amount = u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
                         if amount > 0 {
                             debug!(
                                 "🪙 Found token balance in state sync storage (u128): wallet={}, token={}, amount={}",
@@ -5543,8 +5546,8 @@ impl QStorage {
                             return Ok(amount);
                         }
                     } else if value.len() >= 8 {
-                        // Legacy u64 format (big-endian)
-                        let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
+                        // Legacy u64 format — see the matching LE-fix note above.
+                        let amount = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
                         if amount > 0 {
                             debug!(
                                 "🪙 Found token balance in state sync storage (legacy u64): wallet={}, token={}, amount={}",
@@ -5641,11 +5644,12 @@ impl QStorage {
                             wallet_address.copy_from_slice(&key[0..32]);
                             token_address.copy_from_slice(&key[32..64]);
 
-                            // State sync stores as big-endian: check 16-byte u128 first, then 8-byte u64
+                            // 2026-08-22: was from_be_bytes — see the LE-fix note in get_token_balance's
+                            // CF_TOKEN_BALANCES fallback above; the only writer uses LE.
                             let amount = if value.len() >= 16 {
-                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                                u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
                             } else {
-                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                                u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
                             };
 
                             // v8.5.3: Only insert if NOT already in CF_MANIFEST (manifest is authoritative)
@@ -5751,10 +5755,12 @@ impl QStorage {
                             if token_address == q_types::QUGUSD_TOKEN_ADDRESS {
                                 continue; // NEVER load QUGUSD from state sync CF
                             }
+                            // 2026-08-22: was from_be_bytes — see the LE-fix note in
+                            // get_token_balance's CF_TOKEN_BALANCES fallback; the only writer uses LE.
                             let amount = if value.len() >= 16 {
-                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                                u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
                             } else {
-                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                                u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
                             };
                             if !balances.contains_key(&token_address) && amount > 0 {
                                 balances.insert(token_address, amount);

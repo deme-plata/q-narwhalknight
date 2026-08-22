@@ -43,18 +43,69 @@ fn legacy_wallet_balance_key(account: &[u8; 32]) -> Vec<u8> {
     format!("wallet_balance_{}", hex::encode(account)).into_bytes()
 }
 
+/// Decode a stored balance value with backward compatibility: 16-byte LE u128
+/// (current format), 8-byte LE u64 upgraded ×10^16 (pre-24-decimal legacy —
+/// the SAME upgrade `load_wallet_balances` applies; treating these as 0 would
+/// destroy the wallet's balance on the next read-modify-write), else 0.
+fn decode_balance_value(v: &[u8]) -> u128 {
+    if v.len() >= 16 {
+        u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
+    } else if v.len() >= 8 {
+        (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
+    } else {
+        0u128
+    }
+}
+
+/// Batch-local read-your-writes overlay for the additive read-modify-write keys
+/// inside ONE apply_changes WriteBatch. A RocksDB WriteBatch has no read-through:
+/// without this, the second change to the same key within a block reads the STALE
+/// on-disk base and silently discards the first change's delta — e.g. the
+/// amount-debit and fee-debit that every fee-paying transfer emits for the same
+/// sender collapsed to just the fee-debit, under-debiting the sender by the full
+/// transfer amount on state-sync nodes.
+#[derive(Default)]
+struct BatchOverlay {
+    /// CF_TOKEN_BALANCES pending values, key = account(32)‖token(32)
+    token_balances: std::collections::HashMap<Vec<u8>, u128>,
+    /// legacy wallet_balance_* pending values (CF_MANIFEST)
+    legacy_balances: std::collections::HashMap<Vec<u8>, u128>,
+    /// CF_LP_BALANCES pending values, key = pool_id(32)‖account(32)
+    lp_balances: std::collections::HashMap<Vec<u8>, u128>,
+}
+
 /// StateApplicator applies state changes to RocksDB column families
 pub struct StateApplicator {
     /// RocksDB handle
     db: Arc<DB>,
     /// Write-ahead log for crash recovery
     enable_wal: bool,
+    /// Mirror native-QUG credits/debits into legacy wallet_balance_* storage.
+    /// DEFAULT OFF. Only enable on an applicator whose caller is the SOLE
+    /// writer of the legacy store for the blocks being applied (turbo-sync
+    /// chunk paths where balance_engine is None). Anywhere the
+    /// BalanceConsensusEngine, the live tx-execution API paths, or
+    /// migrate_historical_state also write wallet_balance_* for the same
+    /// effects, an enabled bridge double-applies them (or re-injects full
+    /// history) into the authoritative store.
+    bridge_legacy: bool,
 }
 
 impl StateApplicator {
-    /// Create a new StateApplicator
+    /// Create a new StateApplicator (legacy bridge OFF — see `bridge_legacy`)
     pub fn new(db: Arc<DB>, enable_wal: bool) -> Self {
-        Self { db, enable_wal }
+        Self { db, enable_wal, bridge_legacy: false }
+    }
+
+    /// Builder: enable/disable the legacy wallet_balance_* write-through bridge.
+    pub fn with_legacy_bridge(mut self, on: bool) -> Self {
+        self.bridge_legacy = on;
+        self
+    }
+
+    /// Setter form of `with_legacy_bridge` for already-constructed applicators.
+    pub fn set_legacy_bridge(&mut self, on: bool) {
+        self.bridge_legacy = on;
     }
 
     /// Apply a batch of state changes atomically
@@ -62,10 +113,28 @@ impl StateApplicator {
     /// All changes are written in a single RocksDB WriteBatch for atomicity.
     /// If any change fails, the entire batch is rolled back.
     pub fn apply_changes(&self, changes: &[StateChange], block_height: u64) -> Result<()> {
+        self.apply_changes_with_bridge(changes, block_height, self.bridge_legacy)
+    }
+
+    /// Like `apply_changes`, but with an explicit per-call override of the
+    /// legacy-bridge flag — needed because turbo-sync shares ONE processor
+    /// instance (behind an Arc) across call paths that must bridge (chunk
+    /// sync, balance_engine=None: the applicator is the sole legacy writer)
+    /// and paths that must NOT (pack apply with Some(engine): the
+    /// BalanceConsensusEngine already writes wallet_balance_* for the same
+    /// blocks, so bridging there would double-apply every QUG coinbase and
+    /// transfer).
+    pub fn apply_changes_with_bridge(
+        &self,
+        changes: &[StateChange],
+        block_height: u64,
+        bridge_legacy: bool,
+    ) -> Result<()> {
         let mut batch = WriteBatch::default();
+        let mut overlay = BatchOverlay::default();
 
         for change in changes {
-            self.apply_single_change(&mut batch, change)?;
+            self.apply_single_change(&mut batch, &mut overlay, bridge_legacy, change)?;
         }
 
         // Write the batch atomically
@@ -83,14 +152,20 @@ impl StateApplicator {
     }
 
     /// Apply a single state change to the batch
-    fn apply_single_change(&self, batch: &mut WriteBatch, change: &StateChange) -> Result<()> {
+    fn apply_single_change(
+        &self,
+        batch: &mut WriteBatch,
+        overlay: &mut BatchOverlay,
+        bridge_legacy: bool,
+        change: &StateChange,
+    ) -> Result<()> {
         match change {
             // ========== Balance Changes ==========
             StateChange::BalanceCredit { account, token, amount } => {
-                self.apply_balance_credit(batch, account, token, *amount)?;
+                self.apply_balance_credit(batch, overlay, bridge_legacy, account, token, *amount)?;
             }
             StateChange::BalanceDebit { account, token, amount } => {
-                self.apply_balance_debit(batch, account, token, *amount)?;
+                self.apply_balance_debit(batch, overlay, bridge_legacy, account, token, *amount)?;
             }
 
             // ========== Token State ==========
@@ -190,14 +265,14 @@ impl StateApplicator {
                 account,
                 amount,
             } => {
-                self.apply_lp_credit(batch, pool_id, account, *amount)?;
+                self.apply_lp_credit(batch, overlay, pool_id, account, *amount)?;
             }
             StateChange::LPTokenDebit {
                 pool_id,
                 account,
                 amount,
             } => {
-                self.apply_lp_debit(batch, pool_id, account, *amount)?;
+                self.apply_lp_debit(batch, overlay, pool_id, account, *amount)?;
             }
 
             // ========== Contract State ==========
@@ -408,6 +483,8 @@ impl StateApplicator {
     fn apply_balance_credit(
         &self,
         batch: &mut WriteBatch,
+        overlay: &mut BatchOverlay,
+        bridge_legacy: bool,
         account: &[u8; 32],
         token: &[u8; 32],
         amount: u128,
@@ -420,39 +497,41 @@ impl StateApplicator {
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
-        // Read current balance with backward compatibility
-        let current = self.db.get_cf(&cf, &key)?
-            .map(|v| {
-                if v.len() >= 16 {
-                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
-                } else if v.len() >= 8 {
-                    // Legacy u64 format - upgrade with 10^16 multiplier
-                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
-                } else {
-                    0u128
-                }
-            })
-            .unwrap_or(0);
+        // Read current balance: pending value from THIS batch first (a WriteBatch
+        // has no read-through — without the overlay, a second change to the same
+        // key in one block would re-read the stale on-disk base and discard the
+        // first change's delta), then disk with backward compatibility.
+        let current = match overlay.token_balances.get(&key) {
+            Some(v) => *v,
+            None => self.db.get_cf(&cf, &key)?
+                .map(|v| decode_balance_value(&v))
+                .unwrap_or(0),
+        };
 
         let new_balance = current.saturating_add(amount);
+        overlay.token_balances.insert(key.clone(), new_balance);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
-        // 2026-08-13: bridge native-QUG credits into the legacy wallet_balance_*
-        // storage too. compute_balance_root_for_block()/load_wallet_balances()
-        // (the source of /api/v1/integrity/balance-root and total_supply_qug)
-        // read ONLY that storage, never CF_TOKEN_BALANCES — so without this,
-        // every credit processed via this path (bulk/turbo sync in particular)
-        // is invisible to balance-root/total-supply even though it lands here
-        // correctly. Read-then-add on the CURRENT on-disk legacy value, same
-        // batch — never a blind overwrite of a precomputed target, so this
-        // cannot go stale the way a snapshot-based writer could.
-        if token == &QUG_TOKEN_ADDRESS {
+        // 2026-08-13 (scoped 2026-08-22): bridge native-QUG credits into the
+        // legacy wallet_balance_* storage too. compute_balance_root_for_block()/
+        // load_wallet_balances() (the source of /api/v1/integrity/balance-root
+        // and total_supply_qug) read ONLY that storage, never CF_TOKEN_BALANCES —
+        // so without this, every credit processed via bulk/turbo sync is
+        // invisible to balance-root/total-supply. Read-then-add on the current
+        // value (overlay-aware), same batch — never a blind overwrite. Gated on
+        // bridge_legacy: only the turbo-sync chunk path (sole legacy writer)
+        // may enable it — see the field doc for why everywhere else must not.
+        if bridge_legacy && token == &QUG_TOKEN_ADDRESS {
             if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
                 let legacy_key = legacy_wallet_balance_key(account);
-                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
-                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
-                    .unwrap_or(0);
+                let legacy_current = match overlay.legacy_balances.get(&legacy_key) {
+                    Some(v) => *v,
+                    None => self.db.get_cf(&manifest_cf, &legacy_key)?
+                        .map(|v| decode_balance_value(&v))
+                        .unwrap_or(0),
+                };
                 let legacy_new = legacy_current.saturating_add(amount);
+                overlay.legacy_balances.insert(legacy_key.clone(), legacy_new);
                 batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
             }
         }
@@ -463,6 +542,8 @@ impl StateApplicator {
     fn apply_balance_debit(
         &self,
         batch: &mut WriteBatch,
+        overlay: &mut BatchOverlay,
+        bridge_legacy: bool,
         account: &[u8; 32],
         token: &[u8; 32],
         amount: u128,
@@ -475,29 +556,28 @@ impl StateApplicator {
         key.extend_from_slice(account);
         key.extend_from_slice(token);
 
-        // Read current balance with backward compatibility
-        let current = self.db.get_cf(&cf, &key)?
-            .map(|v| {
-                if v.len() >= 16 {
-                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
-                } else if v.len() >= 8 {
-                    // Legacy u64 format - upgrade with 10^16 multiplier
-                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
-                } else {
-                    0u128
-                }
-            })
-            .unwrap_or(0);
+        // Read current balance: pending value from THIS batch first (see
+        // apply_balance_credit — without the overlay, the amount-debit and
+        // fee-debit a fee-paying transfer emits for the same sender collapse
+        // to just the fee-debit), then disk with backward compatibility.
+        let current = match overlay.token_balances.get(&key) {
+            Some(v) => *v,
+            None => self.db.get_cf(&cf, &key)?
+                .map(|v| decode_balance_value(&v))
+                .unwrap_or(0),
+        };
 
         if current < amount {
             bail!("Insufficient balance: have {}, need {}", current, amount);
         }
 
         let new_balance = current - amount;
+        overlay.token_balances.insert(key.clone(), new_balance);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
-        // 2026-08-13: mirror the debit into legacy wallet_balance_* — see the
-        // matching comment in apply_balance_credit for why. Uses saturating_sub
+        // 2026-08-13 (scoped 2026-08-22): mirror the debit into legacy
+        // wallet_balance_* — see the matching comment in apply_balance_credit
+        // for why and for the bridge_legacy gating. Uses saturating_sub
         // (never bails) rather than mirroring the hard insufficient-balance
         // check above: the PRIMARY balance-sufficiency gate is the
         // CF_TOKEN_BALANCES check already passed by this point; the legacy
@@ -505,13 +585,17 @@ impl StateApplicator {
         // so refusing to apply a real, already-validated debit just because
         // the shadow copy hasn't caught up yet would re-introduce a NEW
         // divergence instead of closing the existing one.
-        if token == &QUG_TOKEN_ADDRESS {
+        if bridge_legacy && token == &QUG_TOKEN_ADDRESS {
             if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
                 let legacy_key = legacy_wallet_balance_key(account);
-                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
-                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
-                    .unwrap_or(0);
+                let legacy_current = match overlay.legacy_balances.get(&legacy_key) {
+                    Some(v) => *v,
+                    None => self.db.get_cf(&manifest_cf, &legacy_key)?
+                        .map(|v| decode_balance_value(&v))
+                        .unwrap_or(0),
+                };
                 let legacy_new = legacy_current.saturating_sub(amount);
+                overlay.legacy_balances.insert(legacy_key.clone(), legacy_new);
                 batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
             }
         }
@@ -626,6 +710,7 @@ impl StateApplicator {
     fn apply_lp_credit(
         &self,
         batch: &mut WriteBatch,
+        overlay: &mut BatchOverlay,
         pool_id: &[u8; 32],
         account: &[u8; 32],
         amount: u128,
@@ -638,20 +723,16 @@ impl StateApplicator {
         key.extend_from_slice(pool_id);
         key.extend_from_slice(account);
 
-        // Read with backward compatibility
-        let current = self.db.get_cf(&cf, &key)?
-            .map(|v| {
-                if v.len() >= 16 {
-                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
-                } else if v.len() >= 8 {
-                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
-                } else {
-                    0u128
-                }
-            })
-            .unwrap_or(0);
+        // Overlay-aware read (same batch-collapse hazard as apply_balance_credit)
+        let current = match overlay.lp_balances.get(&key) {
+            Some(v) => *v,
+            None => self.db.get_cf(&cf, &key)?
+                .map(|v| decode_balance_value(&v))
+                .unwrap_or(0),
+        };
 
         let new_balance = current.saturating_add(amount);
+        overlay.lp_balances.insert(key.clone(), new_balance);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
@@ -660,6 +741,7 @@ impl StateApplicator {
     fn apply_lp_debit(
         &self,
         batch: &mut WriteBatch,
+        overlay: &mut BatchOverlay,
         pool_id: &[u8; 32],
         account: &[u8; 32],
         amount: u128,
@@ -671,24 +753,20 @@ impl StateApplicator {
         key.extend_from_slice(pool_id);
         key.extend_from_slice(account);
 
-        // Read with backward compatibility
-        let current = self.db.get_cf(&cf, &key)?
-            .map(|v| {
-                if v.len() >= 16 {
-                    u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))
-                } else if v.len() >= 8 {
-                    (u64::from_le_bytes(v[..8].try_into().unwrap_or([0u8; 8])) as u128) * 10u128.pow(16)
-                } else {
-                    0u128
-                }
-            })
-            .unwrap_or(0);
+        // Overlay-aware read (same batch-collapse hazard as apply_balance_debit)
+        let current = match overlay.lp_balances.get(&key) {
+            Some(v) => *v,
+            None => self.db.get_cf(&cf, &key)?
+                .map(|v| decode_balance_value(&v))
+                .unwrap_or(0),
+        };
 
         if current < amount {
             bail!("Insufficient LP balance");
         }
 
         let new_balance = current - amount;
+        overlay.lp_balances.insert(key.clone(), new_balance);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
         Ok(())
@@ -1316,7 +1394,7 @@ mod tests {
     #[test]
     fn test_qug_credit_bridges_to_legacy_wallet_balance() {
         let db = create_test_db();
-        let applicator = StateApplicator::new(db.clone(), false);
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
         let account = [7u8; 32];
 
         let changes = vec![StateChange::BalanceCredit {
@@ -1335,7 +1413,7 @@ mod tests {
     #[test]
     fn test_qug_debit_bridges_to_legacy_wallet_balance() {
         let db = create_test_db();
-        let applicator = StateApplicator::new(db.clone(), false);
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
         let account = [8u8; 32];
 
         applicator.apply_changes(&[StateChange::BalanceCredit {
@@ -1356,7 +1434,7 @@ mod tests {
     #[test]
     fn test_non_qug_token_does_not_touch_legacy_wallet_balance() {
         let db = create_test_db();
-        let applicator = StateApplicator::new(db.clone(), false);
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
         let account = [9u8; 32];
         let custom_token = [42u8; 32]; // definitely not QUG_TOKEN_ADDRESS
 
@@ -1376,7 +1454,7 @@ mod tests {
     #[test]
     fn test_bridge_converges_even_when_legacy_already_diverged() {
         let db = create_test_db();
-        let applicator = StateApplicator::new(db.clone(), false);
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
         let account = [10u8; 32];
 
         // Simulate pre-existing drift: CF_TOKEN_BALANCES has 5000, legacy has
@@ -1398,5 +1476,149 @@ mod tests {
         assert_eq!(read_legacy_wallet_balance(&db, &account), 1200,
             "bridge must apply the delta on top of whatever legacy currently holds, \
              not assume the two stores started in sync");
+    }
+
+    /// 2026-08-22 RMW-collapse regression test: every fee-paying transfer emits
+    /// TWO BalanceDebit changes for the SAME sender (amount, then fee) inside
+    /// one block's change list. Pre-overlay, the second debit re-read the stale
+    /// on-disk base and silently dropped the first — under-debiting the sender
+    /// by the full transfer amount in both stores on every synced node.
+    #[test]
+    fn test_fee_paying_transfer_applies_both_sender_debits() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
+        let sender = [11u8; 32];
+        let recipient = [12u8; 32];
+        let miner = [13u8; 32];
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account: sender, token: QUG_TOKEN_ADDRESS, amount: 1_000,
+        }], 1).unwrap();
+
+        // One block: transfer 400 with fee 25 — exactly the change sequence
+        // StateProcessor emits (sender amount-debit, sender fee-debit,
+        // recipient credit, fee-recipient credit).
+        applicator.apply_changes(&[
+            StateChange::BalanceDebit { account: sender, token: QUG_TOKEN_ADDRESS, amount: 400 },
+            StateChange::BalanceDebit { account: sender, token: QUG_TOKEN_ADDRESS, amount: 25 },
+            StateChange::BalanceCredit { account: recipient, token: QUG_TOKEN_ADDRESS, amount: 400 },
+            StateChange::BalanceCredit { account: miner, token: QUG_TOKEN_ADDRESS, amount: 25 },
+        ], 2).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&sender, &QUG_TOKEN_ADDRESS).unwrap(), 575,
+            "BOTH sender debits must apply: 1000 - 400 - 25 = 575 (pre-fix bug: 975)");
+        assert_eq!(read_legacy_wallet_balance(&db, &sender), 575,
+            "legacy mirror must apply both debits too");
+        assert_eq!(applicator.get_token_balance(&recipient, &QUG_TOKEN_ADDRESS).unwrap(), 400);
+        assert_eq!(read_legacy_wallet_balance(&db, &recipient), 400);
+        assert_eq!(applicator.get_token_balance(&miner, &QUG_TOKEN_ADDRESS).unwrap(), 25);
+        assert_eq!(read_legacy_wallet_balance(&db, &miner), 25);
+    }
+
+    /// Multiple credits to ONE account within one block (e.g. a miner receiving
+    /// several coinbase/fee legs) must accumulate, not collapse to the last.
+    #[test]
+    fn test_multiple_credits_same_account_in_one_block_accumulate() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
+        let miner = [14u8; 32];
+
+        applicator.apply_changes(&[
+            StateChange::BalanceCredit { account: miner, token: QUG_TOKEN_ADDRESS, amount: 100 },
+            StateChange::BalanceCredit { account: miner, token: QUG_TOKEN_ADDRESS, amount: 7 },
+            StateChange::BalanceCredit { account: miner, token: QUG_TOKEN_ADDRESS, amount: 3 },
+        ], 1).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&miner, &QUG_TOKEN_ADDRESS).unwrap(), 110,
+            "three credits in one block must sum (pre-fix bug: only the last, 3)");
+        assert_eq!(read_legacy_wallet_balance(&db, &miner), 110);
+    }
+
+    /// An 8-byte (pre-24-decimal u64) legacy wallet_balance_* value must be
+    /// upgraded ×10^16 by the bridge read, exactly like load_wallet_balances
+    /// does — NOT treated as 0 (which would destroy the wallet's legacy
+    /// balance on the first bridged write — Balance Integrity Rule 1).
+    #[test]
+    fn test_bridge_upgrades_8byte_legacy_value_instead_of_destroying_it() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
+        let account = [15u8; 32];
+
+        // Seed an OLD-format 8-byte legacy value: 5 (u64) => 5 * 10^16 upgraded.
+        {
+            let mcf = db.cf_handle(CF_MANIFEST).unwrap();
+            db.put_cf(&mcf, legacy_wallet_balance_key(&account), &5u64.to_le_bytes()).unwrap();
+        }
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account, token: QUG_TOKEN_ADDRESS, amount: 1_000,
+        }], 1).unwrap();
+
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 5 * 10u128.pow(16) + 1_000,
+            "8-byte legacy value must be upgraded ×10^16 then credited — never zeroed");
+    }
+
+    /// Default applicator (no with_legacy_bridge) must NOT write legacy
+    /// wallet_balance_* — the bridge is opt-in per instance/call because on
+    /// paths where BalanceConsensusEngine or the live execution paths also
+    /// write the legacy store, an always-on bridge double-applies effects.
+    #[test]
+    fn test_bridge_off_by_default_leaves_legacy_untouched() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false); // bridge OFF
+        let account = [16u8; 32];
+
+        applicator.apply_changes(&[StateChange::BalanceCredit {
+            account, token: QUG_TOKEN_ADDRESS, amount: 500,
+        }], 1).unwrap();
+
+        assert_eq!(applicator.get_token_balance(&account, &QUG_TOKEN_ADDRESS).unwrap(), 500,
+            "CF_TOKEN_BALANCES must still be written with the bridge off");
+        assert_eq!(read_legacy_wallet_balance(&db, &account), 0,
+            "legacy wallet_balance_* must be untouched when the bridge is off");
+    }
+
+    /// The per-call override must beat the instance default in BOTH directions.
+    #[test]
+    fn test_per_call_bridge_override() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false); // default OFF
+        let a1 = [17u8; 32];
+        let a2 = [18u8; 32];
+
+        // Explicit ON for this call
+        applicator.apply_changes_with_bridge(&[StateChange::BalanceCredit {
+            account: a1, token: QUG_TOKEN_ADDRESS, amount: 100,
+        }], 1, true).unwrap();
+        // Explicit OFF for this call
+        applicator.apply_changes_with_bridge(&[StateChange::BalanceCredit {
+            account: a2, token: QUG_TOKEN_ADDRESS, amount: 100,
+        }], 2, false).unwrap();
+
+        assert_eq!(read_legacy_wallet_balance(&db, &a1), 100);
+        assert_eq!(read_legacy_wallet_balance(&db, &a2), 0);
+    }
+
+    /// LP balances have the same batch-collapse hazard: several LP credits to
+    /// the same (pool, account) in one block must accumulate.
+    #[test]
+    fn test_multiple_lp_credits_same_key_accumulate() {
+        let db = create_test_db();
+        let applicator = StateApplicator::new(db.clone(), false);
+        let pool = [19u8; 32];
+        let account = [20u8; 32];
+
+        applicator.apply_changes(&[
+            StateChange::LPTokenCredit { pool_id: pool, account, amount: 50 },
+            StateChange::LPTokenCredit { pool_id: pool, account, amount: 60 },
+        ], 1).unwrap();
+
+        let cf = db.cf_handle(CF_LP_BALANCES).unwrap();
+        let mut key = pool.to_vec();
+        key.extend_from_slice(&account);
+        let lp = db.get_cf(&cf, &key).unwrap()
+            .map(|v| u128::from_le_bytes(v[..16].try_into().unwrap()))
+            .unwrap_or(0);
+        assert_eq!(lp, 110, "two LP credits in one block must sum (pre-fix bug: 60)");
     }
 }

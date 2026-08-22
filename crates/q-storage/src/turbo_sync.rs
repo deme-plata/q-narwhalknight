@@ -5281,8 +5281,14 @@ impl TurboSyncManager {
             #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
                 let state_start = Instant::now();
+                // Bridge legacy wallet_balance_* ONLY when this applicator is the
+                // sole writer of it for these blocks (balance_engine is None).
+                // When Some(engine), BalanceConsensusEngine also writes the legacy
+                // store for the same blocks below — bridging here too would
+                // double-apply every QUG coinbase/transfer (2026-08-22 finding).
+                let bridge_legacy = balance_engine.is_none();
                 for block in &blocks {
-                    match state_proc.process_block(block) {
+                    match state_proc.process_block_with_bridge(block, bridge_legacy) {
                         Ok(result) => {
                             state_changes_total += result.changes_applied;
                             if result.changes_applied > 0 {
@@ -5621,8 +5627,11 @@ impl TurboSyncManager {
             // Works in legacy mode too - process state for each block
             #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
+                // See the BATCH-MODE branch above for why this must be gated on
+                // balance_engine, not always-on.
+                let bridge_legacy = balance_engine.is_none();
                 for block in &blocks {
-                    match state_proc.process_block(block) {
+                    match state_proc.process_block_with_bridge(block, bridge_legacy) {
                         Ok(result) => {
                             state_changes_total += result.changes_applied;
                         }
@@ -5972,8 +5981,11 @@ impl TurboSyncManager {
             // Process state changes
             #[cfg(not(target_os = "windows"))]
             if let Some(ref state_proc) = self.state_processor {
+                // See apply_block_pack's BATCH-MODE branch for why this must be
+                // gated on balance_engine, not always-on.
+                let bridge_legacy = balance_engine.is_none();
                 for block in &blocks {
-                    let _ = state_proc.process_block(block);
+                    let _ = state_proc.process_block_with_bridge(block, bridge_legacy);
                 }
             }
 

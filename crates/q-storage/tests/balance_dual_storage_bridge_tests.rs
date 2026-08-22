@@ -63,7 +63,7 @@ fn read_legacy_wallet_balance(db: &Arc<DB>, account: &[u8; 32]) -> u128 {
 #[test]
 fn qug_credit_lands_in_both_stores() {
     let db = create_test_db("credit");
-    let applicator = StateApplicator::new(db.clone(), false);
+    let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
     let account = [11u8; 32];
 
     applicator.apply_changes(&[StateChange::BalanceCredit {
@@ -80,7 +80,7 @@ fn qug_credit_lands_in_both_stores() {
 #[test]
 fn qug_debit_lands_in_both_stores() {
     let db = create_test_db("debit");
-    let applicator = StateApplicator::new(db.clone(), false);
+    let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
     let account = [12u8; 32];
 
     applicator.apply_changes(&[StateChange::BalanceCredit {
@@ -98,7 +98,7 @@ fn qug_debit_lands_in_both_stores() {
 #[test]
 fn non_qug_token_never_touches_legacy_wallet_balance() {
     let db = create_test_db("nonqug");
-    let applicator = StateApplicator::new(db.clone(), false);
+    let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
     let account = [13u8; 32];
     let custom_token = [77u8; 32]; // definitely not QUG_TOKEN_ADDRESS
 
@@ -121,7 +121,7 @@ fn non_qug_token_never_touches_legacy_wallet_balance() {
 #[test]
 fn bridge_converges_from_an_already_diverged_starting_point() {
     let db = create_test_db("diverged");
-    let applicator = StateApplicator::new(db.clone(), false);
+    let applicator = StateApplicator::new(db.clone(), false).with_legacy_bridge(true);
     let account = [14u8; 32];
 
     {
@@ -143,4 +143,63 @@ fn bridge_converges_from_an_already_diverged_starting_point() {
     assert_eq!(read_legacy_wallet_balance(&db, &account), 10_500,
         "must apply the delta on top of whatever legacy currently holds — \
          the whole point is to stop the gap from growing further, starting now");
+}
+
+/// 2026-08-22 P0 redesign: the bridge must be OFF by default (the original
+/// 2026-08-13 version was unconditional). A caller that shares StateApplicator
+/// with another legacy-writing path (e.g. BalanceConsensusEngine, gossip
+/// block-pack apply) must get the OFF default so it does not double-apply.
+#[test]
+fn bridge_off_by_default_matches_shared_engine_caller() {
+    let db = create_test_db("default-off");
+    let applicator = StateApplicator::new(db.clone(), false); // no .with_legacy_bridge
+    let account = [15u8; 32];
+
+    applicator.apply_changes(&[StateChange::BalanceCredit {
+        account, token: QUG_TOKEN_ADDRESS, amount: 999,
+    }], 1).unwrap();
+
+    assert_eq!(read_token_balance(&db, &account, &QUG_TOKEN_ADDRESS), 999,
+        "CF_TOKEN_BALANCES must still be written regardless of the bridge flag");
+    assert_eq!(read_legacy_wallet_balance(&db, &account), 0,
+        "with the bridge off (the safe default), legacy must stay untouched — \
+         a caller that ALSO runs BalanceConsensusEngine over the same blocks \
+         relies on this to avoid crediting wallet_balance_* twice");
+}
+
+/// Simulates the confirmed-unsafe path from the 2026-08-22 sweep
+/// (main.rs apply_block_pack with Some(balance_engine)): BOTH the state
+/// pipeline (via StateApplicator, bridge OFF) and a stand-in "legacy engine"
+/// write wallet_balance_* for the same coinbase credit. With the bridge off,
+/// StateApplicator contributes NOTHING to legacy, so only the engine's write
+/// lands — exactly once, matching pre-bridge behavior on that path.
+#[test]
+fn bridge_off_prevents_double_credit_when_a_second_writer_shares_the_block() {
+    let db = create_test_db("shared-engine");
+    let applicator = StateApplicator::new(db.clone(), false); // bridge_legacy=false, as turbo_sync
+                                                               // now sets when balance_engine is Some
+    let account = [16u8; 32];
+    let reward = 1_000u128;
+
+    // 1) StateApplicator processes the block (bridge OFF — this is the fix)
+    applicator.apply_changes(&[StateChange::BalanceCredit {
+        account, token: QUG_TOKEN_ADDRESS, amount: reward,
+    }], 1).unwrap();
+
+    // 2) The stand-in "legacy engine" (BalanceConsensusEngine in production)
+    //    independently credits the SAME coinbase reward into legacy storage —
+    //    this is real, pre-existing behavior on the Some(engine) path.
+    {
+        let mcf = db.cf_handle(CF_MANIFEST).unwrap();
+        let key = format!("wallet_balance_{}", hex::encode(&account));
+        let current = db.get_cf(&mcf, key.as_bytes()).unwrap()
+            .map(|v| u128::from_le_bytes(v[..16].try_into().unwrap()))
+            .unwrap_or(0);
+        db.put_cf(&mcf, key.as_bytes(), &(current + reward).to_le_bytes()).unwrap();
+    }
+
+    assert_eq!(read_legacy_wallet_balance(&db, &account), reward,
+        "exactly ONE credit of the reward must land in legacy storage — if the \
+         bridge were ON here, this would read 2*reward (the double-credit the \
+         2026-08-22 sweep found on the unsolicited gossip block-pack path)");
 }

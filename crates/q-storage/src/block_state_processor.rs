@@ -141,14 +141,29 @@ impl BlockStateProcessor {
         self
     }
 
-    /// Process a block and apply all state changes
+    /// Process a block and apply all state changes. Legacy wallet_balance_*
+    /// bridge is OFF — safe default for any caller that doesn't explicitly
+    /// know it's the sole writer of the legacy store for these blocks.
+    pub fn process_block(&self, block: &QBlock) -> Result<BlockProcessingResult> {
+        self.process_block_with_bridge(block, false)
+    }
+
+    /// Process a block and apply all state changes, with an explicit
+    /// legacy-bridge decision (see `StateApplicator::apply_changes_with_bridge`
+    /// for exactly why this must be per-call rather than a fixed instance
+    /// setting: turbo-sync shares one processor across a chunk-sync path that
+    /// must bridge — balance_engine=None, this applicator is the sole legacy
+    /// writer — and a gossip pack-apply path that must NOT — the
+    /// BalanceConsensusEngine already writes wallet_balance_* for the same
+    /// blocks there, so bridging too would double-apply every QUG coinbase and
+    /// transfer).
     ///
     /// This is the main entry point for block processing. It:
     /// 1. Extracts transactions from the block
     /// 2. Processes each transaction to get state changes
     /// 3. Applies all changes atomically
     /// 4. Returns the processing result
-    pub fn process_block(&self, block: &QBlock) -> Result<BlockProcessingResult> {
+    pub fn process_block_with_bridge(&self, block: &QBlock, bridge_legacy: bool) -> Result<BlockProcessingResult> {
         let height = block.header.height;
         let mut all_changes: Vec<StateChange> = Vec::new();
         let mut tx_results: Vec<TxProcessingResult> = Vec::new();
@@ -244,7 +259,7 @@ impl BlockStateProcessor {
         // Apply all state changes atomically
         let changes_count = all_changes.len();
         if !all_changes.is_empty() {
-            self.applicator.apply_changes(&all_changes, height)
+            self.applicator.apply_changes_with_bridge(&all_changes, height, bridge_legacy)
                 .context(format!("Failed to apply {} state changes for block {}", changes_count, height))?;
         }
 
