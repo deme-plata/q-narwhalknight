@@ -10,7 +10,7 @@
 //! `proposal.required`. Duplicate signatures from the same member count once.
 
 use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::SignedMessage as _;
+use pqcrypto_traits::sign::DetachedSignature as _;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -30,9 +30,7 @@ pub enum VerifyError {
     Ed25519Failed(String),
     #[error("dilithium5 verification failed for member {0}")]
     Dilithium5Failed(String),
-    #[error("dilithium5 signed message decoded but didn't match expected payload hash for member {0}")]
-    Dilithium5PayloadMismatch(String),
-    #[error("invalid dilithium5 signed-message bytes for member {0}")]
+    #[error("invalid dilithium5 signature bytes for member {0}")]
     Dilithium5BadEncoding(String),
     #[error("threshold not met: {valid}/{required}")]
     BelowThreshold { valid: u8, required: u8 },
@@ -61,21 +59,16 @@ pub fn verify_member_signature(
         .verify_strict(&payload, &contrib.ed25519_sig)
         .map_err(|_| VerifyError::Ed25519Failed(hex::encode(contrib.member_addr)))?;
 
-    // Dilithium5 verify (post-quantum). `dilithium5::open` returns the
-    // signed message bytes; we require those bytes to equal our payload.
-    let signed_msg = dilithium5::SignedMessage::from_bytes(&contrib.dilithium5_signed_msg)
+    // Dilithium5 verify (post-quantum, detached — matches the P2P hybrid-send
+    // convention; see the field doc on `dilithium5_signature`).
+    let sig = dilithium5::DetachedSignature::from_bytes(&contrib.dilithium5_signature)
         .map_err(|_| VerifyError::Dilithium5BadEncoding(hex::encode(contrib.member_addr)))?;
     let pk = member
         .pubkey
         .dilithium5_pubkey()
         .map_err(|_| VerifyError::Dilithium5Failed(hex::encode(contrib.member_addr)))?;
-    let opened = dilithium5::open(&signed_msg, &pk)
+    dilithium5::verify_detached_signature(&sig, &payload, &pk)
         .map_err(|_| VerifyError::Dilithium5Failed(hex::encode(contrib.member_addr)))?;
-    if opened != payload {
-        return Err(VerifyError::Dilithium5PayloadMismatch(hex::encode(
-            contrib.member_addr,
-        )));
-    }
 
     Ok(())
 }

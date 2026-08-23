@@ -46,6 +46,7 @@ use q_storage::qno_storage::QnoStorage;
 mod cdp_simple;
 // v2.4.8-beta: Use library's contracts_api module instead of redeclaring (fixes crate:: imports)
 use q_api_server::contracts_api;
+use q_api_server::multisig_api;
 use q_api_server::listing_api;
 use q_api_server::pool_api;
 use q_api_server::real_mixer_settle;
@@ -9642,6 +9643,28 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
     let app_state = Arc::new(state);
 
+    // ========================================
+    // 📊 DECENTRALIZATION INDEX — periodic refresh (2026-08-18)
+    // ========================================
+    // Previously `state.di_ema` (surfaced as `consensus.decentralization_ema` in
+    // /api/v1/engine/pulse, and read by the `k_parameter` diagnostic) was only ever
+    // computed as a side effect of an admin manually hitting the gated
+    // GET /api/v1/admin/decentralization endpoint. Nothing else called it, so on a
+    // node nobody happened to poll it sat at its zero-initialized default forever —
+    // reading as "critical, single-operator" when it actually just meant "never
+    // measured." This keeps it genuinely live without requiring a manual admin poll.
+    {
+        let decentral_state = app_state.clone();
+        tokio::spawn(async move {
+            info!("📊 Decentralization index refresher started (300s interval)");
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let _ = q_api_server::deploy_admin_api::compute_decentralization_index(&decentral_state).await;
+            }
+        });
+    }
+
     // ────────────────────────────────────────────────────────────────────
     // v10.11.x APPLY-GATE BACKGROUND TICK
     // ────────────────────────────────────────────────────────────────────
@@ -14447,16 +14470,29 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                 .max()
                                                 .unwrap_or(0);
 
-                                            // Update qblock:latest pointer in database
-                                            let height_bytes = highest_batch_height.to_be_bytes();
-                                            if let Err(e) = storage
-                                                .db_put("blocks", b"qblock:latest", &height_bytes)
-                                                .await
+                                            // 2026-08-18: previously wrote highest_batch_height directly
+                                            // with NO gap verification — if this batch's blocks weren't
+                                            // fully contiguous (common during parallel/warp sync, where
+                                            // chunks can land out of order), this falsely claimed
+                                            // contiguity through any gaps. Cap the advance at the actual
+                                            // gap-verified tip via advance_contiguous_tip (same
+                                            // known_gaps-aware walk used by tick_contiguity_advance),
+                                            // then write through the guarded, cache-syncing pointer
+                                            // update — never a raw db_put of an unverified height.
+                                            let current_pointer = storage.get_latest_qblock_height().await.ok().flatten().unwrap_or(0);
+                                            let safe_height = match storage.advance_contiguous_tip(current_pointer).await {
+                                                Ok(h) => h,
+                                                Err(e) => {
+                                                    warn!("⚠️ [BATCH SYNC] advance_contiguous_tip failed, falling back to current pointer: {}", e);
+                                                    current_pointer
+                                                }
+                                            };
+                                            if let Err(e) = storage.advance_qblock_latest_pointer(safe_height).await
                                             {
                                                 error!("❌ [BATCH SYNC] Failed to update qblock:latest pointer after batch commit: {:?}", e);
                                             } else {
-                                                debug!("✅ [BATCH SYNC] Updated qblock:latest pointer to {} after committing {} blocks",
-                                                       highest_batch_height, saved_count);
+                                                debug!("✅ [BATCH SYNC] Updated qblock:latest pointer to {} (gap-verified; max saved in batch was {}) after committing {} blocks",
+                                                       safe_height, highest_batch_height, saved_count);
 
                                                 // ✅ v0.9.101-beta CRITICAL FIX: Sync block producers after batch sync
                                                 // ROOT CAUSE: Block producers cache height at initialization (height 0)
@@ -14470,7 +14506,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                                     error!("❌ [BATCH SYNC] Failed to sync producers after batch: {}", e);
                                                 } else {
                                                     info!("🔄 [BATCH SYNC] Synced {} producers to height {} after batch commit",
-                                                          8, highest_batch_height);
+                                                          8, safe_height);
                                                 }
 
                                                 // v3.5.9-beta: Index all block transactions for wallet history
@@ -26519,6 +26555,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         .route("/api/mesh/discover", post(handlers::trigger_mesh_discovery))
         // Smart Contracts API - Orobit Chimera Integration
         .nest("/api/v1/contracts", create_contracts_router())
+        // v10.11.103: CEO/associates multisig organizations
+        .nest("/api/v1/multisig", multisig_api::create_multisig_router())
         // AI Chat API - Privacy-first distributed inference
         .nest("/api/chat", chat_api::chat_router())
         // Also expose at /api/v1/chat for OpenAI-compatible endpoints

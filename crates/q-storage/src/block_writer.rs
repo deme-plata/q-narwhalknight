@@ -44,6 +44,19 @@ impl BlockWriter {
     ///
     /// This spawns a background task that processes blocks sequentially.
     /// The task runs until the BlockWriter is dropped.
+    ///
+    /// 2026-08-18 NOTE: a change here that threaded a shared
+    /// `global_write_lock` through this constructor + held it for the
+    /// duration of `save_qblock_internal` (to close a genuine race against
+    /// turbo_sync.rs/transaction.rs's own pointer writes) was tried and then
+    /// REVERTED same-day — on live testing it caused a full sync stall
+    /// (peers connected, gossip flowing, but zero block-fetch activity for
+    /// 10+ minutes), which is a worse outcome than the race it was meant to
+    /// fix. Left as a flagged, NOT-YET-SOLVED problem — see the session's
+    /// memory notes on the qblock:latest multi-writer race — rather than
+    /// re-attempted blind. Exact deadlock/blocking mechanism not confirmed;
+    /// suspect this constructor's lock could be re-entered from a caller
+    /// already holding it, but that was not proven before reverting.
     pub fn new(hot_db: Arc<dyn KVStore>) -> Self {
         let (commit_tx, mut commit_rx) = mpsc::channel::<CommitMsg>(2048);
 

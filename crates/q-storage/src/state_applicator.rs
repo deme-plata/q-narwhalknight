@@ -30,10 +30,18 @@ use crate::{
     CF_CONTRACTS, CF_CONTRACT_STORAGE, CF_VAULTS, CF_ORACLE_PRICES,
     CF_AI_CREDITS_V2, CF_AI_PROVIDERS, CF_PROPOSALS, CF_DELEGATIONS,
     CF_STAKES, CF_VALIDATORS, CF_SYSTEM_PARAMS, CF_NONCES, CF_STATE_ROOTS,
-    CF_PROTOCOL_FEES,
+    CF_PROTOCOL_FEES, CF_MANIFEST,
     state_processor::{TokenMetadata, PoolState, VaultState},
 };
-use q_types::{FOUNDER_WALLET, DEX_PROTOCOL_FEE_BPS, BPS_DIVISOR};
+use q_types::{FOUNDER_WALLET, DEX_PROTOCOL_FEE_BPS, BPS_DIVISOR, QUG_TOKEN_ADDRESS};
+
+/// Legacy wallet-balance key format, must match `save_wallet_balance` in lib.rs
+/// EXACTLY (`format!("wallet_balance_{}", hex::encode(address))`, CF_MANIFEST,
+/// little-endian u128) — this is the storage `compute_balance_root_for_block`
+/// and `/api/v1/integrity/balance-root` actually read via `load_wallet_balances`.
+fn legacy_wallet_balance_key(account: &[u8; 32]) -> Vec<u8> {
+    format!("wallet_balance_{}", hex::encode(account)).into_bytes()
+}
 
 /// StateApplicator applies state changes to RocksDB column families
 pub struct StateApplicator {
@@ -429,6 +437,26 @@ impl StateApplicator {
         let new_balance = current.saturating_add(amount);
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
 
+        // 2026-08-13/18: bridge native-QUG credits into the legacy wallet_balance_*
+        // storage too. compute_balance_root_for_block()/load_wallet_balances()
+        // (the source of /api/v1/integrity/balance-root and total_supply_qug)
+        // read ONLY that storage, never CF_TOKEN_BALANCES — so without this,
+        // every credit processed via this path (bulk/turbo sync in particular)
+        // is invisible to balance-root/total-supply even though it lands here
+        // correctly. Read-then-add on the CURRENT on-disk legacy value, same
+        // batch — never a blind overwrite of a precomputed target, so this
+        // cannot go stale the way a snapshot-based writer could.
+        if token == &QUG_TOKEN_ADDRESS {
+            if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
+                let legacy_key = legacy_wallet_balance_key(account);
+                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
+                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
+                    .unwrap_or(0);
+                let legacy_new = legacy_current.saturating_add(amount);
+                batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
+            }
+        }
+
         Ok(())
     }
 
@@ -467,6 +495,26 @@ impl StateApplicator {
 
         let new_balance = current - amount;
         batch.put_cf(&cf, &key, &new_balance.to_le_bytes());
+
+        // 2026-08-13/18: mirror the debit into legacy wallet_balance_* — see the
+        // matching comment in apply_balance_credit for why. Uses saturating_sub
+        // (never bails) rather than mirroring the hard insufficient-balance
+        // check above: the PRIMARY balance-sufficiency gate is the
+        // CF_TOKEN_BALANCES check already passed by this point; the legacy
+        // mirror may currently be out of sync (that IS the bug this bridges),
+        // so refusing to apply a real, already-validated debit just because
+        // the shadow copy hasn't caught up yet would re-introduce a NEW
+        // divergence instead of closing the existing one.
+        if token == &QUG_TOKEN_ADDRESS {
+            if let Some(manifest_cf) = self.db.cf_handle(CF_MANIFEST) {
+                let legacy_key = legacy_wallet_balance_key(account);
+                let legacy_current = self.db.get_cf(&manifest_cf, &legacy_key)?
+                    .and_then(|v| if v.len() >= 16 { Some(u128::from_le_bytes(v[..16].try_into().unwrap_or([0u8; 16]))) } else { None })
+                    .unwrap_or(0);
+                let legacy_new = legacy_current.saturating_sub(amount);
+                batch.put_cf(&manifest_cf, &legacy_key, &legacy_new.to_le_bytes());
+            }
+        }
 
         Ok(())
     }

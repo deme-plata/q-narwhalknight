@@ -103,6 +103,34 @@ pub trait KVStore: Send + Sync {
         Ok(None)
     }
 
+    /// v10.11.104-beta PROPOSED (NOT yet deployed — see review notes): seek directly to
+    /// `seek_key` and return the first entry whose key starts with `prefix`, without loading
+    /// any other matching entries. Fixes the same class of bug as scan_prefix_seek/
+    /// get_dag_blocks_forward, applied to time-ordered lookups: `get_price_at_time()` used
+    /// plain `scan_prefix()` (loads up to the 100,000-entry OOM cap into memory) to find one
+    /// specific record by scanning from the START of a token's price history every call — for
+    /// a heavily-recorded token like native QUG this measured ~3.5s PER CALL, and the DEX price
+    /// endpoint calls it 3 times (1h/24h/7d) sequentially, so a single `GET
+    /// /api/v1/defi/oracle/price/QUG%2FUSD` request took a consistent ~10.7s end to end —
+    /// observed live, 2026-08-21. Since CF_PRICE_HISTORY keys are `token(32B) ++
+    /// inverted_timestamp(8B)` and RocksDB keeps keys sorted, the record we actually want is a
+    /// single direct seek away — O(log n), not O(n). Default impl below preserves correctness
+    /// (linear scan) for backends without a real seek (sled/mock/tests); the RocksDB impl
+    /// overrides with a true single-seek lookup.
+    async fn seek_first_with_prefix(
+        &self,
+        cf: &str,
+        seek_key: &[u8],
+        prefix: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        for (k, v) in self.scan_prefix(cf, prefix).await? {
+            if k.as_slice() >= seek_key {
+                return Ok(Some((k, v)));
+            }
+        }
+        Ok(None)
+    }
+
     /// v10.3.7: Forward iterate DAG blocks from start_height using lazy iterator.
     /// Returns (height, key_bytes, value_bytes) tuples sorted by numeric height.
     /// Default: returns empty (sled/Windows). RocksDB impl uses raw iterator.
@@ -1909,6 +1937,42 @@ impl KVStore for RocksDBKV {
         })
         .await
         .map_err(|e| anyhow::anyhow!("scan_prefix_seek blocking task failed: {}", e))?
+    }
+
+    async fn seek_first_with_prefix(
+        &self,
+        cf: &str,
+        seek_key: &[u8],
+        prefix: &[u8],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        // v10.11.104-beta PROPOSED (NOT yet deployed): single RocksDB seek, O(log n) — see the
+        // trait doc comment for why this replaces the scan_prefix-based get_price_at_time path.
+        let db = self.db.clone();
+        let cf = cf.to_string();
+        let seek_key = seek_key.to_vec();
+        let prefix = prefix.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let cf_handle = db
+                .cf_handle(&cf)
+                .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf))?;
+            let mut iter = db.iterator_cf(
+                &cf_handle,
+                rocksdb::IteratorMode::From(&seek_key, rocksdb::Direction::Forward),
+            );
+            match iter.next() {
+                Some(item) => {
+                    let (key, value) = item.context("Iterator error in seek_first_with_prefix")?;
+                    if key.starts_with(&prefix) {
+                        Ok::<_, anyhow::Error>(Some((key.to_vec(), value.to_vec())))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("seek_first_with_prefix blocking task failed: {}", e))?
     }
 
     async fn get_dag_blocks_forward(

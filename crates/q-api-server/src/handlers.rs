@@ -5923,6 +5923,20 @@ pub struct SendTransactionSignedRequest {
     /// Fee (u128 base units) the client signed over. Defaults to MIN_TRANSACTION_FEE.
     #[serde(default)]
     pub fee: Option<u128>,
+
+    // ── 2026-08-14: hybrid Ed25519+Dilithium5 support ───────────────────────
+    // Both optional, both required together. When present (and valid), the
+    // durable path attaches them alongside the Ed25519 `signature` and sets
+    // `signature_phase = HybridEd25519Dilithium5` instead of Phase0Ed25519 —
+    // `Transaction::verify_signature()` already requires BOTH signatures to
+    // verify in that phase (q-types/src/lib.rs ~2943), so this is additive:
+    // omitting these two fields is byte-for-byte the existing Ed25519-only
+    // path, unchanged. NIST Level-5 Dilithium5 signature is 4,627 bytes,
+    // public key 2,592 bytes — both hex-encoded here like `signature` above.
+    #[serde(default)]
+    pub pqc_signature: Option<String>,
+    #[serde(default)]
+    pub pqc_public_key: Option<String>,
 }
 
 pub async fn send_transaction_signed(
@@ -6167,6 +6181,40 @@ pub async fn send_transaction_signed(
         };
         tx.signature = sig_bytes;
         tx.signature_phase = q_types::TxSignaturePhase::Phase0Ed25519;
+
+        // 2026-08-14: optional hybrid Ed25519+Dilithium5 upgrade. Both fields must be
+        // present together — a client sending only one is a malformed/broken request,
+        // not a fallback-to-Ed25519 case, so reject it explicitly rather than silently
+        // downgrading security the client thought it was getting.
+        match (request.pqc_signature.as_ref(), request.pqc_public_key.as_ref()) {
+            (Some(pqc_sig_hex), Some(pqc_pk_hex)) => {
+                let pqc_sig = hex::decode(pqc_sig_hex.trim().trim_start_matches("0x"));
+                let pqc_pk = hex::decode(pqc_pk_hex.trim().trim_start_matches("0x"));
+                match (pqc_sig, pqc_pk) {
+                    (Ok(sig), Ok(pk)) if sig.len() == 4627 && pk.len() == 2592 => {
+                        tx.pqc_signature = Some(sig);
+                        tx.pqc_public_key = Some(pk);
+                        tx.signature_phase = q_types::TxSignaturePhase::HybridEd25519Dilithium5;
+                    }
+                    _ => {
+                        return Ok(Json(ApiResponse::error(
+                            "`pqc_signature` must be a 4,627-byte Dilithium5 signature and \
+                             `pqc_public_key` a 2,592-byte Dilithium5 public key, both hex."
+                                .to_string(),
+                        )));
+                    }
+                }
+            }
+            (None, None) => { /* Ed25519-only, unchanged */ }
+            _ => {
+                return Ok(Json(ApiResponse::error(
+                    "`pqc_signature` and `pqc_public_key` must both be present for hybrid \
+                     signing, or both omitted for Ed25519-only."
+                        .to_string(),
+                )));
+            }
+        }
+
         if let Err(e) = tx.verify_signature() {
             warn!(
                 "🛡 [SEND-SIGNED v10.11.72] client signature REJECTED for {}: {}",
@@ -12686,6 +12734,23 @@ pub async fn execute_swap(
 
     info!("✅ Wallet authentication verified for swap");
 
+    // 🚨 2026-08-14 SECURITY FIX (DEX double-spend): acquire a per-wallet lock for the
+    // REST of this function. Held via RAII (the guard's Drop fires on every exit path —
+    // early return, error, or success — so there's nothing to manually release). This
+    // serializes ALL swaps for the same wallet, closing the race where two concurrent
+    // identical requests both pass the balance check further down, both mutate pool
+    // reserves, and both get credited before either debit actually lands. See
+    // AppState::swap_wallet_locks' doc comment (lib.rs) and
+    // project_dex_swap_double_spend_confirmed_2026_08_14 memory for the full writeup.
+    let _swap_wallet_guard = {
+        let lock = state
+            .swap_wallet_locks
+            .entry(wallet_addr)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
+    };
+
     // Validate amount
     if request.amount_in == 0 {
         return Ok(Json(ApiResponse::error(
@@ -13701,66 +13766,17 @@ pub async fn execute_swap(
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // v7.3.1: DEX PROTOCOL FEE — Extract a small fee from each swap
-    // The LP fee is 30 bps (0.3%). Protocol fee is taken from reserves
-    // as a fraction of the input amount, separate from the LP fee.
-    // This is similar to Uniswap's protocol fee switch.
-    // Split between founder wallet and node operator (admin_wallet).
-    // ═══════════════════════════════════════════════════════════════════
-    if !use_oracle && request.amount_in > 0 {
-        let proto_fee_bps = state.dex_protocol_fee_bps.load(std::sync::atomic::Ordering::Relaxed) as u128;
-        if proto_fee_bps > 0 {
-            // Protocol fee = amount_in * proto_fee_bps / 10000
-            // This is denominated in the FROM token's units (24-decimal)
-            let proto_fee_amount = request.amount_in.saturating_mul(proto_fee_bps) / 10_000;
-
-            if proto_fee_amount > 0 {
-                let operator_promille = state.node_operator_fee_promille.load(std::sync::atomic::Ordering::Relaxed);
-                let operator_share = if operator_promille > 0 {
-                    proto_fee_amount.saturating_mul(operator_promille as u128) / 1000
-                } else { 0 };
-                let founder_share = proto_fee_amount.saturating_sub(operator_share);
-
-                // Credit founder wallet (in QUG if from_token is QUG, otherwise in from_token)
-                if from_is_native || from_is_qugusd {
-                    // QUG or QUGUSD → credit wallet_balances
-                    let mut balances = state.wallet_balances.write().await;
-                    if founder_share > 0 {
-                        let founder_addr = {
-                            let mut addr = [0u8; 32];
-                            if let Ok(bytes) = hex::decode(crate::aegis_auth_middleware::FOUNDER_WALLET) {
-                                if bytes.len() == 32 { addr.copy_from_slice(&bytes); }
-                            }
-                            addr
-                        };
-                        let old = balances.get(&founder_addr).copied().unwrap_or(0);
-                        balances.insert(founder_addr, old + founder_share);
-                    }
-                    if operator_share > 0 {
-                        if let Ok(op_bytes) = hex::decode(&state.admin_wallet) {
-                            if op_bytes.len() == 32 {
-                                let mut op_addr = [0u8; 32];
-                                op_addr.copy_from_slice(&op_bytes);
-                                let old = balances.get(&op_addr).copied().unwrap_or(0);
-                                balances.insert(op_addr, old + operator_share);
-                            }
-                        }
-                    }
-                }
-                // For custom tokens: credit token_balances (skip for now — QUG pairs are the main revenue)
-
-                tracing::info!(
-                    "💱 [v7.3.1] DEX protocol fee: {:.8} QUG ({} bps of {:.4} input). Founder: {:.8}, Operator: {:.8}",
-                    proto_fee_amount as f64 / 1e24,
-                    proto_fee_bps,
-                    request.amount_in as f64 / 1e24,
-                    founder_share as f64 / 1e24,
-                    operator_share as f64 / 1e24
-                );
-            }
-        }
-    }
+    // v10.11.102 DOUBLE-CHARGE FIX: this block used to be a SECOND, independent
+    // dex_protocol_fee_bps extraction — identically gated on `!use_oracle &&
+    // request.amount_in > 0`, computing the same fee from the same amount_in,
+    // and crediting the exact same founder_addr/operator_addr as the surviving
+    // block below (~line 13835). For any QUG/QUGUSD-denominated swap (the vast
+    // majority of DEX volume) this doubled the effective protocol fee from 5
+    // bps (0.05%) to 10 bps (0.10%), silently, on every single swap since
+    // v7.3.1 shipped. The surviving block below is the more complete
+    // implementation (it also handles non-QUG/QUGUSD `from_token`s via a
+    // swap-ratio conversion to QUG-equivalent, which this block explicitly
+    // skipped). Removed rather than kept, to leave exactly one extraction site.
 
     // 🔧 v4.0.11: Immediately update pool reserves for instant price reflection
     // This ensures the price changes IMMEDIATELY after a swap, not just after P2P propagation
@@ -14166,7 +14182,19 @@ pub async fn execute_swap(
             let qugusd_addr = q_types::QUGUSD_TOKEN_ADDRESS;
             let from_key = (wallet_addr, qugusd_addr);
             let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
-            let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+            // 2026-08-14 SECURITY FIX: checked_sub + hard abort instead of saturating_sub's
+            // silent floor-at-zero. Now defense-in-depth (the per-wallet swap lock above
+            // already closes the concurrency race) but still correct to fail loud rather
+            // than let an underflow proceed to credit the output side.
+            let new_balance = match old_balance.checked_sub(request.amount_in as u128) {
+                Some(v) => v,
+                None => {
+                    drop(token_balances);
+                    warn!("🚨 [SWAP SECURITY] Aborting: insufficient QUGUSD balance at debit time (had {:.6}, needed {:.6})",
+                        old_balance as f64 / 1e24, request.amount_in as f64 / 1e24);
+                    return Ok(Json(ApiResponse::error("Insufficient balance.".to_string())));
+                }
+            };
             token_balances.insert(from_key, new_balance);
             info!("💸 [SWAP v4.0.3] Deducted {} QUGUSD from user (was: {}, now: {})",
                 request.amount_in as f64 / 1e24, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
@@ -14182,7 +14210,16 @@ pub async fn execute_swap(
             // Use pre-resolved from_token_addr (deterministic address from resolve_token_address)
             let from_key = (wallet_addr, from_token_addr);
             let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
-            let new_balance = old_balance.saturating_sub(request.amount_in as u128);
+            // 2026-08-14 SECURITY FIX: see the QUGUSD debit site above for the full reasoning.
+            let new_balance = match old_balance.checked_sub(request.amount_in as u128) {
+                Some(v) => v,
+                None => {
+                    drop(token_balances);
+                    warn!("🚨 [SWAP SECURITY] Aborting: insufficient {} balance at debit time (had {:.6}, needed {:.6})",
+                        request.from_token, old_balance as f64 / 1e24, request.amount_in as f64 / 1e24);
+                    return Ok(Json(ApiResponse::error("Insufficient balance.".to_string())));
+                }
+            };
             token_balances.insert(from_key, new_balance);
             info!("💸 [INDEX v4.0.9] Deducted {} {} shares from user (was: {}, now: {})",
                 request.amount_in as f64 / 1e24, request.from_token, old_balance as f64 / 1e24, new_balance as f64 / 1e24);
@@ -14204,7 +14241,16 @@ pub async fn execute_swap(
 
             let from_key = (wallet_addr, from_token_addr);
             let old_balance = token_balances.get(&from_key).copied().unwrap_or(0);
-            let new_balance = old_balance.saturating_sub(debit_native);
+            // 2026-08-14 SECURITY FIX: see the QUGUSD debit site above for the full reasoning.
+            let new_balance = match old_balance.checked_sub(debit_native) {
+                Some(v) => v,
+                None => {
+                    drop(token_balances);
+                    warn!("🚨 [SWAP SECURITY] Aborting: insufficient {} balance at debit time (had {}, needed {})",
+                        bridge_sym, old_balance, debit_native);
+                    return Ok(Json(ApiResponse::error("Insufficient balance.".to_string())));
+                }
+            };
             token_balances.insert(from_key, new_balance);
 
             let divisor = 10f64.powi(bridge_decimals as i32);
@@ -14240,14 +14286,20 @@ pub async fn execute_swap(
                     // entire balance on every swap (CULTURE/PACI/SCALPEL/AGORA/FLOWC… all 24-dec).
                     // The balance CHECK was already 1:1, so check and debit disagreed.
                     let debit_amount: u128 = custom_token_swap_base_amount(request.amount_in as u128, actual_from_decimals);
-                    if debit_amount > old_balance {
-                        // Tripwire: the balance check above guarantees old_balance(+tolerance)
-                        // >= amount_in, so this is unreachable unless a scale mismatch returns.
-                        // Fail loud rather than silently saturating to zero.
-                        error!("🔴 [SWAP v10.11.74] custom-token debit {} > balance {} for token {} — scale bug? clamping to balance",
-                            debit_amount, old_balance, request.from_token);
-                    }
-                    let new_balance = old_balance.saturating_sub(debit_amount);
+                    // 2026-08-14 SECURITY FIX: this tripwire used to log-and-clamp via
+                    // saturating_sub instead of actually aborting — meaning the swap would
+                    // still proceed to credit the output even after logging "scale bug?".
+                    // Now a hard abort, consistent with the other debit sites in this
+                    // function (see the QUGUSD site above for the full race-fix reasoning).
+                    let new_balance = match old_balance.checked_sub(debit_amount) {
+                        Some(v) => v,
+                        None => {
+                            drop(token_balances);
+                            error!("🔴 [SWAP v10.11.74] Aborting: custom-token debit {} > balance {} for token {} — scale bug or concurrent swap?",
+                                debit_amount, old_balance, request.from_token);
+                            return Ok(Json(ApiResponse::error("Insufficient balance.".to_string())));
+                        }
+                    };
                     token_balances.insert(from_key, new_balance);
                     info!("💸 [SWAP v10.11.74] Deducted {} {} from user (was: {}, now: {}; 24-dec 1:1)",
                         debit_amount as f64 / 1e24, request.from_token,

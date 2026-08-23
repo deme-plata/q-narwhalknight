@@ -26,6 +26,8 @@ thiserror = { workspace = true }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 tracing = "0.1"
 hex = "0.4"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# v10.11.103: was dev-dependencies-only, but storage.rs's persist_to_file/
+# load_from_file/spawn_persist (real, non-test code) use tokio::fs/tokio::spawn
+# — this was a latent bug since the crate had never actually been compiled as
+# part of q-api-server before now (it was dormant/unwired until this session).
+tokio = { version = "1", features = ["fs", "rt", "macros"] }

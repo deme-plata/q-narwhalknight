@@ -3160,8 +3160,19 @@ impl Transaction {
         let signature = dilithium5::DetachedSignature::from_bytes(pqc_sig)
             .map_err(|_| "Failed to parse Dilithium5 signature".to_string())?;
 
-        // Get message to verify (transaction hash)
-        let tx_hash = self.hash();
+        // 2026-08-15 FIX: was `self.hash()` — SHA3-256 of the ENTIRE postcard-serialized
+        // transaction, including the server-assigned `id` and the already-attached
+        // Ed25519 `signature`. No client can compute that in advance (postcard is a
+        // Rust-specific binary format, and `id` doesn't exist until the server builds
+        // the tx), so no wallet could ever produce a signature this function would
+        // accept — the hybrid-signing feature was unusable end-to-end. Ed25519
+        // verification already uses `p2p_signable_hash()` (a small, well-documented,
+        // client-computable digest — see `build_p2p_signable_payload()` a few lines up,
+        // which `gui/quantum-wallet/src/services/walletAuth.ts`'s `signTransferV72`
+        // already replicates byte-for-byte in JS). Both signatures in a hybrid tx
+        // should cover the same canonical message anyway — that's the point of hybrid
+        // signing — so verify against the same hash Ed25519 uses.
+        let tx_hash = self.p2p_signable_hash();
 
         // Verify signature using pqcrypto-dilithium
         match dilithium5::verify_detached_signature(&signature, &tx_hash, &public_key) {

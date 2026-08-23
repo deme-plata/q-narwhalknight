@@ -860,10 +860,20 @@ impl QTransaction {
             };
 
             if max_height > current_pointer {
-                let height_bytes = max_height.to_be_bytes();
-                extra_puts.push(("blocks".to_string(), b"qblock:latest".to_vec(), height_bytes.to_vec()));
-                info!("✅ Transaction {}: Batch sync pointer update {} -> {} (advancing by {} blocks)",
-                      self.tx_id, current_pointer, max_height, max_height - current_pointer);
+                // 2026-08-18: this "sled" commit path was advancing straight to max_height
+                // with NO gap verification — the exact bug pattern the RocksDB commit path
+                // above (highest_contiguous_in_range) was already fixed for. A batch with
+                // non-contiguous heights (e.g. 100, 101, 105) would wrongly claim contiguity
+                // through the gap. Cap the advance the same way.
+                let safe_height = self
+                    .highest_contiguous_in_range(current_pointer + 1, max_height)
+                    .await;
+                if safe_height > current_pointer {
+                    let height_bytes = safe_height.to_be_bytes();
+                    extra_puts.push(("blocks".to_string(), b"qblock:latest".to_vec(), height_bytes.to_vec()));
+                    info!("✅ Transaction {}: Batch sync pointer update {} -> {} (advancing by {} blocks, max_saved was {})",
+                          self.tx_id, current_pointer, safe_height, safe_height - current_pointer, max_height);
+                }
             }
         }
 

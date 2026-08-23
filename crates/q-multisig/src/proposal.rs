@@ -84,10 +84,14 @@ pub struct SignatureContribution {
     /// Ed25519 signature over the payload hash (64 bytes).
     #[serde(with = "ed25519_sig_bytes")]
     pub ed25519_sig: ed25519_dalek::Signature,
-    /// Dilithium5 signed-message envelope (4627 bytes — includes embedded
-    /// message). We use the SignedMessage form rather than a detached
-    /// signature so we can pass through pqcrypto's verify API directly.
-    pub dilithium5_signed_msg: Vec<u8>,
+    /// Detached Dilithium5 signature over the payload hash (~4627 bytes).
+    /// v10.11.103: switched from the embedded SignedMessage form to detached
+    /// — matches `q_types::verify_dilithium5_signature` (the P2P hybrid-send
+    /// convention already shipped to every client), which is the only
+    /// Dilithium5 signing primitive the frontend actually exposes
+    /// (`dilithium5Sign` in `libp2p/postQuantumCrypto.ts` calls
+    /// `signDetached`, not the embedded form).
+    pub dilithium5_signature: Vec<u8>,
     /// Unix-seconds when this contribution was collected.
     pub at_unix: i64,
 }

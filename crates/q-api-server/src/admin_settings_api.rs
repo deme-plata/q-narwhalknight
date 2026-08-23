@@ -18,34 +18,45 @@ use crate::AppState;
 // Helpers
 // ============================================================================
 
-/// Extract wallet address from request headers (same pattern as deploy_admin_api)
-fn extract_wallet(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth) = headers.get("x-wallet-auth") {
-        if let Ok(auth_str) = auth.to_str() {
-            let wallet = auth_str.split(':').next().unwrap_or("");
-            let clean = wallet.replace("qnk", "").replace("qug", "");
-            if clean.len() == 64 {
-                return Some(clean);
-            }
-        }
-    }
-    if let Some(auth) = headers.get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-            let clean = token.replace("qnk", "").replace("qug", "");
-            if clean.len() == 64 {
-                return Some(clean);
-            }
-        }
-    }
-    None
+// v10.11.101 SECURITY FIX: this whole module used to trust the X-Wallet-Auth /
+// Authorization header as a PLAIN, UNSIGNED wallet-address string — literally
+// `X-Wallet-Auth: <address>` with zero cryptographic proof the caller controls
+// that wallet. Anyone who knew (or guessed) the admin/founder address — which
+// is not a secret, it's in this node's own systemd config — could hit the full
+// admin panel (get_admin_portfolio's loan book, borrower addresses, collateral)
+// AND mutating admin actions (update_operator_fees changes the network-wide fee
+// up to 50%, mining_mode_switch remotely toggles mining) with a single curl
+// request. Verified live against production (read-only) before fixing.
+// Same bug, separately, in my_oauth2_consents/my_revoke_consent below: "any
+// authenticated wallet" endpoints that trusted the unsigned claimed address
+// outright, letting anyone view or revoke ANY OTHER wallet's OAuth2 consents.
+//
+// Fix: require a REAL Ed25519-signed X-Wallet-Auth header (the same
+// {address,timestamp,scheme,signature} JSON format AuthenticatedWallet verifies
+// elsewhere in this codebase), verified via wallet_auth::validate_wallet_auth_query
+// — the exact function already used for the WebSocket auth-via-query path, so
+// this isn't new crypto, just applying the existing verified primitive here too.
+// A fixed logical path ("/api/v1/admin/session") is used as the challenge binding
+// instead of the literal per-endpoint request path, so ONE signed header (valid
+// for 5 minutes, same replay window as everywhere else) works across every admin
+// action in this module without each of the ~15 call sites needing to thread the
+// real request path through — deliberately simpler than the general-purpose
+// AuthenticatedWallet extractor for this same-trust-level admin-panel use case.
+const ADMIN_AUTH_LOGICAL_PATH: &str = "/api/v1/admin/session";
+
+/// Cryptographically verify the X-Wallet-Auth header and return the PROVEN
+/// wallet address (hex, no "qnk" prefix), or None if missing/invalid/expired.
+fn verify_wallet_auth(headers: &HeaderMap) -> Option<String> {
+    let auth_json = headers.get("x-wallet-auth")?.to_str().ok()?;
+    let address = crate::wallet_auth::validate_wallet_auth_query(auth_json, ADMIN_AUTH_LOGICAL_PATH).ok()?;
+    Some(hex::encode(address))
 }
 
 // v10.11.94: pub(crate) so quillon_bank_api's admin portfolio endpoint reuses
 // the exact same admin gate as the Node Admin panel.
 pub(crate) async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool {
-    // 1) Classic check: X-Wallet-Auth or raw hex Bearer matches admin_wallet or FOUNDER_WALLET
-    if let Some(wallet) = extract_wallet(headers) {
+    // 1) Real check: cryptographically-verified wallet matches admin_wallet or FOUNDER_WALLET
+    if let Some(wallet) = verify_wallet_auth(headers) {
         if wallet == state.admin_wallet {
             return true;
         }
@@ -55,23 +66,16 @@ pub(crate) async fn is_node_admin(headers: &HeaderMap, state: &AppState) -> bool
         }
     }
 
-    // 2) OAuth2 check: any valid, non-expired Bearer token → treat as admin
-    //    (node operators who log in via OAuth2 should see admin panel)
+    // 2) OAuth2 check: any valid, non-expired Bearer ACCESS TOKEN → treat as admin
+    //    (node operators who log in via OAuth2 should see admin panel). The old
+    //    "Bearer value IS the wallet address, unsigned" fallback was removed —
+    //    that was the same unsigned-trust bug via a second header.
     if let Some(auth) = headers.get("authorization") {
         if let Ok(auth_str) = auth.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
                 if !token.is_empty() {
-                    // Check as OAuth2 access token
                     if let Some(access_token) = state.oauth2_storage.get_access_token(token).await {
                         if access_token.expires_at > Utc::now() {
-                            return true;
-                        }
-                    }
-                    // v9.0.3: Also check if the Bearer value is a wallet address
-                    // (frontend sends wallet as Bearer when no OAuth2 token exists)
-                    let clean = token.replace("qnk", "").replace("qug", "");
-                    if clean.len() == 64 {
-                        if clean == state.admin_wallet || clean == crate::aegis_auth_middleware::FOUNDER_WALLET {
                             return true;
                         }
                     }
@@ -166,7 +170,7 @@ pub async fn admin_settings(
     let oauth2 = &state.oauth2_storage;
     let client_count = oauth2.client_count().await;
     let active_tokens = oauth2.active_token_count().await;
-    let admin_wallet_clean = extract_wallet(&headers).unwrap_or_default();
+    let admin_wallet_clean = verify_wallet_auth(&headers).unwrap_or_default();
     let consent_count = oauth2.get_consents_for_wallet(&admin_wallet_clean).await.len();
 
     Ok(Json(AdminSettingsResponse {
@@ -193,7 +197,7 @@ pub async fn oauth2_consents(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let wallet = extract_wallet(&headers).unwrap_or_default();
+    let wallet = verify_wallet_auth(&headers).unwrap_or_default();
     let consents = state.oauth2_storage.get_consents_for_wallet(&wallet).await;
 
     let entries: Vec<ConsentEntry> = consents
@@ -219,7 +223,7 @@ pub async fn revoke_consent(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let wallet = extract_wallet(&headers).unwrap_or_default();
+    let wallet = verify_wallet_auth(&headers).unwrap_or_default();
     let revoked = state.oauth2_storage.revoke_consent(&wallet, &body.client_id).await;
 
     if revoked {
@@ -240,7 +244,7 @@ pub async fn my_oauth2_consents(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ConsentEntry>>, StatusCode> {
-    let wallet = extract_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let wallet = verify_wallet_auth(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
 
     let consents = state.oauth2_storage.get_consents_for_wallet(&wallet).await;
 
@@ -263,7 +267,7 @@ pub async fn my_revoke_consent(
     State(state): State<Arc<AppState>>,
     Json(body): Json<RevokeConsentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let wallet = extract_wallet(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let wallet = verify_wallet_auth(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
 
     let revoked = state.oauth2_storage.revoke_consent(&wallet, &body.client_id).await;
 
@@ -307,7 +311,7 @@ pub async fn node_info(
 
 /// Check if the requesting wallet is the MASTER wallet (founder), not just admin
 fn is_master_wallet(headers: &HeaderMap, _state: &AppState) -> bool {
-    match extract_wallet(headers) {
+    match verify_wallet_auth(headers) {
         Some(wallet) => wallet == crate::aegis_auth_middleware::FOUNDER_WALLET,
         None => false,
     }

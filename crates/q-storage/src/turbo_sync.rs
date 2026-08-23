@@ -2611,7 +2611,23 @@ impl TurboSyncManager {
     /// Policy (v10.9.47):
     ///   accept if `unique_reporters >= 2`
     ///   OR `unique_reporters >= 1 AND beta_score(peer).mean() >= 0.8`
-    ///   OR `Q_GAP_TRUST_SINGLE_PEER=1` (operator override)
+    ///   OR `Q_GAP_TRUST_SINGLE_PEER=1` (operator override) AND size <= Q_GAP_TRUST_SINGLE_PEER_MAX_SIZE
+    ///
+    /// v10.11.104-beta: added the size cap on single-peer trust. Observed live
+    /// (happysrv, 2026-08-20): unconditional single-peer trust let ONE serving
+    /// node's "empty forward-seek → declare up to 100,000 blocks missing"
+    /// fallback (unified_network_manager.rs, the probe-empty gap-decl path) get
+    /// accepted with zero skepticism, and several such declarations compounded
+    /// during a stressed/thrashing sync window into a registered "gap" spanning
+    /// over 14 MILLION real, existing blocks — which the KNOWN-GAP auto-advance
+    /// logic then dutifully skipped straight past. Real historical pruning gaps
+    /// observed in this codebase's own comments are small (a few hundred to
+    /// ~1,000 blocks); a single unverified report claiming tens of thousands to
+    /// millions of blocks are gone is not the same class of claim and should not
+    /// be trusted on one peer's word alone, no matter how the network topology
+    /// looks today. Anything above the cap now requires the existing quorum
+    /// (2+ reporters) or high-trust (beta_mean >= threshold) path instead —
+    /// unchanged, still reachable, just no longer bypassable by size alone.
     pub fn spawn_gap_advance_handler(self: Arc<Self>) {
         let mut rx = match self.gap_advance_rx.lock().take() {
             Some(rx) => rx,
@@ -2629,14 +2645,23 @@ impl TurboSyncManager {
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
+        // v10.11.104-beta: cap how large a gap single-peer trust alone can wave through.
+        // Default 5,000 — comfortably above every real pruning gap size mentioned in this
+        // file's own history (476, 600, 657, ~1,000 blocks) but far below the 100,000-block
+        // max claim size of the server's probe-empty fallback, so that fallback can no
+        // longer silently walk a fresh sync past millions of real blocks on one report.
+        let trust_single_max_size: u64 = std::env::var("Q_GAP_TRUST_SINGLE_PEER_MAX_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000);
         let trust_threshold = std::env::var("Q_GAP_TRUST_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.8);
         info!(
-            "[KNOWN-GAP v10.9.47] Autonomous gap-heal handler started \
-             (trust_threshold={:.2}, trust_single={}, quorum=2)",
-            trust_threshold, trust_single
+            "[KNOWN-GAP v10.11.104] Autonomous gap-heal handler started \
+             (trust_threshold={:.2}, trust_single={}, trust_single_max_size={}, quorum=2)",
+            trust_threshold, trust_single, trust_single_max_size
         );
 
         tokio::spawn(async move {
@@ -2671,11 +2696,23 @@ impl TurboSyncManager {
                         // (Beta(1,1) prior) and grows toward 1.0 with successful chunks.
                         let beta_mean = self.beta_scores.lock().mean(&peer);
 
-                        let accept = trust_single
+                        // v10.11.104-beta: single-peer trust only waves through gaps up to
+                        // trust_single_max_size. A larger claim from one peer still needs
+                        // quorum or high beta-trust — see the doc comment on this fn for why.
+                        let gap_size = end.saturating_sub(start).saturating_add(1);
+                        let accept = (trust_single && gap_size <= trust_single_max_size)
                             || reporter_count >= 2
                             || beta_mean >= trust_threshold;
 
                         if !accept {
+                            if trust_single && gap_size > trust_single_max_size {
+                                warn!(
+                                    "[KNOWN-GAP v10.11.104] Gap {}-{} ({} blocks) from {} EXCEEDS \
+                                     single-peer trust cap ({}) — refusing to auto-accept on one report. \
+                                     Needs quorum (2+ reporters) or beta_trust >= {:.2} (current: {:.3}).",
+                                    start, end, gap_size, peer, trust_single_max_size, trust_threshold, beta_mean
+                                );
+                            }
                             info!(
                                 "[KNOWN-GAP v10.9.47] Provisional gap {}-{} from {} \
                                  (reporters={}, trust={:.3}) — below threshold, awaiting quorum",
@@ -5200,36 +5237,66 @@ impl TurboSyncManager {
                 gap_detected = true;
                 gap_start = Some(block.header.height);
 
-                // 🚀 v2.1.8-DELTA-V: GAP SKIP FIX - If gap is at the very START of pack
-                // (meaning server doesn't have the blocks we need), skip past the gap
-                // to prevent infinite sync loops when server has permanent gaps
+                // 🚨 v10.11.104-beta FIX: the old "v2.1.8-DELTA-V GAP SKIP" branch below
+                // unconditionally jumped highest_contiguous past ANY gap at the start of a
+                // pack, with no tip-guard and no size cap — the exact bug apply_blocks_direct()
+                // already had fixed at v10.5.0 (see MAX_UNREGISTERED_GAP_SKIP / TIP GUARD
+                // below), but that fix was never applied here too. Turbo sync runs several
+                // parallel fetch streams, so a gap at the start of THIS pack is normal
+                // out-of-order arrival, not proof the peer lacks the blocks. Left unguarded,
+                // this let a single stray pack (e.g. one whose first block is near the live
+                // tip) silently drag qblock:latest / height_cache forward by millions of
+                // blocks whose bodies were never fetched. mainnet_safety's integrity checker
+                // would eventually notice and force the pointer back down (see
+                // run_integrity_check/auto_repair_issues in mainnet_safety.rs) — but not
+                // before apply_blocks_direct()'s own [GAP SKIP REFUSED] safety cap discarded
+                // the next legitimately-arriving batch, believing IT now faced an unfillable
+                // gap. Observed live on a fresh sync (happysrv, 2026-08-20): pointer jumped
+                // 15,042,507 → 22,231,514 in one tick, got force-repaired back to 14,342,507,
+                // and the very next batch was discarded as an "unfillable" 7.98M-block gap.
+                //
+                // Fix: bring this branch to parity with apply_blocks_direct()'s v10.5.0 logic
+                // — never skip near the live tip (gossipsub will redeliver), and cap any
+                // historical-range skip at MAX_UNREGISTERED_GAP_SKIP. Blocks in this pack are
+                // still stored unconditionally below regardless of this branch's outcome.
                 let gap_size = block.header.height - (highest_contiguous + 1);
 
-                if blocks_forward == 0 && gap_size > 0 {
-                    // This is a gap at the START - server doesn't have these blocks
-                    // Skip past the gap and continue from where server CAN provide blocks
+                let network_height = self.cached_max_peer_height.load(Ordering::Relaxed);
+                let near_tip = network_height > 0 && highest_contiguous + 5_000 >= network_height;
+                const MAX_UNREGISTERED_GAP_SKIP: u64 = 10_000;
+
+                if blocks_forward == 0 && gap_size > 0 && !near_tip && gap_size <= MAX_UNREGISTERED_GAP_SKIP {
                     warn!(
-                        "🚨 [v2.1.8 GAP SKIP] Gap at START of pack! Server missing blocks {}-{}",
+                        "🔍 [v10.11.104 GAP SKIP] Historical gap at start of pack {}-{}: {} heights ({}-{}), advancing pointer",
+                        pack.start_height, pack.end_height, gap_size,
                         highest_contiguous + 1, block.header.height - 1
                     );
-                    warn!(
-                        "   Skipping {} missing blocks to prevent infinite sync loop",
-                        gap_size
-                    );
-                    warn!(
-                        "   Advancing height from {} to {} (including current block)",
-                        highest_contiguous, block.header.height
-                    );
-                    // Advance height TO this block (we're accepting it despite the gap)
                     highest_contiguous = block.header.height;
                     blocks_forward += 1; // Count this as a forward block
                     gap_detected = false; // Reset gap detection since we skipped it
                 } else {
-                    warn!(
-                        "⚠️  [v0.7.0] Gap in FORWARD sequence: pack {}-{}, expected height {}, got {} - height pointer will be {}",
-                        pack.start_height, pack.end_height,
-                        highest_contiguous + 1, block.header.height, highest_contiguous
-                    );
+                    if near_tip {
+                        warn!(
+                            "⏸️ [TIP GAP STOP] Gap of {} blocks ({}-{}) at live tip (contiguous={}, network={}) \
+                             in pack {}-{} — NOT skipping, gossipsub will fill it. Height pointer stays at {}.",
+                            gap_size, highest_contiguous + 1, block.header.height - 1,
+                            highest_contiguous, network_height, pack.start_height, pack.end_height, highest_contiguous
+                        );
+                    } else if gap_size > MAX_UNREGISTERED_GAP_SKIP {
+                        error!(
+                            "🚫 [GAP SKIP REFUSED] Pack {}-{}: gap at start is {} heights (missing {}-{}), \
+                             exceeds safety cap {}. NOT advancing pointer past {} (blocks stored anyway).",
+                            pack.start_height, pack.end_height, gap_size,
+                            highest_contiguous + 1, block.header.height - 1,
+                            MAX_UNREGISTERED_GAP_SKIP, highest_contiguous
+                        );
+                    } else {
+                        warn!(
+                            "⚠️  [v0.7.0] Gap in FORWARD sequence: pack {}-{}, expected height {}, got {} - height pointer will be {}",
+                            pack.start_height, pack.end_height,
+                            highest_contiguous + 1, block.header.height, highest_contiguous
+                        );
+                    }
                 }
                 // Don't break - continue storing all blocks for later use
             }

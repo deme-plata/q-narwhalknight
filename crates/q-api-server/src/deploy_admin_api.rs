@@ -2510,6 +2510,18 @@ pub async fn decentralization_metrics(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    Ok(Json(ApiResponse::success(compute_decentralization_index(&state).await)))
+}
+
+/// 2026-08-18: extracted from the `decentralization_metrics` HTTP handler so this can
+/// ALSO be called periodically from a background task (see main.rs), not only when an
+/// admin happens to poll the endpoint. Before this, `state.di_ema` — the field behind
+/// `consensus.decentralization_ema` in `/api/v1/engine/pulse`, which the `k_parameter`
+/// MCP tool reads and reports as "🚨 critical" at its zero-initialized default — was
+/// NEVER updated unless a master-wallet-authenticated admin manually hit the gated
+/// endpoint. Nothing else ever called it, so the metric was permanently stale/zero on
+/// a node nobody happened to poll. This makes it a genuinely live metric going forward.
+pub async fn compute_decentralization_index(state: &Arc<AppState>) -> DecentralizationMetrics {
     // Collect per-wallet hashrates from active_miners (key = "address:worker_id")
     let mut wallet_hashrates: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     let mut total_workers = 0usize;
@@ -2684,7 +2696,7 @@ pub async fn decentralization_metrics(
         else if di >= 20.0 { "D" }
         else { "F" }.to_string();
 
-    Ok(Json(ApiResponse::success(DecentralizationMetrics {
+    DecentralizationMetrics {
         unique_wallets,
         total_workers,
         top_miner_pct,
@@ -2701,6 +2713,6 @@ pub async fn decentralization_metrics(
         decentralization_index_raw: di_raw,
         decentralization_index: di,
         grade,
-    })))
+    }
 }
 

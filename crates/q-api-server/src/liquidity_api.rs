@@ -1341,7 +1341,12 @@ pub async fn add_liquidity(
                 let new_balance = current + additional_lp_tokens;
                 token_balances.insert((provider, lp_token_addr), new_balance);
                 drop(token_balances);
-                state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_balance).await.ok();
+                if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_balance).await {
+                    tracing::error!(
+                        "🚨 [LP-CREDIT] Failed to persist LP token credit for {} (pool {}, amount {}, new total {}): {} — balance exists ONLY in-memory and WILL BE LOST on restart, even though this request is about to report success",
+                        hex::encode(&provider[..8]), existing_pool_id, additional_lp_tokens, new_balance, e
+                    );
+                }
                 tracing::info!(
                     "🪙 Credited {} LP tokens to {} (pool {}, total: {})",
                     additional_lp_tokens, hex::encode(&provider[..8]), existing_pool_id, new_balance
@@ -1416,7 +1421,12 @@ pub async fn add_liquidity(
                 let mut token_balances = state.token_balances.write().await;
                 token_balances.insert((provider, lp_token_addr), lp_tokens);
                 drop(token_balances);
-                state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await.ok();
+                if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await {
+                    tracing::error!(
+                        "🚨 [LP-CREDIT] Failed to persist LP token credit for {} (new pool {}, amount {}): {} — balance exists ONLY in-memory and WILL BE LOST on restart, even though this request is about to report success",
+                        hex::encode(&provider[..8]), new_pool_id, lp_tokens, e
+                    );
+                }
                 let sym0 = token_display_symbol(&token0_canonical);
                 let sym1 = token_display_symbol(&token1_canonical);
                 state.storage_engine.save_lp_token_meta(&lp_token_addr, &sym0, &sym1).await.ok();
@@ -1494,7 +1504,12 @@ pub async fn add_liquidity(
             let mut token_balances = state.token_balances.write().await;
             token_balances.insert((provider, lp_token_addr), lp_tokens);
             drop(token_balances);
-            state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await.ok();
+            if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_tokens).await {
+                tracing::error!(
+                    "🚨 [LP-CREDIT] Failed to persist LP token credit for {} (new pool {}, amount {}): {} — balance exists ONLY in-memory and WILL BE LOST on restart, even though this request is about to report success",
+                    hex::encode(&provider[..8]), new_pool_id, lp_tokens, e
+                );
+            }
             let sym0 = token_display_symbol(&token0_canonical);
             let sym1 = token_display_symbol(&token1_canonical);
             state.storage_engine.save_lp_token_meta(&lp_token_addr, &sym0, &sym1).await.ok();
@@ -1890,7 +1905,12 @@ pub async fn remove_liquidity(
         let new_lp_balance = current_lp.saturating_sub(lp_to_burn);
         token_balances.insert((provider, lp_token_addr), new_lp_balance);
         drop(token_balances);
-        state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_lp_balance).await.ok();
+        if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_lp_balance).await {
+            tracing::error!(
+                "🚨 [LP-BURN] Failed to persist LP token burn for {} (pool {}, burned {}, remaining {}): {} — a restart before this flushes will RESURRECT the already-withdrawn LP tokens, enabling a double-withdrawal",
+                hex::encode(&provider[..8]), request.pool_id, lp_to_burn, new_lp_balance, e
+            );
+        }
         tracing::info!(
             "🔥 Burned {} LP tokens from {} (pool {}, remaining: {})",
             lp_to_burn, hex::encode(&provider[..8]), request.pool_id, new_lp_balance

@@ -48,7 +48,7 @@ pub mod wallet;
 pub use proposal::{
     MultisigAction, MultisigProposal, ProposalId, ProposalStatus, SignatureContribution,
 };
-pub use storage::MultisigStore;
+pub use storage::{MultisigStore, OrgPolicy, OrgPolicyMember, RegisteredKey};
 pub use verify::{verify_member_signature, verify_proposal, VerifyError};
 pub use wallet::{HybridPublicKey, Member, MultisigWallet, WalletError};
 

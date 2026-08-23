@@ -4480,12 +4480,36 @@ impl UnifiedNetworkManager {
                                                         // through to legacy multi-format scan.
                                                         // v10.9.50: lowered 10_000 → 1_000 (matches MAX_FORWARD_SKIP) so
                                                         // small gaps trigger declaration via this path too.
+                                                        //
+                                                        // v10.11.104-beta PROPOSED FIX (NOT yet deployed — see review notes):
+                                                        // the declared gap used to blindly extrapolate to start+100,000
+                                                        // regardless of how much was actually scanned. get_qblocks_forward()
+                                                        // only ever scans up to `limit` (<=2000) entries before returning —
+                                                        // an empty result proves nothing about the other ~98,000+ blocks
+                                                        // beyond that window, yet the old code claimed them "permanently
+                                                        // gone" on that single unverified probe. Combined with a requester
+                                                        // that trusts a single peer's declaration by default
+                                                        // (Q_GAP_TRUST_SINGLE_PEER, turbo_sync.rs), this let one stressed
+                                                        // empty scan on this node cause a syncing client to skip up to
+                                                        // 100,000 real blocks — and several such declarations compounded
+                                                        // during a load spike into a 14-million-block false gap (observed
+                                                        // live against happysrv, 2026-08-20). Also: individual block
+                                                        // deserialize failures inside get_qblocks_forward are silently
+                                                        // dropped (treated identically to "key absent"), so a transient
+                                                        // decode hiccup under load — not real data loss — can trigger this
+                                                        // same path. Fix: only claim the range this scan actually covered
+                                                        // (start_height..start_height+limit), never extrapolate beyond it.
+                                                        // A real, larger gap still gets found — one bounded probe-empty
+                                                        // declaration per window, walking forward, rather than one
+                                                        // unverified leap.
                                                         if our_height > start_height.saturating_add(1_000) {
-                                                            info!("🚧 [GAP-DECL] Forward-seek empty but our_height={} >> start={} — declaring gap (probe-empty path)",
-                                                                  our_height, start_height);
                                                             let gap_end = start_height
-                                                                .saturating_add(100_000)
+                                                                .saturating_add(limit as u64)
+                                                                .saturating_sub(1)
                                                                 .min(our_height.saturating_sub(1));
+                                                            info!("🚧 [GAP-DECL] Forward-seek empty but our_height={} >> start={} — declaring gap {}-{} \
+                                                                   (bounded to the {}-block window actually scanned, probe-empty path)",
+                                                                  our_height, start_height, start_height, gap_end, limit);
                                                             let response = q_types::BlockPackResponse::with_permanent_gap(
                                                                 our_height,
                                                                 start_height,
@@ -4627,6 +4651,55 @@ impl UnifiedNetworkManager {
                                 if blocks_received < expected_blocks && blocks_received > 0 {
                                     warn!("⚠️  [NET-PROTOCOL] INCOMPLETE RESPONSE: Got {} blocks, expected {} (missing {})",
                                           blocks_received, expected_blocks, expected_blocks - blocks_received);
+
+                                    // 2026-08-15: a partial response (some heights present, some
+                                    // not) used to just log the warning above and drop the missing
+                                    // heights on the floor — nothing ever told TurboSync which
+                                    // specific heights were absent. Only a FULLY empty response
+                                    // (response.permanent_gap, above) ever fed the known-gap
+                                    // acceptance pipeline. Real DAG sparseness routinely produces
+                                    // partial responses (e.g. 150/197 with several small holes
+                                    // scattered inside), and if one of those holes sits immediately
+                                    // above the durable contiguous pointer, advance_contiguous_tip()
+                                    // has no declared gap to jump over and stalls there forever —
+                                    // this is the mechanism behind the height-508-forever-stuck
+                                    // sync-test finding (see project_quillon_node_data_integrity_gap
+                                    // memory). Fix: derive the specific missing sub-ranges from this
+                                    // same peer response and relay them through the IDENTICAL
+                                    // gap_advance_tx pipeline used for whole-range gaps below —
+                                    // no new trust/acceptance logic, TurboSync's existing Beta-trust
+                                    // + quorum policy still decides whether to accept each one.
+                                    let present: std::collections::BTreeSet<u64> =
+                                        response.blocks.iter().map(|b| b.header.height).collect();
+                                    let mut hole_start: Option<u64> = None;
+                                    let mut report_hole = |start: u64, end: u64| {
+                                        let reporter_count = {
+                                            let mut tally = self.gap_declarations.lock().unwrap();
+                                            let entry = tally.entry((start, end)).or_default();
+                                            entry.insert(peer);
+                                            entry.len()
+                                        };
+                                        info!(
+                                            "🚧 [PARTIAL-RESPONSE GAP] Peer {} response missing heights {}-{} \
+                                             within requested {}-{} (reporters: {}, relaying to turbo_sync for trust check)",
+                                            peer, start, end, response.start_height, response.end_height, reporter_count
+                                        );
+                                        if let Some(tx) = &self.gap_advance_tx {
+                                            let _ = tx.send((start, end, peer));
+                                        }
+                                    };
+                                    for h in response.start_height..=response.end_height {
+                                        if present.contains(&h) {
+                                            if let Some(s) = hole_start.take() {
+                                                report_hole(s, h - 1);
+                                            }
+                                        } else if hole_start.is_none() {
+                                            hole_start = Some(h);
+                                        }
+                                    }
+                                    if let Some(s) = hole_start {
+                                        report_hole(s, response.end_height);
+                                    }
                                 }
 
                                 // Debug individual block details for small batches

@@ -330,6 +330,7 @@ pub mod lockfree_producer;
 pub mod parallel_workers; // 16x parallel worker pool for high TPS // 🔓 v0.9.92-beta: Lock-free producer - DEADLOCK FIX
 pub mod transaction_utils; // ✅ v1.0.91-beta: Proper transaction handling with nonce management
 pub mod contracts_api; // ✅ v2.4.8-beta - Smart contract deployment and social media profiles (AFTER transaction_utils!)
+pub mod multisig_api; // ✅ v10.11.103 - CEO/associates multisig org: register-key/create/propose/sign/execute
 pub mod listing_api; // ✅ v6.5.0: Exchange Listing RWA packages (Gold/Silver/Bronze)
 pub mod game_items_api; // ✅ v9.3.0: CS:GO2-style game items RWA (cases, skins, trade-up)
 pub mod web_search_api; // ✅ v9.3.2: GLM-4-Flash web search with AI summaries + citations
@@ -934,9 +935,26 @@ impl MiningStatistics {
             stats.solution_timestamps.drain(0..100);
         }
 
-        // v4.1.2: Use miner-reported hashrate directly (miner counts every hash attempt accurately)
-        // Miner sends hashrate in KH/s, convert to H/s for display
-        let hash_rate_hs = hash_rate * 1000.0; // Convert KH/s to H/s
+        // v4.1.2 (STALE, see 2026-08-15 fix below): "Miner sends hashrate in KH/s, convert
+        // to H/s for display" — this assumption predates the clients being fixed to send
+        // raw H/s directly. gui/slint-wallet/src/miner.rs's solution-submission path was
+        // already changed 2026-08-14 ("was `/ 1000.0` ... stale. The server stores this
+        // field directly into MinerStats.last_hashrate, which has been H/s since the
+        // v3.5.6/v3.5.7-beta migration") and gpu_miner.rs's GPU path the same way — both
+        // now send genuine, already-real H/s with no client-side conversion. Multiplying
+        // by 1000 here on receipt silently re-introduced exactly the 1000x inflation the
+        // client-side fix was meant to remove: every solution submission (the dominant
+        // path — solutions land roughly every second at network difficulty, far more often
+        // than the 30s heartbeat) got reported as 1000x the miner's real rate. Measured:
+        // a real RTX 2080 running the diagnostic-logged build showed a genuine, internally
+        // self-consistent 20-31 MH/s locally, while this node's own /api/v1/mining/miners
+        // displayed the same worker at ~20-31 GH/s — exactly 1000x, and exactly explains
+        // why network-wide hashrate looked like tens of GH/s (a network of CPU/consumer-GPU
+        // miners genuinely cannot reach that). heartbeat_miner() below has its OWN separate
+        // * 1000.0 that is NOT stale — the heartbeat client (miner.rs, the send_heartbeat
+        // spawn) still divides by 1000 before sending, so that pairing still cancels out
+        // correctly and was deliberately left untouched.
+        let hash_rate_hs = hash_rate; // already H/s — do not re-multiply
 
         // Use client-reported hashrate if provided, otherwise estimate from solutions
         // The miner's own hash counter is the most accurate source
@@ -1200,6 +1218,23 @@ pub struct AppState {
     // ✅ v9.7.0: Cross-block transaction dedup cache — prevents replay of applied tx IDs
     // Maps tx_hash → block_height where it was applied. Pruned for entries >1000 blocks old.
     pub applied_tx_dedup: Arc<dashmap::DashMap<[u8; 32], u64>>,
+
+    // 🚨 2026-08-14 SECURITY FIX: per-wallet swap serialization lock (DEX double-spend fix).
+    // execute_swap's balance check and its actual debit are ~1000 lines apart with multiple
+    // unlocked state mutations in between (nonce consumption, mempool submit, TWO protocol-fee
+    // credits, TWO pool-reserve mutations+persists) before the debit ever runs. Two concurrent
+    // identical swap requests for the same wallet could both pass the check, both mutate pool
+    // reserves, and both get credited — the attacker pays once, receives output twice. Even the
+    // existing `atomic_subtract_and_record_dex_debit` for native QUG (added on this same
+    // fix/ds1-replay-protection branch) only wraps the read+write in one RocksDB batch — it does
+    // NOT serialize against a second concurrent call for the SAME wallet, so the race survives.
+    // Fix: acquire this per-wallet lock for the ENTIRE duration of execute_swap (from right after
+    // the initial balance check through the final credit), so only one swap can be in flight per
+    // wallet at a time — this closes the race for every debit path (native QUG, QUGUSD,
+    // index-fund, bridge, custom token) at once, without needing to retrofit refund/rollback
+    // logic into the ~11 early-return points between the check and the debit. See
+    // project_dex_swap_double_spend_confirmed_2026_08_14 memory for the full writeup.
+    pub swap_wallet_locks: Arc<dashmap::DashMap<[u8; 32], Arc<tokio::sync::Mutex<()>>>>,
 
     // ✅ v0.9.99-beta: Adaptive Block Rewards - Throughput-independent emission
     /// Balance consensus engine with adaptive reward calculation
@@ -1800,6 +1835,10 @@ pub struct AppState {
     // 🎯 Token Staking Positions - Active stakes per wallet+contract
     // Key format: "wallet_address:contract_address" (lowercase)
     pub token_staking_positions: Arc<RwLock<HashMap<String, q_storage::TokenStakePosition>>>,
+
+    // 🌱 v10.11.101: Auto-Stake Checkpoints — passive holder yield, no lock
+    // Key format: "wallet_address:contract_address" (lowercase), same as staking
+    pub token_auto_stake_checkpoints: Arc<RwLock<HashMap<String, q_storage::AutoStakeCheckpoint>>>,
 
     // 🔥 Token Burn Totals - Cumulative burned amounts per contract
     pub token_burn_totals: Arc<RwLock<HashMap<String, u128>>>,
@@ -2857,6 +2896,8 @@ impl AppState {
             },
             // ✅ v9.7.0: Cross-block tx dedup cache
             applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
+            // 🚨 2026-08-14 SECURITY FIX: per-wallet swap serialization lock (see field doc)
+            swap_wallet_locks: Arc::new(dashmap::DashMap::new()),
 
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
@@ -3377,6 +3418,13 @@ impl AppState {
                     tracing::info!("🥩 Loaded {} staking positions from storage", positions.len());
                 }
                 Arc::new(RwLock::new(positions))
+            },
+            token_auto_stake_checkpoints: {
+                let checkpoints = storage_engine.load_auto_stake_checkpoints().await.unwrap_or_default();
+                if !checkpoints.is_empty() {
+                    tracing::info!("🌱 Loaded {} auto-stake checkpoints from storage", checkpoints.len());
+                }
+                Arc::new(RwLock::new(checkpoints))
             },
             token_burn_totals: Arc::new(RwLock::new(HashMap::new())),
             token_reflection_totals: Arc::new(RwLock::new(HashMap::new())),
@@ -4331,6 +4379,8 @@ impl AppState {
             },
             // ✅ v9.7.0: Cross-block tx dedup cache
             applied_tx_dedup: Arc::new(dashmap::DashMap::new()),
+            // 🚨 2026-08-14 SECURITY FIX: per-wallet swap serialization lock (see field doc)
+            swap_wallet_locks: Arc::new(dashmap::DashMap::new()),
 
             balance_consensus_engine: balance_consensus_engine.clone(),
             event_broadcaster,
@@ -4905,6 +4955,13 @@ impl AppState {
                     tracing::info!("🥩 Loaded {} staking positions from storage", positions.len());
                 }
                 Arc::new(RwLock::new(positions))
+            },
+            token_auto_stake_checkpoints: {
+                let checkpoints = storage_engine.load_auto_stake_checkpoints().await.unwrap_or_default();
+                if !checkpoints.is_empty() {
+                    tracing::info!("🌱 Loaded {} auto-stake checkpoints from storage", checkpoints.len());
+                }
+                Arc::new(RwLock::new(checkpoints))
             },
             token_burn_totals: Arc::new(RwLock::new(HashMap::new())),
             token_reflection_totals: Arc::new(RwLock::new(HashMap::new())),

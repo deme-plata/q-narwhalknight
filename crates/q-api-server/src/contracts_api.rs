@@ -469,6 +469,12 @@ pub fn create_contracts_router() -> Router<Arc<AppState>> {
         .route("/:contract_address/claim-rewards", post(claim_staking_rewards))
         .route("/:contract_address/stake-info/:wallet_address", get(get_stake_info))
         .route("/:contract_address/pending-rewards/:wallet_address", get(get_pending_rewards))
+        // v10.11.101: Auto-Stake — passive holder yield, no lock/manual-stake step.
+        // Any wallet holding a token whose contract declares staking:true earns a
+        // flat APY just by holding; /status is a public read (safe, no mutation),
+        // /claim requires proof of wallet ownership since it credits real balance.
+        .route("/:contract_address/auto-stake/status/:wallet_address", get(get_auto_stake_status))
+        .route("/:contract_address/auto-stake/claim", post(claim_auto_stake_reward))
         .route("/:contract_address/fee-config", get(get_fee_config))
         .route("/:contract_address/fee-config", post(update_fee_config))
         .route("/:contract_address/token-stats", get(get_token_stats))
@@ -652,18 +658,26 @@ pub async fn deploy_contract(
     }
 
     // 🔐 v5.1.0: Pre-check deployer balance BEFORE deployment (fail fast)
-    const DEPLOYMENT_COST_PRECHECK: u128 = 1_000_000_000_000_000_000_000_000; // 1 QUG
+    // v10.11.103 (2026-08-18): Viktor: "polygon style deploy price ... 0.06$ pr
+    // large smart contract". Was a flat 1 QUG (~$2900+ at current spot — a real
+    // barrier to casual/agent token launches). Repriced to ~0.0000206 QUG, i.e.
+    // ~$0.06 at the QUG/QUGUSD pool price observed 2026-08-18 (1 QUG ≈ $2912).
+    // This is a fixed QUG amount, not USD-pegged, so like the old 1-QUG price it
+    // will still drift in dollar terms as QUG's own price moves — re-price this
+    // constant again if that drift becomes significant.
+    const DEPLOYMENT_COST_PRECHECK: u128 = 20_600_000_000_000_000_000; // ~0.0000206 QUG (~$0.06)
     {
         let wallet_balances = state.wallet_balances.read().await;
         let balance = wallet_balances.get(&deployer).copied().unwrap_or(0);
         if balance < DEPLOYMENT_COST_PRECHECK {
             tracing::warn!(
-                "🚫 [CONTRACT] Insufficient balance for deployment: {} has {} QUG, needs 1 QUG",
+                "🚫 [CONTRACT] Insufficient balance for deployment: {} has {} QUG, needs {} QUG",
                 q_log_privacy::mask_addr(&hex::encode(deployer)),
-                q_log_privacy::mask_amt_display(balance as f64 / 1e24)
+                q_log_privacy::mask_amt_display(balance as f64 / 1e24),
+                DEPLOYMENT_COST_PRECHECK as f64 / 1e24
             );
             return Ok(Json(ApiResponse::error(
-                "Insufficient balance: deployment requires 1 QUG".to_string(),
+                format!("Insufficient balance: deployment requires {:.8} QUG", DEPLOYMENT_COST_PRECHECK as f64 / 1e24),
             )));
         }
     }
@@ -732,7 +746,10 @@ pub async fn deploy_contract(
         Ok((request_id, contract_address)) => {
             // Deduct deployment cost from deployer's native QUG balance
             // v3.0.6-beta: Updated for 24 decimals (1 QUG = 10^24 base units)
-            const DEPLOYMENT_COST: u128 = 1_000_000_000_000_000_000_000_000; // 1 QUG
+            // v10.11.103: repriced to Polygon-style ~$0.06 — see DEPLOYMENT_COST_PRECHECK above.
+            // MUST stay equal to DEPLOYMENT_COST_PRECHECK or the precheck can pass while this
+            // deducts a different amount.
+            const DEPLOYMENT_COST: u128 = 20_600_000_000_000_000_000; // ~0.0000206 QUG (~$0.06)
             // v10.2.1: Track balance changes for persistence (fixes bug where deductions were lost on restart)
             let mut persist_deployer: Option<([u8; 32], u128)> = None;
             let mut persist_founder: Option<([u8; 32], u128)> = None;
@@ -812,11 +829,32 @@ pub async fn deploy_contract(
                         let nonce = state.nonce_tracker.get_and_increment(&deployer);
 
                         // Create transaction with proper cryptographic ID using transaction_utils
+                        //
+                        // v10.11.101 DOUBLE-CHARGE FIX: this transaction used to carry
+                        // .amount(DEPLOYMENT_COST) — a SECOND, independent 1 QUG debit on
+                        // top of the manual wallet_balances deduction (with the founder/
+                        // operator revenue split) just above. ContractDeploy/ContractCall
+                        // transactions skip per-tx signature verification (see
+                        // q-types/src/lib.rs verify_signature's `!matches!(tx_type,
+                        // ContractCall | ContractDeploy)` guard — the API layer's
+                        // AuthenticatedWallet check already covers auth), so this
+                        // unsigned tx was still admitted to the mempool and its amount
+                        // WAS actually applied: a real deploy_token call cost 2 QUG, not
+                        // the documented 1 QUG (verified empirically: deployed a real
+                        // token, wallet balance dropped by exactly 2 QUG, and this exact
+                        // 1 QUG "sent" transfer to the new contract address showed up in
+                        // /wallet/:addr/history). The contract address has no mechanism
+                        // to ever spend that QUG, so the second charge was pure loss to
+                        // every deployer, permanently. This transaction's only real job
+                        // is to be a queryable/broadcastable audit record of the deploy
+                        // event (nonce, hash, Explorer visibility) — it was never meant
+                        // to move funds a second time, hence `.fee(0)` right below it
+                        // ("Fee included in deployment cost" — i.e. NOT here too).
                         let transaction = TransactionBuilder::new()
                             .from(deployer)
                             .to(contract_address.0)
-                            .amount(DEPLOYMENT_COST)
-                            .fee(0) // Fee included in deployment cost
+                            .amount(0)
+                            .fee(0) // Fee included in deployment cost (charged above, not here)
                             .data(format!("deploy:{}", request.contract_type).into_bytes())
                             .token_type(q_types::TokenType::QUG)
                             .fee_token_type(q_types::TokenType::QUGUSD)
@@ -2776,6 +2814,7 @@ pub struct UpdateFeeConfigRequest {
 
 /// Stake tokens in a custom token contract
 pub async fn stake_tokens(
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Path(contract_address): Path<String>,
     Json(request): Json<StakeRequest>,
@@ -2795,14 +2834,53 @@ pub async fn stake_tokens(
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
 
+    // v10.11.101 SECURITY FIX: stake/unstake/claim-rewards had NO signature check —
+    // wallet_address came straight from the JSON body with nothing proving the
+    // caller actually controls it, so anyone who knew a wallet's address could
+    // force-lock that wallet's tokens with a plain unauthenticated POST. Same class
+    // of bug v10.11.97 already fixed for qcredit lock/unlock/claim; applying the
+    // identical AuthenticatedWallet check here closes it for generic custom-token
+    // staking too (LEVI included).
+    if wallet_addr != auth_wallet.address {
+        tracing::warn!(
+            "🚫 [STAKING] Authentication mismatch: authenticated as {} but request claims {}",
+            hex::encode(&auth_wallet.address),
+            hex::encode(wallet_addr)
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: you are authenticated as {} but the request is for {}. \
+            You can only stake your own wallet's tokens.",
+            hex::encode(&auth_wallet.address),
+            request.wallet_address
+        ))));
+    }
+
+    // v10.11.101 SCALING FIX: v10.11.88 already fixed the u64 overflow/truncation
+    // by widening to u128, but still hardcoded a 1e24 scale for every token. That
+    // happens to be right for LEVI (24 decimals) but wrong for any token that
+    // isn't — look up the contract's REAL decimals instead, same string-fallback
+    // idiom already used elsewhere in this file (airdrop, mint, etc.) since some
+    // GUI/MCP deploys store "decimals" as a JSON string.
+    let ecosystem = &state.orobit_ecosystem;
+    let contract = match ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr))
+        .await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(8) as u32;
+    let scale = 10u128.pow(decimals);
+
     // Parse amount
     let amount_f64: f64 = match request.amount.parse() {
         Ok(a) => a,
         Err(_) => return Ok(Json(ApiResponse::error("Invalid amount".to_string()))),
     };
-    // v10.11.88: scale by 1e24 (24-decimal base units) to match token_balances,
-    // as u128 (was ×1e8 as u64 — the bug that truncated every stake to ~1e-16).
-    let amount: u128 = (amount_f64 * 1e24) as u128;
+    let amount: u128 = (amount_f64 * scale as f64) as u128;
 
     if amount == 0 {
         return Ok(Json(ApiResponse::error("Amount must be greater than 0".to_string())));
@@ -2817,7 +2895,7 @@ pub async fn stake_tokens(
     if current_balance < amount {
         return Ok(Json(ApiResponse::error(format!(
             "Insufficient balance. Have: {}, Need: {}",
-            current_balance as f64 / 1e24,
+            current_balance as f64 / scale as f64,
             amount_f64
         ))));
     }
@@ -2897,6 +2975,7 @@ pub async fn stake_tokens(
 
 /// Unstake tokens from a custom token contract
 pub async fn unstake_tokens(
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Path(contract_address): Path<String>,
     Json(request): Json<StakeRequest>,
@@ -2913,6 +2992,36 @@ pub async fn unstake_tokens(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+
+    // SECURITY: same check as stake_tokens — refuse to unstake on behalf of a
+    // wallet the caller hasn't cryptographically proven they control.
+    if wallet_addr != auth_wallet.address {
+        tracing::warn!(
+            "🚫 [STAKING] Authentication mismatch on unstake: authenticated as {} but request claims {}",
+            hex::encode(&auth_wallet.address),
+            hex::encode(wallet_addr)
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: you are authenticated as {} but the request is for {}. \
+            You can only unstake your own wallet's tokens.",
+            hex::encode(&auth_wallet.address),
+            request.wallet_address
+        ))));
+    }
+
+    let ecosystem = &state.orobit_ecosystem;
+    let contract = match ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr))
+        .await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(8) as u32;
+    let scale = 10u128.pow(decimals);
 
     let stake_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
     let current_time = current_timestamp();
@@ -2959,24 +3068,25 @@ pub async fn unstake_tokens(
     }
 
     let tx_hash = format!("unstake-{}-{}", hex::encode(contract_addr), current_time);
-    let total_returned = (stake.amount + pending_rewards) as f64 / 1e24;
+    let total_returned = (stake.amount + pending_rewards) as f64 / scale as f64;
 
     tracing::info!("✅ [STAKING] {} unstaked {} tokens (+ {} rewards)",
         q_log_privacy::mask_addr(&request.wallet_address),
-        q_log_privacy::mask_amt_display(stake.amount as f64 / 1e24),
-        q_log_privacy::mask_amt_display(pending_rewards as f64 / 1e24));
+        q_log_privacy::mask_amt_display(stake.amount as f64 / scale as f64),
+        q_log_privacy::mask_amt_display(pending_rewards as f64 / scale as f64));
 
     Ok(Json(ApiResponse::success(StakeResponse {
         success: true,
         transaction_hash: tx_hash,
         stake_position: None,
         message: format!("Successfully unstaked {} tokens (including {} in rewards)",
-            total_returned, pending_rewards as f64 / 1e24),
+            total_returned, pending_rewards as f64 / scale as f64),
     })))
 }
 
 /// Claim staking rewards without unstaking
 pub async fn claim_staking_rewards(
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Path(contract_address): Path<String>,
     Json(request): Json<StakeRequest>,
@@ -2993,6 +3103,37 @@ pub async fn claim_staking_rewards(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+
+    // SECURITY: same check as stake_tokens/unstake_tokens — refuse to claim
+    // rewards on behalf of a wallet the caller hasn't cryptographically proven
+    // they control.
+    if wallet_addr != auth_wallet.address {
+        tracing::warn!(
+            "🚫 [STAKING] Authentication mismatch on claim: authenticated as {} but request claims {}",
+            hex::encode(&auth_wallet.address),
+            hex::encode(wallet_addr)
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: you are authenticated as {} but the request is for {}. \
+            You can only claim rewards for your own wallet.",
+            hex::encode(&auth_wallet.address),
+            request.wallet_address
+        ))));
+    }
+
+    let ecosystem = &state.orobit_ecosystem;
+    let contract = match ecosystem
+        .get_contract_by_address(ContractAddress(contract_addr))
+        .await
+    {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(8) as u32;
+    let scale = 10u128.pow(decimals);
 
     let stake_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
     let current_time = current_timestamp();
@@ -3036,7 +3177,7 @@ pub async fn claim_staking_rewards(
     }
 
     let tx_hash = format!("claim-{}-{}", hex::encode(contract_addr), current_time);
-    let rewards_f64 = pending_rewards as f64 / 1e24;
+    let rewards_f64 = pending_rewards as f64 / scale as f64;
 
     tracing::info!("✅ [STAKING] {} claimed {} in rewards", q_log_privacy::mask_addr(&request.wallet_address), q_log_privacy::mask_amt_display(rewards_f64));
 
@@ -3044,13 +3185,13 @@ pub async fn claim_staking_rewards(
         success: true,
         transaction_hash: tx_hash,
         stake_position: Some(StakePositionInfo {
-            amount: updated_stake.amount as f64 / 1e24,
+            amount: updated_stake.amount as f64 / scale as f64,
             tier: updated_stake.tier.name().to_string(),
             apy: updated_stake.tier.apy_bps() as f64 / 100.0,
             start_time: updated_stake.start_time,
             unlock_time: updated_stake.unlock_time,
             pending_rewards: 0.0,
-            total_rewards_claimed: updated_stake.total_rewards_claimed as f64 / 1e24,
+            total_rewards_claimed: updated_stake.total_rewards_claimed as f64 / scale as f64,
             is_locked: current_time < updated_stake.unlock_time,
             time_remaining_seconds: updated_stake.unlock_time.saturating_sub(current_time),
         }),
@@ -3071,14 +3212,15 @@ pub async fn get_stake_info(
     match staking_store.get(&stake_key) {
         Some(stake) => {
             let pending_rewards = calculate_pending_rewards_internal(stake);
+            let scale = stake_display_scale(&state, &contract_address).await;
             Ok(Json(ApiResponse::success(StakePositionInfo {
-                amount: stake.amount as f64 / 1e24,
+                amount: stake.amount as f64 / scale,
                 tier: stake.tier.name().to_string(),
                 apy: stake.tier.apy_bps() as f64 / 100.0,
                 start_time: stake.start_time,
                 unlock_time: stake.unlock_time,
-                pending_rewards: pending_rewards as f64 / 1e24,
-                total_rewards_claimed: stake.total_rewards_claimed as f64 / 1e24,
+                pending_rewards: pending_rewards as f64 / scale,
+                total_rewards_claimed: stake.total_rewards_claimed as f64 / scale,
                 is_locked: current_time < stake.unlock_time,
                 time_remaining_seconds: stake.unlock_time.saturating_sub(current_time),
             })))
@@ -3099,10 +3241,173 @@ pub async fn get_pending_rewards(
     match staking_store.get(&stake_key) {
         Some(stake) => {
             let pending_rewards = calculate_pending_rewards_internal(stake);
-            Ok(Json(ApiResponse::success(pending_rewards as f64 / 1e24)))
+            let scale = stake_display_scale(&state, &contract_address).await;
+            Ok(Json(ApiResponse::success(pending_rewards as f64 / scale)))
         }
         None => Ok(Json(ApiResponse::success(0.0))),
     }
+}
+
+/// Shared decimals-lookup for the two read-only staking display endpoints above.
+/// Falls back to 1e24 (not 1e8) if the contract can't be found — 24-decimal is the
+/// overwhelmingly common case among custom tokens on this chain, so that fallback
+/// is closer to "right" for a display-only value than under-scaling would be.
+async fn stake_display_scale(state: &Arc<AppState>, contract_address: &str) -> f64 {
+    match parse_address(contract_address) {
+        Ok(addr) => match state.orobit_ecosystem.get_contract_by_address(ContractAddress(addr)).await {
+            Some(c) => {
+                let decimals = c.deployment_params
+                    .get("decimals")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+                    .unwrap_or(24) as u32;
+                10u128.pow(decimals) as f64
+            }
+            None => 1e24,
+        },
+        Err(_) => 1e24,
+    }
+}
+
+/// v10.11.101 AUTO-STAKE — read-only status for a wallet's automatic holder
+/// yield on a token. Public (no auth): computing "what would this wallet earn"
+/// reveals nothing sensitive and mutates nothing, same posture as
+/// get_stake_info/get_pending_rewards above. If the wallet has no checkpoint
+/// yet (never claimed, possibly never even queried before), this SIMULATES
+/// what a fresh checkpoint would look like — starting now, at their current
+/// balance — without persisting anything, so a read never has side effects.
+pub async fn get_auto_stake_status(
+    State(state): State<Arc<AppState>>,
+    Path((contract_address, wallet_address)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_addr = match parse_address(&wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+
+    let contract = match state.orobit_ecosystem.get_contract_by_address(ContractAddress(contract_addr)).await {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+    let staking_declared = contract.metadata.features.get("staking").copied().unwrap_or(false);
+    if !staking_declared {
+        return Ok(Json(ApiResponse::error("This token does not declare staking support".to_string())));
+    }
+
+    let scale = stake_display_scale(&state, &contract_address).await;
+    let now = current_timestamp();
+    let checkpoint_key = format!("{}:{}", wallet_address.to_lowercase(), contract_address.to_lowercase());
+
+    let token_balances = state.token_balances.read().await;
+    let current_balance = token_balances.get(&(wallet_addr, contract_addr)).copied().unwrap_or(0);
+    drop(token_balances);
+
+    let checkpoints = state.token_auto_stake_checkpoints.read().await;
+    let (balance_at_checkpoint, checkpoint_time, pending, has_checkpoint) = match checkpoints.get(&checkpoint_key) {
+        Some(cp) => (cp.balance_at_checkpoint, cp.checkpoint_time, cp.pending_reward(now), true),
+        None => (current_balance, now, 0u128, false),
+    };
+    drop(checkpoints);
+
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "has_checkpoint": has_checkpoint,
+        "current_balance": current_balance as f64 / scale,
+        "balance_at_checkpoint": balance_at_checkpoint as f64 / scale,
+        "checkpoint_time": checkpoint_time,
+        "pending_reward": pending as f64 / scale,
+        "apy_percent": q_storage::AUTO_STAKE_APY_BPS as f64 / 100.0,
+    }))))
+}
+
+/// v10.11.101 AUTO-STAKE — realize (mint into balance) whatever's accrued
+/// since the last checkpoint, then reset the checkpoint to the NEW balance
+/// and now. Requires proof of wallet ownership (this credits real balance).
+/// First call for a wallet just starts the clock (pending=0) rather than
+/// retroactively crediting time held before the feature/first-query existed.
+pub async fn claim_auto_stake_reward(
+    auth_wallet: AuthenticatedWallet,
+    State(state): State<Arc<AppState>>,
+    Path(contract_address): Path<String>,
+    Json(request): Json<StakeRequest>,
+) -> Result<Json<ApiResponse<StakeResponse>>, StatusCode> {
+    let contract_addr = match parse_address(&contract_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    let wallet_addr = match parse_address(&request.wallet_address) {
+        Ok(addr) => addr,
+        Err(e) => return Ok(Json(ApiResponse::error(e))),
+    };
+    if wallet_addr != auth_wallet.address {
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: you are authenticated as {} but the request is for {}. \
+            You can only claim auto-stake rewards for your own wallet.",
+            hex::encode(&auth_wallet.address),
+            request.wallet_address
+        ))));
+    }
+
+    let contract = match state.orobit_ecosystem.get_contract_by_address(ContractAddress(contract_addr)).await {
+        Some(c) => c,
+        None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
+    };
+    if !contract.metadata.features.get("staking").copied().unwrap_or(false) {
+        return Ok(Json(ApiResponse::error("This token does not declare staking support".to_string())));
+    }
+    let scale = stake_display_scale(&state, &contract_address).await;
+    let now = current_timestamp();
+    let checkpoint_key = format!("{}:{}", request.wallet_address.to_lowercase(), contract_address.to_lowercase());
+    let balance_key = (wallet_addr, contract_addr);
+
+    let mut checkpoints = state.token_auto_stake_checkpoints.write().await;
+    let pending = match checkpoints.get(&checkpoint_key) {
+        Some(cp) => cp.pending_reward(now),
+        None => 0u128, // first-ever checkpoint: nothing accrued yet, just starts the clock
+    };
+
+    let mut token_balances = state.token_balances.write().await;
+    let current_balance = token_balances.get(&balance_key).copied().unwrap_or(0);
+    let new_balance = current_balance.saturating_add(pending);
+    if pending > 0 {
+        token_balances.insert(balance_key, new_balance);
+    }
+    drop(token_balances);
+
+    let new_checkpoint = q_storage::AutoStakeCheckpoint {
+        balance_at_checkpoint: new_balance,
+        checkpoint_time: now,
+    };
+    checkpoints.insert(checkpoint_key.clone(), new_checkpoint);
+    drop(checkpoints);
+
+    if pending > 0 {
+        if let Err(e) = state.storage_engine.save_token_balance(&wallet_addr, &contract_addr, new_balance).await {
+            tracing::warn!("Failed to persist auto-stake claim balance: {}", e);
+        }
+    }
+    if let Err(e) = state.storage_engine.save_auto_stake_checkpoint(&checkpoint_key, &new_checkpoint).await {
+        tracing::warn!("Failed to persist auto-stake checkpoint: {}", e);
+    }
+
+    let claimed_f64 = pending as f64 / scale;
+    tracing::info!(
+        "🌱 [AUTO-STAKE] {} claimed {} auto-stake reward on {}",
+        q_log_privacy::mask_addr(&request.wallet_address), claimed_f64, q_log_privacy::mask_addr(&contract_address)
+    );
+
+    Ok(Json(ApiResponse::success(StakeResponse {
+        success: true,
+        transaction_hash: format!("auto-stake-claim-{}-{}", hex::encode(contract_addr), now),
+        stake_position: None,
+        message: if pending > 0 {
+            format!("Claimed {} in auto-stake rewards", claimed_f64)
+        } else {
+            "Auto-stake started — you'll begin earning from now".to_string()
+        },
+    })))
 }
 
 /// Get fee configuration for a token
@@ -3120,6 +3425,7 @@ pub async fn get_fee_config(
 
 /// Update fee configuration (owner only)
 pub async fn update_fee_config(
+    auth_wallet: AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Path(contract_address): Path<String>,
     Json(request): Json<UpdateFeeConfigRequest>,
@@ -3137,6 +3443,27 @@ pub async fn update_fee_config(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+
+    // SECURITY FIX (2026-08-16, same class as the stake_tokens/unstake_tokens/
+    // claim_staking_rewards bug fixed earlier today): this endpoint used to trust
+    // `wallet_address` straight from the JSON body with no cryptographic proof —
+    // anyone who knew a contract's deployer address could POST a fee-config change
+    // "as" that owner, including turning on reflection fees that redirect value
+    // away from other holders. Require the caller to prove they control the
+    // address they're claiming, same AuthenticatedWallet pattern used elsewhere.
+    if wallet_addr != auth_wallet.address {
+        tracing::warn!(
+            "🚫 [FEES] Authentication mismatch: authenticated as {} but request claims {}",
+            hex::encode(&auth_wallet.address),
+            hex::encode(wallet_addr)
+        );
+        return Ok(Json(ApiResponse::error(format!(
+            "Authentication mismatch: you are authenticated as {} but the request is for {}. \
+            You can only update fee config as the wallet you're signed in as.",
+            hex::encode(&auth_wallet.address),
+            request.wallet_address
+        ))));
+    }
 
     // Check if caller is contract owner
     let ecosystem = &state.orobit_ecosystem;
@@ -3264,12 +3591,22 @@ pub async fn get_token_stats(
     let total_reflected = reflection_store.get(&contract_address.to_lowercase()).copied().unwrap_or(0);
     drop(reflection_store);
 
+    // Use the contract's REAL decimals for total_supply/total_staked so this
+    // matches whatever scale stake_tokens/unstake_tokens/claim_staking_rewards
+    // actually stored the amount in (previously a blanket /1e24 regardless of
+    // the token's real decimals).
+    let decimals = contract.deployment_params
+        .get("decimals")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(8) as u32;
+    let scale = 10u128.pow(decimals) as f64;
+
     Ok(Json(ApiResponse::success(TokenStatsResponse {
         contract_address,
         symbol,
-        total_supply: (total_supply + total_staked) as f64 / 1e24,
-        circulating_supply: total_supply as f64 / 1e24,
-        total_staked: total_staked as f64 / 1e24,
+        total_supply: (total_supply + total_staked) as f64 / scale,
+        circulating_supply: total_supply as f64 / scale,
+        total_staked: total_staked as f64 / scale,
         total_burned: total_burned as f64 / 1e24,
         total_reflected: total_reflected as f64 / 1e24,
         holder_count,

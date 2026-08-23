@@ -1028,8 +1028,7 @@ impl QStorage {
                 _ => 0,
             };
             if current_pointer < initial_height {
-                let height_bytes = initial_height.to_be_bytes();
-                if let Err(e) = storage.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes).await {
+                if let Err(e) = storage.advance_qblock_latest_pointer(initial_height).await {
                     warn!(
                         "⚠️ [POINTER-HEAL] Failed to heal qblock:latest {} → {}: {} (sync may stall)",
                         current_pointer, initial_height, e
@@ -2046,11 +2045,9 @@ impl QStorage {
                     warn!("⚠️ [v1.1.9] WAL flush before pointer update failed: {} (continuing anyway)", e);
                 }
 
-                // Update the height pointer in database
-                // v8.2.8: Use put_sync to ensure durability — sled on Windows loses
-                // unsynced writes on crash, causing height regression to 0.
-                let latest_height_bytes = scan_height.to_be_bytes().to_vec();
-                self.hot_db.put_sync(CF_BLOCKS, b"qblock:latest", &latest_height_bytes).await
+                // Update the height pointer in database (guarded, monotonic-forward-only,
+                // keeps height_cache in sync — see advance_qblock_latest_pointer doc comment)
+                self.advance_qblock_latest_pointer(scan_height).await
                     .context("Failed to update height pointer after turbo scan")?;
 
                 // 🚨 v1.1.9: FIX 2 - FLUSH AFTER POINTER UPDATE
@@ -2288,6 +2285,48 @@ impl QStorage {
             }
         }
         Ok((from, to))
+    }
+
+    /// 2026-08-18: SINGLE GUARDED WRITER for the `qblock:latest` pointer.
+    ///
+    /// Before this, `qblock:latest` had 20+ independent write sites scattered
+    /// across the codebase (this file, transaction.rs, turbo_sync.rs,
+    /// block_writer.rs, integrity.rs, safe_batched_writer.rs,
+    /// pointer_integrity.rs, main.rs), most without a monotonic-forward guard
+    /// and none of them syncing `height_cache` (the separate in-memory tracker
+    /// that `/api/v1/engine/pulse` and most diagnostics actually read). Live
+    /// reproduction on a fresh-node sync test: the rigorous, gap-verified
+    /// pointer (advanced only by `advance_contiguous_tip`/`tick_contiguity_advance`)
+    /// got reset backward by some other writer every ~60-70s, producing an
+    /// infinite advance/reset loop that never let a fresh node finish syncing
+    /// — while `height_cache` independently raced 14.5M+ blocks ahead of it,
+    /// having bypassed gap-verification entirely.
+    ///
+    /// ALL writers of `qblock:latest` should call this instead of writing the
+    /// key directly. It is safe to call from inside an already-open
+    /// transaction/batch context too (pass `existing_current` to avoid a
+    /// redundant read when the caller already has a verified current value).
+    ///
+    /// Returns `Ok(true)` if the pointer actually advanced, `Ok(false)` if
+    /// `candidate_height` was not strictly greater than the current value
+    /// (a safe no-op, not an error — callers should not treat this as a
+    /// failure).
+    pub async fn advance_qblock_latest_pointer(&self, candidate_height: u64) -> Result<bool> {
+        let current = self.get_latest_qblock_height().await?.unwrap_or(0);
+        if candidate_height <= current {
+            return Ok(false);
+        }
+        let height_bytes = candidate_height.to_be_bytes();
+        self.hot_db
+            .put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes)
+            .await?;
+        self.hot_db
+            .put_sync(CF_BLOCKS, b"qblock:contiguous_verified", &height_bytes)
+            .await?;
+        if candidate_height > self.height_cache.cached() {
+            self.height_cache.update(candidate_height).await;
+        }
+        Ok(true)
     }
 
     /// Get QBlock by height
@@ -2764,9 +2803,28 @@ impl QStorage {
                     .map_err(|e| anyhow::anyhow!("{}", e))
             };
 
-            if let Ok(block) = deser_result {
-                seen_heights.insert(height);
-                blocks.push(block);
+            match deser_result {
+                Ok(block) => {
+                    seen_heights.insert(height);
+                    blocks.push(block);
+                }
+                // v10.11.104-beta PROPOSED FIX (NOT yet deployed): this used to silently
+                // drop a present-but-undeserializable entry, making it indistinguishable
+                // from a genuinely-missing key to every caller — including the block-pack
+                // "empty forward-seek → declare a permanent gap" heuristic in
+                // unified_network_manager.rs, which then confidently reports real (if
+                // transiently unreadable) blocks as gone forever. Log loudly so a decode
+                // hiccup under load is visible instead of silently masquerading as data
+                // loss; still returns the block as absent from this call (unchanged
+                // behavior/signature) since the caller has no way to retry mid-scan.
+                Err(e) => {
+                    warn!(
+                        "⚠️  [WARP SYNC] Entry at height {} present but failed to deserialize ({}) — \
+                         treating as absent for this scan, but this is NOT confirmed proof the block \
+                         is missing. Do not let this alone justify a permanent-gap declaration.",
+                        height, e
+                    );
+                }
             }
         }
 
@@ -3421,18 +3479,38 @@ impl QStorage {
             if cached_height == CHECKPOINT_HEIGHT && self.is_checkpoint_applied().await {
                 // Skip verification — checkpoint legitimately establishes state at this height.
             } else {
-                // Verify cached height block actually exists
-                let height_key = format!("qblock:height:{}", cached_height);
-                if let Ok(None) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
-                    // 🚨 Cache desync detected!
-                    error!("🚨 [v1.1.9] CACHE DESYNC: Cached height {} but block doesn't exist!", cached_height);
+                // 2026-08-18: read the RIGOROUS, gap-verified pointer FIRST. height_cache is
+                // legitimately allowed to run ahead of it during active bulk/turbo sync (other
+                // writers advance it optimistically, without walking every intermediate height)
+                // — that is normal in-progress sync, not corruption. Treating "no block yet at
+                // the optimistic cache height" as corruption and destructively repairing
+                // qblock:latest (via repair_pointer_to_contiguous, which has NO forward guard
+                // and can reset the pointer far backward) was causing a live, reproducible
+                // infinite loop on fresh-node sync tests: tick_contiguity_advance() would
+                // correctly walk the pointer forward, only for THIS check to immediately reset
+                // it backward again the next time this fired, because cached_height (racing
+                // ahead independently) didn't have a block at its own optimistic height yet.
+                // Only treat it as real corruption when the missing block is AT OR BEHIND the
+                // already-verified pointer — i.e. a hole inside the range we already trust.
+                let verified_pointer = self.get_latest_qblock_height().await?.unwrap_or(0);
+                if cached_height <= verified_pointer {
+                    // Verify cached height block actually exists
+                    let height_key = format!("qblock:height:{}", cached_height);
+                    if let Ok(None) = self.hot_db.get(CF_BLOCKS, height_key.as_bytes()).await {
+                        // 🚨 Cache desync detected — genuine: the hole is inside the verified range.
+                        error!("🚨 [v1.1.9] CACHE DESYNC: Cached height {} but block doesn't exist!", cached_height);
 
-                    // Repair by scanning backwards
-                    let repaired = self.repair_pointer_to_contiguous(cached_height).await?;
-                    self.height_cache.update(repaired).await;
-                    warn!("✅ [v1.1.9] Cache repaired: {} → {}", cached_height, repaired);
-                    return Ok(repaired);
+                        // Repair by scanning backwards
+                        let repaired = self.repair_pointer_to_contiguous(cached_height).await?;
+                        self.height_cache.update(repaired).await;
+                        warn!("✅ [v1.1.9] Cache repaired: {} → {}", cached_height, repaired);
+                        return Ok(repaired);
+                    }
                 }
+                // else: cached_height > verified_pointer — cache is simply ahead of the
+                // rigorous pointer (normal during sync). Fall through to the desync check
+                // below, which non-destructively pulls the cache back down to the verified
+                // pointer instead of repairing (lowering) the pointer itself.
             }
 
             // Also verify the database pointer matches cache
@@ -4252,8 +4330,7 @@ impl QStorage {
             if self.hot_db.get(CF_BLOCKS, block_key.as_bytes()).await?.is_some() {
                 info!("🔧 [v1.1.7-beta] AUTO-REPAIR: Updating qblock:latest pointer {} → {}",
                       latest_height, highest_contiguous);
-                let height_bytes = highest_contiguous.to_be_bytes();
-                self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height_bytes).await
+                self.advance_qblock_latest_pointer(highest_contiguous).await
                     .context("Failed to auto-repair height pointer")?;
                 info!("✅ [v1.1.7-beta] Pointer repaired! P2P can now serve blocks up to {}", highest_contiguous);
             } else {
@@ -4307,8 +4384,7 @@ impl QStorage {
             warn!("🔧 [HEIGHT RECOVERY] Repairing height pointer...");
 
             // Update the height pointer to actual highest block
-            let height_bytes = actual_height.to_be_bytes();
-            self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height_bytes).await
+            self.advance_qblock_latest_pointer(actual_height).await
                 .context("Failed to update height pointer")?;
 
             info!("✅ [HEIGHT RECOVERY] Height pointer repaired: {} → {}",
@@ -4551,6 +4627,7 @@ impl QStorage {
                     let height_bytes = repair_height.to_be_bytes();
                     self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height_bytes).await
                         .context("Failed to auto-repair pointer")?;
+                    self.height_cache.force_set(repair_height).await;
                     info!("✅ [AUTO-REPAIR] Database pointer fixed! Now at height {}", repair_height);
                     Ok(())
                 } else {
@@ -11315,31 +11392,35 @@ impl QStorage {
         token_address: &[u8; 32],
         timestamp_ms: i64,
     ) -> Result<Option<(i64, f64)>> {
+        // v10.11.104-beta PROPOSED FIX (NOT yet deployed — see review notes): this used to call
+        // scan_prefix(), which loads up to 100,000 price-history entries for this token into
+        // memory and then linear-scans them — every call, even though only ONE record is ever
+        // needed. Measured live 2026-08-21: ~3.5s per call for native QUG (recorded very
+        // frequently), and get_price_changes() calls this 3x sequentially (1h/24h/7d), making
+        // the whole `/api/v1/defi/oracle/price/QUG%2FUSD` endpoint take a consistent ~10.7s —
+        // this is why DEX prices appeared to never load. CF_PRICE_HISTORY keys are
+        // token(32B) ++ inverted_timestamp(8B) and RocksDB keeps keys sorted, so the wanted
+        // record — "first entry with inverted_ts >= our target" — is one direct seek away.
         let inverted_ts = i64::MAX - timestamp_ms;
 
-        // Scan records for this token
-        let records = self.hot_db.scan_prefix(CF_PRICE_HISTORY, token_address).await?;
+        let mut seek_key = Vec::with_capacity(40);
+        seek_key.extend_from_slice(token_address);
+        seek_key.extend_from_slice(&inverted_ts.to_be_bytes());
 
-        for (key, value) in records {
-            // Check key length and prefix
-            if key.len() < 40 || &key[..32] != token_address {
-                continue;
+        let found = self
+            .hot_db
+            .seek_first_with_prefix(CF_PRICE_HISTORY, &seek_key, token_address)
+            .await?;
+
+        match found {
+            Some((key, value)) if key.len() >= 40 && value.len() >= 8 => {
+                let key_inverted = i64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
+                let ts = i64::MAX - key_inverted;
+                let price = f64::from_le_bytes(value[0..8].try_into().unwrap_or([0u8; 8]));
+                Ok(Some((ts, price)))
             }
-
-            let key_inverted = i64::from_be_bytes(key[32..40].try_into().unwrap_or([0u8; 8]));
-
-            // We want the first record where inverted_ts >= key_inverted
-            // (meaning timestamp <= requested timestamp)
-            if key_inverted >= inverted_ts {
-                if value.len() >= 8 {
-                    let ts = i64::MAX - key_inverted;
-                    let price = f64::from_le_bytes(value[0..8].try_into().unwrap_or([0u8; 8]));
-                    return Ok(Some((ts, price)));
-                }
-            }
+            _ => Ok(None),
         }
-
-        Ok(None)
     }
 
     // ========================================================================
@@ -12350,8 +12431,11 @@ impl mainnet_safety::CheckpointStorage for QStorage {
             self.hot_db.delete(CF_BLOCKS, height_key.as_bytes()).await?;
         }
 
-        // Update the height pointer
+        // Update the height pointer. Deliberate downward move (truncation) — does NOT go
+        // through advance_qblock_latest_pointer's forward-only guard, but MUST update
+        // height_cache too, or the cache would keep claiming blocks that were just deleted.
         self.hot_db.put(CF_BLOCKS, b"qblock:latest", &height.to_be_bytes()).await?;
+        self.height_cache.force_set(height).await;
 
         info!("✅ [TRUNCATE] Successfully truncated to height {}", height);
         Ok(())
@@ -12441,6 +12525,7 @@ impl mainnet_safety::IntegrityCheckable for QStorage {
     async fn fix_pointer(&self, correct_height: u64) -> Result<()> {
         warn!("🔧 [FIX] Repairing pointer from current to {}", correct_height);
         self.hot_db.put(CF_BLOCKS, b"qblock:latest", &correct_height.to_be_bytes()).await?;
+        self.height_cache.force_set(correct_height).await;
         info!("✅ [FIX] Pointer successfully repaired to {}", correct_height);
         Ok(())
     }
