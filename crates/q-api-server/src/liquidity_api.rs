@@ -749,6 +749,36 @@ pub async fn add_liquidity(
     // v10.2.1: Track native QUG balance changes for persistence (fixes deductions lost on restart)
     let mut native_qug_balance_change: Option<([u8; 32], u128)> = None;
 
+    // ── PRE-READS: taken BEFORE any write lock (v10.11.102, 2026-08-23) ──────────────
+    //
+    // POST /api/v1/liquidity/add was returning HTTP 408 on every QUGUSD pair. Two defects:
+    //
+    // 1. DEADLOCK. The block below takes `token_balances.write()`, and the QUGUSD branches
+    //    then took `token_balances.read()` on the SAME lock in the SAME task. Tokio's
+    //    RwLock is not reentrant, so the request hung until the client timed out at 15s.
+    //    Deterministic: reproduced twice, identical failure, pool unchanged both times.
+    //
+    // 2. RocksDB I/O UNDER LOCK. `get_balance()` was awaited while BOTH global balance
+    //    write locks were held, stalling readers and the block producer behind disk I/O.
+    //    Same pattern v10.11.22 removed from state_sync_api ("blocking readers and
+    //    producers for 60-100s"); liquidity_api never got that fix.
+    //
+    // Remedy is v10.11.22's: read with NO lock held, then mutate briefly under lock.
+    let pre_storage_balance = state
+        .storage_engine
+        .get_balance(&hex::encode(provider))
+        .await
+        .unwrap_or(0);
+    let pre_minted_qugusd = {
+        let vault = state.collateral_vault.read().await;
+        vault.minted_qugusd.get(&provider).copied().unwrap_or(0)
+    };
+    let pre_swapped_qugusd = {
+        let tb = state.token_balances.read().await;
+        let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // "QUGUSD"
+        tb.get(&(provider, qugusd_addr)).copied().unwrap_or(0)
+    };
+
     // Deduct balances
     {
         let mut wallet_balances = state.wallet_balances.write().await;
@@ -759,11 +789,8 @@ pub async fn add_liquidity(
             // v3.6.4-beta: CRITICAL FIX - Read balance from storage_engine (authoritative source)
             // The in-memory wallet_balances HashMap was stale, causing "insufficient balance" errors
             // even when user had funds (dashboard showed 4.85 QUG but liquidity showed 0.21 QUG)
-            let storage_balance = state
-                .storage_engine
-                .get_balance(&hex::encode(provider))
-                .await
-                .unwrap_or(0);
+            // Hoisted above the locks — see PRE-READS.
+            let storage_balance = pre_storage_balance;
 
             // Sync in-memory cache with storage
             let balance = wallet_balances.entry(provider).or_insert(storage_balance);
@@ -808,15 +835,13 @@ pub async fn add_liquidity(
         } else if is_qugusd_token0 {
             // v2.6.1-beta: Deduct QUGUSD stablecoin for token0
             // QUGUSD balance = minted (from vault) + received (from swaps/transfers)
-            let minted_qugusd = {
-                let vault = state.collateral_vault.read().await;
-                vault.minted_qugusd.get(&provider).copied().unwrap_or(0)
-            };
-            let swapped_qugusd = {
-                let token_balances_read = state.token_balances.read().await;
-                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // "QUGUSD" padded
-                token_balances_read.get(&(provider, qugusd_addr)).copied().unwrap_or(0)
-            };
+            // DEADLOCK REMOVED (v10.11.102): these read `collateral_vault` and
+            // `token_balances` while this task ALREADY held `token_balances.write()`
+            // from the top of the block. Tokio's RwLock is not reentrant, so the task
+            // blocked forever and the client got HTTP 408 at its 15s timeout.
+            // Both values are now read before any write lock is taken (see PRE-READS).
+            let minted_qugusd = pre_minted_qugusd;
+            let swapped_qugusd = pre_swapped_qugusd;
             // v2.7.9-beta: Cast to u128 for larger token supplies
             let total_qugusd = minted_qugusd as u128 + swapped_qugusd;
 
@@ -1038,11 +1063,8 @@ pub async fn add_liquidity(
         // Deduct token1 (native QUG, native QUGUSD, or token)
         if is_native_token1 {
             // v3.6.4-beta: CRITICAL FIX - Read balance from storage_engine (authoritative source)
-            let storage_balance = state
-                .storage_engine
-                .get_balance(&hex::encode(provider))
-                .await
-                .unwrap_or(0);
+            // Hoisted above the locks — see PRE-READS.
+            let storage_balance = pre_storage_balance;
 
             // Sync in-memory cache with storage
             let balance = wallet_balances.entry(provider).or_insert(storage_balance);
@@ -1083,15 +1105,13 @@ pub async fn add_liquidity(
         } else if is_qugusd_token1 {
             // v2.6.1-beta: Deduct QUGUSD stablecoin
             // QUGUSD balance = minted (from vault) + received (from swaps/transfers)
-            let minted_qugusd = {
-                let vault = state.collateral_vault.read().await;
-                vault.minted_qugusd.get(&provider).copied().unwrap_or(0) as u128
-            };
-            let swapped_qugusd = {
-                let token_balances = state.token_balances.read().await;
-                let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // "QUGUSD" padded
-                token_balances.get(&(provider, qugusd_addr)).copied().unwrap_or(0)
-            };
+            // DEADLOCK REMOVED (v10.11.102): these read `collateral_vault` and
+            // `token_balances` while this task ALREADY held `token_balances.write()`
+            // from the top of the block. Tokio's RwLock is not reentrant, so the task
+            // blocked forever and the client got HTTP 408 at its 15s timeout.
+            // Both values are now read before any write lock is taken (see PRE-READS).
+            let minted_qugusd = pre_minted_qugusd as u128;
+            let swapped_qugusd = pre_swapped_qugusd;
             let total_qugusd = minted_qugusd + swapped_qugusd;
 
             if total_qugusd < request.amount1 as u128 {
