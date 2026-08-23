@@ -5608,8 +5608,11 @@ impl QStorage {
                 if let Ok(Some(value)) = db.get_cf(&cf, &cf_key) {
                     // State sync storage: check for 16-byte u128 first, then 8-byte u64
                     if value.len() >= 16 {
-                        // New u128 format (big-endian for state sync consistency)
-                        let amount = u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
+                        // 2026-08-22: was from_be_bytes — the ONLY writer of CF_TOKEN_BALANCES
+                        // (StateApplicator::apply_balance_credit/debit, state_applicator.rs)
+                        // uses to_le_bytes(); the mismatched BE read silently byte-swapped every
+                        // value here into astronomically wrong amounts.
+                        let amount = u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]));
                         if amount > 0 {
                             debug!(
                                 "🪙 Found token balance in state sync storage (u128): wallet={}, token={}, amount={}",
@@ -5620,8 +5623,8 @@ impl QStorage {
                             return Ok(amount);
                         }
                     } else if value.len() >= 8 {
-                        // Legacy u64 format (big-endian)
-                        let amount = u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
+                        // Legacy u64 format — see the matching LE-fix note above.
+                        let amount = u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128;
                         if amount > 0 {
                             debug!(
                                 "🪙 Found token balance in state sync storage (legacy u64): wallet={}, token={}, amount={}",
@@ -5718,11 +5721,12 @@ impl QStorage {
                             wallet_address.copy_from_slice(&key[0..32]);
                             token_address.copy_from_slice(&key[32..64]);
 
-                            // State sync stores as big-endian: check 16-byte u128 first, then 8-byte u64
+                            // 2026-08-22: was from_be_bytes — see the LE-fix note in get_token_balance's
+                            // CF_TOKEN_BALANCES fallback above; the only writer uses LE.
                             let amount = if value.len() >= 16 {
-                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                                u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
                             } else {
-                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                                u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
                             };
 
                             // v8.5.3: Only insert if NOT already in CF_MANIFEST (manifest is authoritative)
@@ -5828,10 +5832,12 @@ impl QStorage {
                             if token_address == q_types::QUGUSD_TOKEN_ADDRESS {
                                 continue; // NEVER load QUGUSD from state sync CF
                             }
+                            // 2026-08-22: was from_be_bytes — see the LE-fix note in
+                            // get_token_balance's CF_TOKEN_BALANCES fallback; the only writer uses LE.
                             let amount = if value.len() >= 16 {
-                                u128::from_be_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
+                                u128::from_le_bytes(value[..16].try_into().unwrap_or([0u8; 16]))
                             } else {
-                                u64::from_be_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
+                                u64::from_le_bytes(value[..8].try_into().unwrap_or([0u8; 8])) as u128
                             };
                             if !balances.contains_key(&token_address) && amount > 0 {
                                 balances.insert(token_address, amount);
@@ -11073,6 +11079,165 @@ impl QStorage {
 
         info!("✅ [DEX ADJUST v10.3.1] Applied adjustments to {} of {} DEX wallets", adjusted, all_wallets.len());
         Ok(adjusted)
+    }
+
+    /// 2026-08-22: Export the DEX QUG debit/credit counters for state-sync propagation.
+    ///
+    /// WHY THIS EXISTS: the counters above solve "a balance rebuild on THIS node loses
+    /// DEX effects, because DEX swaps are not blockchain transactions" — but they are
+    /// node-local, so they solve nothing for a DIFFERENT node syncing from scratch.
+    /// A fresh node replays only blocks, never sees the DEX debits/credits, and ends up
+    /// with permanently-too-high balances (measured: 43,706 QUG across 1,073 wallets vs
+    /// the authoritative node). The only cross-node reconciliation path (state-sync
+    /// merge) is max-wins, so a too-high balance can never be corrected downward and the
+    /// divergence is permanent rather than self-healing.
+    ///
+    /// Exporting these lets a fresh node feed its own (already idempotent)
+    /// `apply_dex_qug_adjustments()` and converge on the authoritative balances.
+    ///
+    /// NOTE: deliberately does NOT export `dex_applied_net:` — that tracks what the
+    /// LOCAL node has already applied and is the idempotency guard. Importing a peer's
+    /// applied-net would make the importing node believe adjustments were already
+    /// applied locally when they were not, silently skipping them.
+    ///
+    /// Returns (debited, credited), each wallet_hex -> decimal-string u128.
+    pub async fn export_dex_qug_counters(
+        &self,
+    ) -> Result<(HashMap<String, String>, HashMap<String, String>)> {
+        let mut debited = HashMap::new();
+        let mut credited = HashMap::new();
+
+        for (key, value) in self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_debited:").await? {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_debited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        debited.insert(wallet_hex, amount.to_string());
+                    }
+                }
+            }
+        }
+
+        for (key, value) in self.hot_db.scan_prefix(CF_MANIFEST, b"dex_qug_credited:").await? {
+            if let Ok(key_str) = String::from_utf8(key) {
+                let wallet_hex = key_str.trim_start_matches("dex_qug_credited:").to_string();
+                if value.len() == 16 && !wallet_hex.is_empty() {
+                    let amount = u128::from_le_bytes(value[..16].try_into().unwrap());
+                    if amount > 0 {
+                        credited.insert(wallet_hex, amount.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok((debited, credited))
+    }
+
+    /// 2026-08-22: Import peer-provided DEX QUG counters (see `export_dex_qug_counters`).
+    ///
+    /// Max-wins per counter: these are CUMULATIVE monotonic totals, so a higher value is
+    /// strictly newer information and a lower one is a stale snapshot. This keeps the
+    /// import safe against out-of-order/older peer snapshots — it can never walk a
+    /// counter backwards and thereby re-credit an already-applied debit.
+    ///
+    /// Does NOT touch balances directly; `apply_dex_qug_adjustments()` (idempotent, via
+    /// the `dex_applied_net:` tracker) does that on the next startup pass.
+    ///
+    /// Returns the number of counter entries actually advanced.
+    pub async fn import_dex_qug_counters(
+        &self,
+        debited: &HashMap<String, String>,
+        credited: &HashMap<String, String>,
+    ) -> Result<u64> {
+        let mut written = 0u64;
+        let mut batch: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+
+        for (prefix, src) in [
+            ("dex_qug_debited:", debited),
+            ("dex_qug_credited:", credited),
+        ] {
+            for (wallet_hex, amount_str) in src.iter() {
+                // Only accept well-formed 32-byte hex wallet ids — never let a peer
+                // inject arbitrary manifest keys through this path.
+                if wallet_hex.len() != 64 || hex::decode(wallet_hex).map(|b| b.len() != 32).unwrap_or(true) {
+                    continue;
+                }
+                let incoming: u128 = match amount_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if incoming == 0 {
+                    continue;
+                }
+                let key = format!("{}{}", prefix, wallet_hex);
+                let current = match self.hot_db.get(CF_MANIFEST, key.as_bytes()).await? {
+                    Some(bytes) if bytes.len() == 16 => {
+                        u128::from_le_bytes(bytes[..16].try_into().unwrap())
+                    }
+                    _ => 0u128,
+                };
+                if incoming > current {
+                    batch.push((CF_MANIFEST, key.into_bytes(), incoming.to_le_bytes().to_vec()));
+                    written += 1;
+                }
+            }
+        }
+
+        if !batch.is_empty() {
+            self.hot_db.write_batch(batch).await?;
+            info!(
+                "🔄 [DEX ADJUST] Imported {} DEX QUG counter entries from peer state-sync \
+                 (apply_dex_qug_adjustments will reconcile balances)",
+                written
+            );
+        }
+
+        Ok(written)
+    }
+
+    /// 2026-08-22: Persist a producer endorsement that the CALLER has already
+    /// verified (see `ProducerEndorsement::verify`). Storage does not re-check
+    /// signatures; it is a dumb store. Keyed by subject, so re-receiving the
+    /// same endorsement is idempotent.
+    pub async fn save_producer_endorsement(
+        &self,
+        endorsement: &q_types::producer_endorsement::ProducerEndorsement,
+    ) -> Result<()> {
+        let key = format!(
+            "producer_endorsement:{}",
+            hex::encode(endorsement.subject_node_id)
+        );
+        let value = serde_json::to_vec(endorsement)
+            .context("failed to serialize producer endorsement")?;
+        self.hot_db.put(CF_MANIFEST, key.as_bytes(), &value).await?;
+        info!(
+            "🔐 [PRODUCER ENROLL] Persisted endorsement for producer {}… (endorsed by {}…)",
+            hex::encode(&endorsement.subject_node_id[..8]),
+            hex::encode(&endorsement.endorser_node_id[..8])
+        );
+        Ok(())
+    }
+
+    /// 2026-08-22: Load all persisted producer endorsements.
+    ///
+    /// The caller MUST re-verify each one against its trusted set at load time —
+    /// an endorsement is never trusted merely because it is on local disk.
+    pub async fn load_producer_endorsements(
+        &self,
+    ) -> Result<Vec<q_types::producer_endorsement::ProducerEndorsement>> {
+        let mut out = Vec::new();
+        for (_key, value) in self
+            .hot_db
+            .scan_prefix(CF_MANIFEST, b"producer_endorsement:")
+            .await?
+        {
+            match serde_json::from_slice::<q_types::producer_endorsement::ProducerEndorsement>(&value) {
+                Ok(e) => out.push(e),
+                Err(e) => warn!("⚠️ [PRODUCER ENROLL] Skipping unparseable stored endorsement: {}", e),
+            }
+        }
+        Ok(out)
     }
 
     /// One-time migration: Retroactively compute DEX QUG adjustment counters
