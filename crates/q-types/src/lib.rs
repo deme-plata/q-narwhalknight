@@ -3122,73 +3122,36 @@ impl Transaction {
     /// Dilithium5 provides 256-bit post-quantum security
     /// Signature size: 4,627 bytes, Public key size: 2,592 bytes
     fn verify_dilithium5_signature(&self) -> Result<(), String> {
-        use pqcrypto_dilithium::dilithium5;
-        use pqcrypto_traits::sign::PublicKey as PQPublicKey;
-        use pqcrypto_traits::sign::DetachedSignature;
-
-        // Dilithium5 signature size constant
-        const DILITHIUM5_SIG_SIZE: usize = 4627;
-        const DILITHIUM5_PK_SIZE: usize = 2592;
-
         let pqc_sig = self.pqc_signature.as_ref()
             .ok_or_else(|| "Dilithium5 signature missing for PQC transaction".to_string())?;
-
         let pqc_pk = self.pqc_public_key.as_ref()
             .ok_or_else(|| "Dilithium5 public key missing for PQC transaction".to_string())?;
 
-        // Validate signature size
-        if pqc_sig.len() != DILITHIUM5_SIG_SIZE {
-            return Err(format!(
-                "Invalid Dilithium5 signature length: expected {} bytes, got {}",
-                DILITHIUM5_SIG_SIZE, pqc_sig.len()
-            ));
-        }
-
-        // Validate public key size
-        if pqc_pk.len() != DILITHIUM5_PK_SIZE {
-            return Err(format!(
-                "Invalid Dilithium5 public key length: expected {} bytes, got {}",
-                DILITHIUM5_PK_SIZE, pqc_pk.len()
-            ));
-        }
-
-        // Parse public key
-        let public_key = dilithium5::PublicKey::from_bytes(pqc_pk)
-            .map_err(|_| "Failed to parse Dilithium5 public key".to_string())?;
-
-        // Parse signature
-        let signature = dilithium5::DetachedSignature::from_bytes(pqc_sig)
-            .map_err(|_| "Failed to parse Dilithium5 signature".to_string())?;
-
-        // 2026-08-15 FIX: was `self.hash()` — SHA3-256 of the ENTIRE postcard-serialized
-        // transaction, including the server-assigned `id` and the already-attached
-        // Ed25519 `signature`. No client can compute that in advance (postcard is a
-        // Rust-specific binary format, and `id` doesn't exist until the server builds
-        // the tx), so no wallet could ever produce a signature this function would
-        // accept — the hybrid-signing feature was unusable end-to-end. Ed25519
-        // verification already uses `p2p_signable_hash()` (a small, well-documented,
-        // client-computable digest — see `build_p2p_signable_payload()` a few lines up,
-        // which `gui/quantum-wallet/src/services/walletAuth.ts`'s `signTransferV72`
-        // already replicates byte-for-byte in JS). Both signatures in a hybrid tx
-        // should cover the same canonical message anyway — that's the point of hybrid
-        // signing — so verify against the same hash Ed25519 uses.
+        // 2026-08-15 FIX: verify over `p2p_signable_hash()` — the same small, client-computable
+        // digest Ed25519 uses — not `self.hash()` (which no client can compute in advance).
+        //
+        // 2026-09-02 FIX: verify as ML-DSA-87 per FIPS 204 FINAL first, then as the 2023 draft
+        // this crate's `pqcrypto-dilithium 0.5.0` implements. Same sizes, incompatible outputs:
+        // every real client signs the final standard, so until today every hybrid transaction
+        // failed here with a bare "verification failed" and no hint why. See
+        // `signature_verification::verify_tx_pq_signature` for the full story.
         let tx_hash = self.p2p_signable_hash();
-
-        // Verify signature using pqcrypto-dilithium
-        match dilithium5::verify_detached_signature(&signature, &tx_hash, &public_key) {
-            Ok(()) => {
+        match crate::signature_verification::verify_tx_pq_signature(pqc_sig, pqc_pk, &tx_hash) {
+            Ok(variant) => {
                 tracing::debug!(
-                    "✅ [DILITHIUM5] Signature verified for tx {}",
+                    "✅ [PQ-SIG] {:?} signature verified for tx {}",
+                    variant,
                     hex::encode(&self.id[..8])
                 );
                 Ok(())
             }
-            Err(_) => {
+            Err(e) => {
                 tracing::warn!(
-                    "🚫 [DILITHIUM5] Signature verification FAILED for tx {}",
-                    hex::encode(&self.id[..8])
+                    "🚫 [PQ-SIG] verification FAILED for tx {}: {}",
+                    hex::encode(&self.id[..8]),
+                    e
                 );
-                Err("Dilithium5 signature verification failed".to_string())
+                Err(format!("Dilithium5 signature verification failed: {e}"))
             }
         }
     }
