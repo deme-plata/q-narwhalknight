@@ -15,6 +15,86 @@ use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{PublicKey as PQPublicKey, SignedMessage};
 use sha3::{Digest, Sha3_256};
 
+/// Which post-quantum verifier accepted a transaction signature — see
+/// [`verify_tx_pq_signature`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PqVariant {
+    /// FIPS 204 as published (August 2024) — `fips204::ml_dsa_87`.
+    MlDsa87Final,
+    /// FIPS 204 initial public draft (2023) — PQClean `dilithium5` via `pqcrypto-dilithium 0.5`.
+    Dilithium5Draft,
+}
+
+/// ML-DSA-87 public key and signature sizes. IDENTICAL for the draft and the final standard,
+/// which is exactly why the mismatch was invisible: every length check passed and only the
+/// verification itself failed.
+pub const MLDSA87_PK_BYTES: usize = 2592;
+pub const MLDSA87_SIG_BYTES: usize = 4627;
+
+/// The per-TRANSACTION post-quantum check: ML-DSA-87 (FIPS 204 FINAL) or draft Dilithium5.
+///
+/// Two verifiers, one message, accept either:
+///
+/// 1. `fips204::ml_dsa_87` — FIPS 204 as published. This is what real clients produce: the
+///    wallet MCP signs with `@noble/post-quantum`'s `ml_dsa87` (verified against a live
+///    noble 0.4.1 vector in this module's tests). Context string is empty.
+/// 2. `pqcrypto_dilithium::dilithium5` (PQClean, crate 0.5.0) — the FIPS 204 *initial public
+///    draft*. Same 2,592-byte key, same 4,627-byte signature, but the draft hashed a 32-byte
+///    `tr` and no domain prefix, so draft and final never verify each other's output. Kept so
+///    anything that verified before 2026-09-02 still verifies.
+///
+/// This is only the PQ half of a hybrid: Ed25519 over the same digest is verified separately
+/// and is always required. Accepting a second PQ format therefore only WIDENS acceptance of
+/// transactions that carry a PQ signature; no historical transaction validates differently.
+pub fn verify_tx_pq_signature(
+    sig: &[u8],
+    pk: &[u8],
+    msg: &[u8],
+) -> std::result::Result<PqVariant, String> {
+    if sig.len() != MLDSA87_SIG_BYTES {
+        return Err(format!(
+            "Invalid ML-DSA-87/Dilithium5 signature length: expected {} bytes, got {}",
+            MLDSA87_SIG_BYTES,
+            sig.len()
+        ));
+    }
+    if pk.len() != MLDSA87_PK_BYTES {
+        return Err(format!(
+            "Invalid ML-DSA-87/Dilithium5 public key length: expected {} bytes, got {}",
+            MLDSA87_PK_BYTES,
+            pk.len()
+        ));
+    }
+
+    // 1. FIPS 204 final.
+    {
+        use fips204::traits::{SerDes, Verifier};
+        let pk_arr: [u8; MLDSA87_PK_BYTES] = pk.try_into().expect("length checked above");
+        let sig_arr: [u8; MLDSA87_SIG_BYTES] = sig.try_into().expect("length checked above");
+        if let Ok(pk_final) = fips204::ml_dsa_87::PublicKey::try_from_bytes(pk_arr) {
+            if pk_final.verify(msg, &sig_arr, &[]) {
+                return Ok(PqVariant::MlDsa87Final);
+            }
+        }
+    }
+
+    // 2. Draft (legacy).
+    {
+        use pqcrypto_traits::sign::DetachedSignature;
+        let pk_draft = dilithium5::PublicKey::from_bytes(pk)
+            .map_err(|_| "Failed to parse Dilithium5 public key".to_string())?;
+        let sig_draft = dilithium5::DetachedSignature::from_bytes(sig)
+            .map_err(|_| "Failed to parse Dilithium5 signature".to_string())?;
+        if dilithium5::verify_detached_signature(&sig_draft, msg, &pk_draft).is_ok() {
+            return Ok(PqVariant::Dilithium5Draft);
+        }
+    }
+
+    Err("post-quantum signature verifies as neither ML-DSA-87 (FIPS 204 final) nor draft \
+         Dilithium5 over the transaction's p2p_signable_hash"
+        .to_string())
+}
+
 /// Verify a spectral signature based on its crypto phase
 ///
 /// # Arguments
@@ -507,6 +587,53 @@ pub fn verify_block_signature(
 // so the whole module is gated to match.
 #[cfg(all(test, feature = "signing"))]
 mod tests {
+    /// Interop vector: key + signature produced by `@noble/post-quantum` 0.4.1 `ml_dsa87`
+    /// (FIPS 204 final, empty ctx) over a 32-byte SHA3 digest — exactly what the wallet MCP
+    /// attaches to a hybrid send. Generated 2026-09-02 (seed 0x07×32).
+    const NOBLE_MLDSA87_VECTOR: &str =
+        include_str!("../tests/vectors/mldsa87_noble_post_quantum_0.4.1.json");
+
+    fn noble_vector() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let v: serde_json::Value = serde_json::from_str(NOBLE_MLDSA87_VECTOR).unwrap();
+        let h = |k: &str| hex::decode(v[k].as_str().unwrap()).unwrap();
+        (h("pk"), h("msg"), h("sig"))
+    }
+
+    /// THE INTEROP GATE: a signature made by the standard's FINAL version, by the exact JS
+    /// library the wallet tool uses, is accepted by the node — and attributed to the final
+    /// verifier, not the draft one.
+    #[test]
+    fn noble_ml_dsa_87_final_signature_verifies() {
+        let (pk, msg, sig) = noble_vector();
+        assert_eq!(
+            super::verify_tx_pq_signature(&sig, &pk, &msg),
+            Ok(super::PqVariant::MlDsa87Final)
+        );
+    }
+
+    /// The draft verifier alone must NOT accept it — this is the exact mismatch that made
+    /// every hybrid send fail on 2026-09-02, pinned so it cannot silently come back.
+    #[test]
+    fn draft_verifier_rejects_the_final_signature() {
+        use pqcrypto_traits::sign::DetachedSignature;
+        let (pk, msg, sig) = noble_vector();
+        let pk_d = super::dilithium5::PublicKey::from_bytes(&pk).unwrap();
+        let sig_d = super::dilithium5::DetachedSignature::from_bytes(&sig).unwrap();
+        assert!(super::dilithium5::verify_detached_signature(&sig_d, &msg, &pk_d).is_err());
+    }
+
+    #[test]
+    fn tampered_or_wrong_message_pq_signature_is_rejected() {
+        let (pk, msg, sig) = noble_vector();
+        let mut bad_sig = sig.clone();
+        bad_sig[100] ^= 1;
+        assert!(super::verify_tx_pq_signature(&bad_sig, &pk, &msg).is_err());
+        let mut bad_msg = msg.clone();
+        bad_msg[0] ^= 1;
+        assert!(super::verify_tx_pq_signature(&sig, &pk, &bad_msg).is_err());
+        assert!(super::verify_tx_pq_signature(&sig[..4595], &pk, &msg).is_err(), "round-3 size must be refused");
+        assert!(super::verify_tx_pq_signature(&sig, &pk[..2591], &msg).is_err());
+    }
     use super::*;
     use ed25519_dalek::SigningKey;
 
