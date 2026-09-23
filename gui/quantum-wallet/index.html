@@ -34,32 +34,38 @@
     })();
     </script>
     <script>
-    /* ADAPTIVE FIT-TO-WIDTH ZOOM — makes the whole UI fit the viewport at the
-       user's 100% browser zoom (no more manual zoom-out to 50%). Applies a CSS
-       `zoom` on the #root APP CONTAINER (NOT <html>) scaled to viewport width.
-       Zooming #root (not <html>) is critical: modals portal to <body> and use
-       position:fixed — a `zoom` on <html>/<body> becomes their containing block
-       and mis-positions every modal/dropdown. Keeping the zoom on #root lets the
-       body-level portals stay unzoomed and position against the real viewport.
-       Reversible: delete this block. Tune DESIGN_WIDTH if too big (raise)/small (lower).
-       rocky 2026-07-02, modal-fix 2026-07-06 */
-    (function(){
-      var DESIGN_WIDTH = 3840; /* the width the full-size (zoom 1) layout is drawn for */
-      var MIN = 0.4;           /* never shrink below this */
-      var MOBILE = 820;        /* below this, let the app's own mobile layout run */
-      function fit(){
-        var el = document.getElementById('root'); if (!el) return;
-        var w = window.innerWidth;
-        if (w < MOBILE) { el.style.zoom = ''; return; }
-        el.style.zoom = Math.max(MIN, Math.min(1, w / DESIGN_WIDTH));
-      }
-      window.addEventListener('resize', fit, { passive: true });
-      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fit); else fit();
-    })();
+    /* ADAPTIVE FIT-TO-WIDTH ZOOM — RETIRED 2026-09-23.
+       It applied a CSS `zoom` to #root scaled to viewport/3840, to make a layout
+       believed to be drawn for 4K fit a smaller screen. Measured on the live site
+       before removing it: at zoom 1.0 the app's content width equals the viewport
+       exactly at 1280, 1366, 1440, 1600, 1920 and 2560 — zero horizontal overflow
+       at any of them. The layout is already responsive; there was no 4K layout to
+       rescue.
+
+       What the zoom actually did was change the EFFECTIVE CSS viewport: at 0.40 the
+       layout believed the screen was 3600 px, laid itself out for that, and was then
+       scaled down to 40 %. A 16 px label rendered as 6.4 px on a 1440 laptop.
+
+       It also split the UI into two scales, because body-level portals (every modal
+       in components/ uses createPortal) escape a #root zoom and render at real
+       pixels. App chrome at 0.40, modals at 1.00, on the same screen.
+
+       Reinstate by restoring index.html from
+       sigil-scratch/index.html.bak-prezoom-* if a genuinely fixed-width screen
+       ever needs it. rocky 2026-07-02, retired 2026-09-23 */
     </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Quillon Bank lending launch banner (dismissible) — served from dist root /bank-banner.js. rocky 2026-08-31 -->
+    <script src="/bank-banner.js"></script>
+    <!-- #137 light column — one pulse per Quillon Graph block, CSPRNG-jittered off
+         cadence (EMSEC P3). Served from the dist root. Was live in dist-final but
+         MISSING here, so a rebuild would have dropped it. rocky 2026-09-06 -->
+    <script src="/beacon-137.js"></script>
+    <!-- Quillon Graph Skyskraber — live 3D miniature linking to /skyskraber.html.
+         Dismissible; lazy; desktop only. rocky 2026-09-06 -->
+    <script src="/skyskraber-frontpage.js"></script>
   </body>
 </html>
