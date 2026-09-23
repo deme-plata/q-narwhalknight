@@ -7,6 +7,7 @@
 // signal-and-fill, the way Claude Code shows compaction progress.
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import QuantumChamberCanvas from './QuantumChamberCanvas';
 
 const POLL_INTERVAL_MS = 1000;          // /api/v1/status fetch cadence
@@ -196,7 +197,7 @@ export default function BlockStreamBar({ className = '', compact = false }: Bloc
 
       {/* ── The chamber, on hover ── fixed-position so no ancestor's overflow
            or stacking context can clip it out of a top bar. */}
-      {chamberOpen && anchor && (
+      {chamberOpen && anchor && createPortal((
         <div
           onMouseEnter={() => window.clearTimeout(closeTimer.current)}
           onMouseLeave={closeChamber}
@@ -207,10 +208,11 @@ export default function BlockStreamBar({ className = '', compact = false }: Bloc
             width: CHAMBER_W,
             zIndex: 9999,
             borderRadius: 14,
-            background: 'rgba(10,8,20,0.94)',
-            border: '1px solid rgba(168,134,255,0.34)',
-            boxShadow: '0 18px 60px rgba(0,0,0,0.65)',
-            backdropFilter: 'blur(10px)',
+            background: 'rgba(10,8,20,0.72)',
+            border: '1px solid rgba(168,134,255,0.30)',
+            boxShadow: '0 18px 60px rgba(0,0,0,0.55)',
+            backdropFilter: 'blur(18px) saturate(1.25)',
+            WebkitBackdropFilter: 'blur(18px) saturate(1.25)',
             animation: 'bsb-chamber-in 180ms ease-out',
           }}
         >
@@ -223,7 +225,7 @@ export default function BlockStreamBar({ className = '', compact = false }: Bloc
               left: Math.min(Math.max(anchor.x - Math.min(Math.max(anchor.x - CHAMBER_W / 2, 12),
                      Math.max(12, window.innerWidth - CHAMBER_W - 12)) - 7, 14), CHAMBER_W - 28),
               width: 14, height: 14, transform: 'rotate(45deg)',
-              background: 'rgba(10,8,20,0.94)',
+              background: 'rgba(10,8,20,0.72)',
               borderLeft: '1px solid rgba(168,134,255,0.34)',
               borderTop: '1px solid rgba(168,134,255,0.34)',
             }}
@@ -250,13 +252,36 @@ export default function BlockStreamBar({ className = '', compact = false }: Bloc
             />
           </div>
 
-          <div style={{ padding: '7px 13px 9px', fontSize: 10, letterSpacing: 0.4,
-                        color: 'rgba(233,231,255,0.5)', borderTop: '1px solid rgba(168,134,255,0.13)' }}>
-            <span style={{ color: '#ffd76b' }}>●</span>{' '}
-            live — all four effects on. Settings › Visual to configure.
+          {/* Plain-language legend. Each line describes what that effect actually
+              draws, and the last line says what the whole thing is NOT. */}
+          <div style={{ padding: '10px 14px 12px', borderTop: '1px solid rgba(168,134,255,0.13)' }}>
+            {([
+              ['#8b5cf6', 'Interference web',
+               'Two waves crossing make a pattern that is in neither of them alone. Send light through two slits and it lands in stripes — this is that.'],
+              ['#22d3ee', 'Photon rain',
+               'Light arrives in countable lumps, not a smooth stream. Every falling streak is one of them.'],
+              ['#ffd76b', 'Entangled pairs',
+               'Two particles can share a single state. Measure one and the other\u2019s answer is settled, however far apart they are. The line between them is that shared state — not a signal travelling.'],
+              ['#f0abfc', 'Wave and particle',
+               'The same thing behaves as a spread-out wave or a hard little object depending on what you ask it. The shapes morph because neither picture is the whole answer.'],
+            ] as const).map(([c, t, d]) => (
+              <div key={t} style={{ display: 'flex', gap: 9, marginBottom: 7, alignItems: 'flex-start' }}>
+                <span style={{ width: 7, height: 7, borderRadius: 7, background: c, marginTop: 6, flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: '#e9e7ff' }}>{t}</div>
+                  <div style={{ fontSize: 11, lineHeight: 1.5, color: 'rgba(233,231,255,0.62)' }}>{d}</div>
+                </div>
+              </div>
+            ))}
+            <div style={{ fontSize: 10.5, lineHeight: 1.55, color: 'rgba(233,231,255,0.42)',
+                          borderTop: '1px solid rgba(168,134,255,0.10)', paddingTop: 8, marginTop: 3 }}>
+              None of this is measured from the chain. It is an illustration of the ideas the
+              network is named after — the block height above is the only live number on screen.
+              Settings › Visual turns the four effects on and off.
+            </div>
           </div>
         </div>
-      )}
+      ), document.body)}
 
       <style>{`
         @keyframes bsb-chamber-in {
