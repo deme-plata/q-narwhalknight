@@ -746,6 +746,9 @@ pub async fn add_liquidity(
 
     // Track which token balances changed for persistence
     let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new(); // (wallet, token, new_balance)
+    // v10.11.106d: set when a minted-QUGUSD debit touches the collateral vault, so the vault
+    // is persisted below (it is reloaded from RocksDB at startup; an unsaved debit resurrects).
+    let mut vault_touched = false;
     // v10.2.1: Track native QUG balance changes for persistence (fixes deductions lost on restart)
     let mut native_qug_balance_change: Option<([u8; 32], u128)> = None;
 
@@ -863,6 +866,7 @@ pub async fn add_liquidity(
                 let mut vault = state.collateral_vault.write().await;
                 if let Some(bal) = vault.minted_qugusd.get_mut(&provider) {
                     *bal = bal.saturating_sub(deduct_from_minted);
+                    vault_touched = true;
                 }
                 remaining -= deduct_from_minted;
                 tracing::info!(
@@ -873,8 +877,14 @@ pub async fn add_liquidity(
             }
             if remaining > 0 {
                 let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+                // v10.11.106d: PERSIST the debit. A periodic task (main.rs "v8.7.4 REVERSED
+                // DIRECTION") overwrites in-memory token_balances from RocksDB every 15 s, so an
+                // unpersisted debit is silently undone and the QUGUSD that entered the pool is
+                // minted from nothing. Measured live 2026-09-28 on 106c: pool +2,974.98 QUGUSD,
+                // provider's QUGUSD unchanged, QUG side debited normally.
                 if let Some(bal) = token_balances.get_mut(&(provider, qugusd_addr)) {
                     *bal = bal.saturating_sub(remaining as u128);
+                    token_balance_changes.push((provider, qugusd_addr, *bal));
                 }
                 tracing::info!(
                     "💸 Deducted {} QUGUSD (swapped) from {} for token0 liquidity",
@@ -1132,6 +1142,7 @@ pub async fn add_liquidity(
                 let mut vault = state.collateral_vault.write().await;
                 if let Some(bal) = vault.minted_qugusd.get_mut(&provider) {
                     *bal = bal.saturating_sub(deduct_from_minted);
+                    vault_touched = true;
                 }
                 remaining -= deduct_from_minted;
                 tracing::info!(
@@ -1151,6 +1162,8 @@ pub async fn add_liquidity(
                 let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 if let Some(bal) = token_balances.get_mut(&(provider, qugusd_addr)) {
                     *bal = bal.saturating_sub(remaining);
+                    // v10.11.106d: persist, or the 15 s RocksDB refresh reverts it (see token0 branch).
+                    token_balance_changes.push((provider, qugusd_addr, *bal));
                 }
                 tracing::info!(
                     "💸 Deducted {} QUGUSD (swapped) from {} for liquidity",
@@ -1235,6 +1248,19 @@ pub async fn add_liquidity(
             .await
         {
             tracing::warn!("Failed to persist token balance after liquidity: {}", e);
+        }
+    }
+
+    // v10.11.106d: persist the collateral vault if a minted-QUGUSD debit touched it.
+    if vault_touched {
+        let vault_clone = state.collateral_vault.read().await.clone();
+        match bincode::serialize(&vault_clone) {
+            Ok(bytes) => {
+                if let Err(e) = state.storage_engine.save_collateral_vault_data(&bytes).await {
+                    tracing::warn!("⚠️ Failed to persist CollateralVault after liquidity add: {}", e);
+                }
+            }
+            Err(e) => tracing::warn!("⚠️ Failed to serialize CollateralVault after liquidity add: {}", e),
         }
     }
 
