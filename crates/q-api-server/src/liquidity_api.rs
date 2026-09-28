@@ -1141,7 +1141,13 @@ pub async fn add_liquidity(
                 );
             }
             if remaining > 0 {
-                let mut token_balances = state.token_balances.write().await;
+                // v10.11.106c: DO NOT re-lock. This task already holds `token_balances.write()`
+                // from the top of the "Deduct balances" block; a second `.write().await` on the
+                // same tokio RwLock never resolves. v10.11.102 removed the two READS but missed
+                // this WRITE, so every QUG/QUGUSD add whose QUGUSD came from transfers/swaps
+                // (remaining > 0) hung until the 30 s TimeoutLayer dropped it -- AFTER the QUG
+                // side had already been debited (and its DEX debit counter persisted).
+                // Measured live 2026-09-28: 1 QUG debited, pool unchanged, HTTP 408.
                 let qugusd_addr = [0x51, 0x55, 0x47, 0x55, 0x53, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 if let Some(bal) = token_balances.get_mut(&(provider, qugusd_addr)) {
                     *bal = bal.saturating_sub(remaining);
