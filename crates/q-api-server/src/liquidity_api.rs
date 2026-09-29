@@ -20,6 +20,13 @@ use std::sync::Arc;
 use q_storage::BalanceStorage; // v3.6.4-beta: For storage_engine.get_balance()
 use q_vm::contracts::orobit_smart_contracts::ContractAddress; // v3.2.17-beta: For contract lookup
 
+/// v10.11.106g: add_liquidity and remove_liquidity take turns, one at a time. Serialising them is the
+/// simplest way to make "read LP balance → pay → burn" impossible to interleave; liquidity changes
+/// are rare, so the queue costs nothing measurable. Taken FIRST, before any state lock, and by
+/// nothing else — so it can never become part of a lock cycle.
+static LIQUIDITY_MUTATION: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+
 /// v3.2.20-beta: Improved deserializer for u128 that preserves precision
 /// Handles:
 /// - Plain integers (u64, u128)
@@ -723,6 +730,9 @@ pub async fn add_liquidity(
             "Signed wallet does not match provider: you can only add your own liquidity".to_string(),
         )));
     }
+
+    // v10.11.106g: one liquidity change at a time (see LIQUIDITY_MUTATION).
+    let _liquidity_turn = LIQUIDITY_MUTATION.lock().await;
 
     // Validate amounts
     if request.amount0 == 0 || request.amount1 == 0 {
@@ -1531,6 +1541,10 @@ pub async fn add_liquidity(
                 }
             }
 
+            // v10.11.106g: the pool was saved above under its lock; release it before token_balances.
+            // execute_swap holds token_balances and then asks for liquidity_pools — both here = deadlock.
+            drop(pools);
+
             // Credit LP tokens to provider + save metadata
             if lp_tokens > 0 {
                 let lp_token_addr = generate_lp_token_address(&new_pool_id);
@@ -1613,6 +1627,10 @@ pub async fn add_liquidity(
                 tracing::info!("💾 Persisted new liquidity pool: {}", new_pool_id);
             }
         }
+
+        // v10.11.106g: the pool was saved above under its lock; release it before token_balances.
+        // execute_swap holds token_balances and then asks for liquidity_pools — both here = deadlock.
+        drop(pools);
 
         // Credit LP tokens to provider + save metadata
         if lp_tokens > 0 {
@@ -1859,7 +1877,14 @@ pub async fn remove_liquidity(
         )));
     }
 
-    // Get the pool
+    // v10.11.106g: one liquidity change at a time. Before this, two removes sent together read the
+    // same LP balance and pool snapshot, both paid out, and the second burn vanished into
+    // saturating_sub: N parallel requests from one holder were paid N times — by the other LPs.
+    // (A signed X-Wallet-Auth header stays valid for 5 minutes, so one signature served them all.)
+    let _liquidity_turn = LIQUIDITY_MUTATION.lock().await;
+
+    // The pool's token identities, for address resolution. Amounts are NOT taken from this
+    // snapshot: they are computed below from the live reserves, under the pool lock.
     let pool = {
         let pools = state.liquidity_pools.read().await;
         match pools.get(&request.pool_id) {
@@ -1867,45 +1892,7 @@ pub async fn remove_liquidity(
             None => return Ok(Json(ApiResponse::error("Pool not found".to_string()))),
         }
     };
-
-    // Check user has LP tokens for this pool (replaces old provider-only ownership check)
     let lp_token_addr = generate_lp_token_address(&request.pool_id);
-    let user_lp_balance = {
-        let token_balances = state.token_balances.read().await;
-        token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0u128)
-    };
-
-    if user_lp_balance == 0 {
-        return Ok(Json(ApiResponse::error(
-            "You have no LP tokens for this pool. Add liquidity first.".to_string(),
-        )));
-    }
-
-    // Calculate LP tokens to burn based on percentage of user's LP balance
-    let lp_to_burn = (user_lp_balance * request.percentage as u128) / 100;
-    if lp_to_burn == 0 {
-        return Ok(Json(ApiResponse::error(
-            "LP token amount to burn rounds to zero".to_string(),
-        )));
-    }
-
-    // Calculate proportional token amounts to return based on LP share of total supply
-    let total_lp_supply = pool.lp_token_supply;
-    if total_lp_supply == 0 {
-        return Ok(Json(ApiResponse::error(
-            "Pool has zero LP token supply".to_string(),
-        )));
-    }
-    // v10.11.106e: `reserve * lp_to_burn` wrapped u128 in release (r1 ~3e31 x LP ~1e28) and paid
-    // out garbage. Exact 256-bit floor; refuse rather than pay a wrong amount.
-    let (Some(amount0_to_return), Some(amount1_to_return)) = (
-        mul_div_exact(pool.reserve0, lp_to_burn, total_lp_supply),
-        mul_div_exact(pool.reserve1, lp_to_burn, total_lp_supply),
-    ) else {
-        return Ok(Json(ApiResponse::error(
-            "Withdrawal amount could not be computed exactly; nothing was changed".to_string(),
-        )));
-    };
 
     // Check if tokens are native QUG or custom tokens
     let is_native_token0 =
@@ -1953,6 +1940,106 @@ pub async fn remove_liquidity(
         [0u8; 32]
     };
 
+    // v10.11.106g STEP 1 — burn first, from the balance read under the same lock. Nothing is paid
+    // until the LP is gone, so the same LP can never be withdrawn twice.
+    let (lp_to_burn, lp_left) = {
+        let mut token_balances = state.token_balances.write().await;
+        let current_lp = token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0u128);
+        if current_lp == 0 {
+            return Ok(Json(ApiResponse::error(
+                "You have no LP tokens for this pool. Add liquidity first.".to_string(),
+            )));
+        }
+        // percentage is 1..=100, so the burn never exceeds the balance
+        let lp_to_burn = mul_div_exact(current_lp, request.percentage as u128, 100).unwrap_or(0);
+        if lp_to_burn == 0 {
+            return Ok(Json(ApiResponse::error(
+                "LP token amount to burn rounds to zero".to_string(),
+            )));
+        }
+        let lp_left = current_lp - lp_to_burn;
+        token_balances.insert((provider, lp_token_addr), lp_left);
+        (lp_to_burn, lp_left)
+    };
+    if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, lp_left).await {
+        tracing::error!(
+            "🚨 [LP-BURN] Failed to persist LP token burn for {} (pool {}, burned {}, remaining {}): {}",
+            hex::encode(&provider[..8]), request.pool_id, lp_to_burn, lp_left, e
+        );
+    }
+
+    // STEP 2 — take the share out of the LIVE pool, exactly, under the pool lock, and persist it
+    // before the lock is released so the disk never holds an older copy of this pool than memory.
+    let taken = {
+        let mut pools = state.liquidity_pools.write().await;
+        let share = match pools.get_mut(&request.pool_id) {
+            Some(p) if p.lp_token_supply > 0 && lp_to_burn <= p.lp_token_supply => {
+                match (
+                    mul_div_exact(p.reserve0, lp_to_burn, p.lp_token_supply),
+                    mul_div_exact(p.reserve1, lp_to_burn, p.lp_token_supply),
+                ) {
+                    (Some(a0), Some(a1)) if a0 <= p.reserve0 && a1 <= p.reserve1 => {
+                        p.reserve0 -= a0;
+                        p.reserve1 -= a1;
+                        p.lp_token_supply -= lp_to_burn;
+                        Some((a0, a1, p.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((_, _, ref after)) = share {
+            if after.lp_token_supply == 0 {
+                pools.remove(&request.pool_id);
+                if let Err(e) = state.storage_engine.delete_liquidity_pool(&request.pool_id).await {
+                    tracing::warn!("Failed to delete liquidity pool from storage: {}", e);
+                }
+                tracing::info!("🗑️ Removed liquidity pool {} (all LP tokens burned)", request.pool_id);
+            } else {
+                if let Ok(pool_data) = serde_json::to_vec(after) {
+                    if let Err(e) = state.storage_engine.save_liquidity_pool(&request.pool_id, &pool_data).await {
+                        tracing::warn!("Failed to persist updated liquidity pool after removal: {}", e);
+                    }
+                }
+                tracing::info!(
+                    "📉 Reduced liquidity pool {} reserves: {} / {} (LP supply {})",
+                    request.pool_id, after.reserve0, after.reserve1, after.lp_token_supply
+                );
+            }
+        }
+        share
+    };
+    let (amount0_to_return, amount1_to_return) = match taken {
+        Some((a0, a1, _)) => (a0, a1),
+        None => {
+            // The pool cannot pay this share exactly (gone, or its LP supply is smaller than the
+            // burn). Such a state must never be "fixed" by deleting the pool — give the LP back.
+            let restored = {
+                let mut token_balances = state.token_balances.write().await;
+                let cur = token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0u128);
+                let restored = cur.saturating_add(lp_to_burn);
+                token_balances.insert((provider, lp_token_addr), restored);
+                restored
+            };
+            if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, restored).await {
+                tracing::error!(
+                    "🚨 [LP-RESTORE] Failed to persist restored LP for {} (pool {}, amount {}): {}",
+                    hex::encode(&provider[..8]), request.pool_id, lp_to_burn, e
+                );
+            }
+            return Ok(Json(ApiResponse::error(
+                "The pool could not pay this share exactly; your LP tokens are unchanged".to_string(),
+            )));
+        }
+    };
+    tracing::info!(
+        "🔥 Burned {} LP from {} (pool {}, remaining {}), paying {} / {}",
+        lp_to_burn, hex::encode(&provider[..8]), request.pool_id, lp_left, amount0_to_return, amount1_to_return
+    );
+
+    // STEP 3 — pay. The last step: a crash before it is persisted costs this provider the
+    // withdrawal (logged above with the amounts), but can never create money.
     let mut token_balance_changes: Vec<([u8; 32], [u8; 32], u128)> = Vec::new();
     // v10.2.1: Track native QUG balance changes for persistence
     let mut native_qug_balance_change: Option<([u8; 32], u128)> = None;
@@ -2032,96 +2119,6 @@ pub async fn remove_liquidity(
     if let Some((addr, new_balance)) = native_qug_balance_change {
         if let Err(e) = state.storage_engine.save_wallet_balance_authoritative(&addr, new_balance).await {
             tracing::warn!("⚠️ Failed to persist QUG balance after liquidity removal: {}", e);
-        }
-    }
-
-    // Burn LP tokens from provider's balance
-    {
-        let mut token_balances = state.token_balances.write().await;
-        let current_lp = token_balances.get(&(provider, lp_token_addr)).copied().unwrap_or(0);
-        let new_lp_balance = current_lp.saturating_sub(lp_to_burn);
-        token_balances.insert((provider, lp_token_addr), new_lp_balance);
-        drop(token_balances);
-        if let Err(e) = state.storage_engine.save_token_balance(&provider, &lp_token_addr, new_lp_balance).await {
-            tracing::error!(
-                "🚨 [LP-BURN] Failed to persist LP token burn for {} (pool {}, burned {}, remaining {}): {} — a restart before this flushes will RESURRECT the already-withdrawn LP tokens, enabling a double-withdrawal",
-                hex::encode(&provider[..8]), request.pool_id, lp_to_burn, new_lp_balance, e
-            );
-        }
-        tracing::info!(
-            "🔥 Burned {} LP tokens from {} (pool {}, remaining: {})",
-            lp_to_burn, hex::encode(&provider[..8]), request.pool_id, new_lp_balance
-        );
-    }
-
-    // Update or remove pool
-    {
-        let mut pools = state.liquidity_pools.write().await;
-
-        // Check if pool should be fully removed: either user requested 100%
-        // or the LP supply will drop to zero after burning
-        let should_remove = {
-            if let Some(pool) = pools.get(&request.pool_id) {
-                pool.lp_token_supply <= lp_to_burn
-            } else {
-                false
-            }
-        };
-
-        if should_remove {
-            // Remove pool entirely
-            pools.remove(&request.pool_id);
-            tracing::info!(
-                "🗑️ Removed liquidity pool {} (all LP tokens burned)",
-                request.pool_id
-            );
-
-            // ✅ Delete pool from storage
-            drop(pools); // Release write lock before async I/O
-            if let Err(e) = state
-                .storage_engine
-                .delete_liquidity_pool(&request.pool_id)
-                .await
-            {
-                tracing::warn!("Failed to delete liquidity pool from storage: {}", e);
-            } else {
-                tracing::info!(
-                    "💾 Deleted liquidity pool from storage: {}",
-                    request.pool_id
-                );
-            }
-        } else {
-            // Update pool reserves and LP supply
-            if let Some(pool) = pools.get_mut(&request.pool_id) {
-                pool.reserve0 -= amount0_to_return;
-                pool.reserve1 -= amount1_to_return;
-                pool.lp_token_supply = pool.lp_token_supply.saturating_sub(lp_to_burn);
-                tracing::info!(
-                    "📉 Reduced liquidity pool {} reserves: {} / {}",
-                    request.pool_id,
-                    pool.reserve0,
-                    pool.reserve1
-                );
-
-                // ✅ Persist updated pool to storage
-                let pool_clone = pool.clone();
-                drop(pools); // Release write lock before async I/O
-
-                if let Ok(pool_data) = serde_json::to_vec(&pool_clone) {
-                    if let Err(e) = state
-                        .storage_engine
-                        .save_liquidity_pool(&request.pool_id, &pool_data)
-                        .await
-                    {
-                        tracing::warn!(
-                            "Failed to persist updated liquidity pool after removal: {}",
-                            e
-                        );
-                    } else {
-                        tracing::info!("💾 Persisted updated liquidity pool: {}", request.pool_id);
-                    }
-                }
-            }
         }
     }
 
