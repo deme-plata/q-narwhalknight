@@ -471,8 +471,13 @@ fn calculate_lp_tokens(
         (Some(r0), Some(r1), Some(supply)) if r0 > 0 && r1 > 0 && supply > 0 => {
             // Existing pool - proportional minting
             // Calculate how many LP tokens user should get based on each reserve
-            let liquidity0 = (amount0 * supply) / r0;
-            let liquidity1 = (amount1 * supply) / r1;
+            // v10.11.106d: overflow-safe. `amount1 * supply` in plain u128 wrapped silently in
+            // release builds (overflow-checks off): 29,998,656 QUGUSD (3.0e31 base) x supply 1.8e10
+            // = 5.4e41 > u128::MAX 3.4e38, and min() then picked the wrapped value. Measured live
+            // 2026-09-28: a 10,000 QUG + 29,998,656 QUGUSD add minted 515,620,365 LP instead of
+            // ~9.6e11 (3 % of the pool instead of ~98 %).
+            let liquidity0 = mul_div_u128(amount0, supply, r0);
+            let liquidity1 = mul_div_u128(amount1, supply, r1);
 
             // Use minimum to ensure user doesn't get more LP tokens than they should
             // This enforces the constant product invariant
@@ -491,13 +496,17 @@ fn calculate_lp_tokens(
             // v8.6.0: lowered from 1000 to 100 for easier pool bootstrapping
             const MINIMUM_LIQUIDITY: u128 = 100;
 
-            let product = amount0 * amount1;
-            // FIXED: Use integer sqrt instead of f64 to avoid precision loss
-            let sqrt_product = integer_sqrt(product);
+            // v10.11.106d: `amount0 * amount1` overflows u128 for ordinary 24-decimal amounts
+            // (1e28 x 3e31); fall back to sqrt(a)*sqrt(b) instead of wrapping silently.
+            let product = amount0.checked_mul(amount1);
+            let sqrt_product = match product {
+                Some(p) => integer_sqrt(p),
+                None => integer_sqrt(amount0).saturating_mul(integer_sqrt(amount1)),
+            };
             let lp_tokens = sqrt_product.saturating_sub(MINIMUM_LIQUIDITY);
 
             tracing::info!(
-                "📊 LP Token Calculation (New Pool): amount0={}, amount1={}, product={}, sqrt={} (integer), lp_tokens={} (after subtracting MINIMUM_LIQUIDITY={})",
+                "📊 LP Token Calculation (New Pool): amount0={}, amount1={}, product={:?}, sqrt={} (integer), lp_tokens={} (after subtracting MINIMUM_LIQUIDITY={})",
                 amount0, amount1, product, sqrt_product, lp_tokens, MINIMUM_LIQUIDITY
             );
 
@@ -2629,4 +2638,31 @@ pub async fn admin_reset_pool_reserves(
         "new_reserve1_display": request.new_reserve1 as f64 / 1e24,
         "status": "Pool reserves reset successfully"
     }))))
+}
+
+#[cfg(test)]
+mod lp_overflow_tests {
+    use super::calculate_lp_tokens;
+
+    /// The exact add that under-minted live on 2026-09-28 (v10.11.106c): pool 187.21 QUG /
+    /// 561,607.67 QUGUSD, LP supply ~1.8e10, adding 10,000 QUG + 29,998,656 QUGUSD.
+    #[test]
+    fn large_add_to_existing_pool_mints_proportionally() {
+        let e24: u128 = 1_000_000_000_000_000_000_000_000;
+        let r0 = 187_210_939_915_193_720_649_023_488u128;
+        let r1 = 561_607_665_345_581_228_742_401_851_392u128;
+        let supply = 18_091_000_000u128;
+        let minted = calculate_lp_tokens(10_000 * e24, 29_998_656 * e24, Some(r0), Some(r1), Some(supply));
+        // proportional share: 10,000 / 187.21 of the supply ~= 9.66e11
+        let expected = supply * 10_000 * e24 / r0;
+        assert!(minted > expected * 99 / 100 && minted <= expected, "minted {minted}, expected ~{expected}");
+    }
+
+    #[test]
+    fn new_pool_with_24_decimal_amounts_does_not_wrap() {
+        let e24: u128 = 1_000_000_000_000_000_000_000_000;
+        let minted = calculate_lp_tokens(10_000 * e24, 30_000_000 * e24, None, None, None);
+        // sqrt(1e28 * 3e31) = sqrt(3e59) ~= 5.48e29
+        assert!(minted > 5_400_000_000_000_000_000_000_000_000_000u128, "minted {minted}");
+    }
 }
