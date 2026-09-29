@@ -11071,18 +11071,18 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             );
 
                             // Update liquidity pool reserves
-                            let pool_data_opt = {
+                            let pool_data_opt: Option<Vec<u8>> = {
                                 let mut pools = app_state_gossip.liquidity_pools.write().await;
-                                if let Some(pool) = pools.get_mut(&swap.pool_id) {
-                                    pool.reserve0 = swap.new_reserve0;
-                                    pool.reserve1 = swap.new_reserve1;
+                                // v10.11.106e SECURITY: a gossiped SwapEvent is UNSIGNED and carries
+                                // absolute reserves, so writing them let any peer set any pool's
+                                // reserves (and, below, the vault price). Log only; reserves change
+                                // only through the local, wallet-authenticated swap/liquidity paths.
+                                if pools.get_mut(&swap.pool_id).is_some() {
                                     info!(
-                                        "✅ DEX pool {} synced: reserves {}/{}",
+                                        "ℹ️ DEX swap gossip for pool {} ignored (unsigned; reserves {}/{} not applied)",
                                         swap.pool_id, swap.new_reserve0, swap.new_reserve1
                                     );
-
-                                    // Serialize pool data before dropping lock
-                                    serde_json::to_vec(&*pool).ok()
+                                    None
                                 } else {
                                     warn!("DEX swap references unknown pool: {}", swap.pool_id);
                                     None
@@ -26175,7 +26175,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         ) // v1.4.5-beta: Fee estimation API
         // Quantum Privacy Mixer endpoints
         .route("/api/v1/mixer/join", post(handlers::join_mixing_pool)) // Join quantum privacy mixing pool
-        .route("/api/v1/mixer/settle", post(real_mixer_settle::mixer_settle)) // Real atomic LSAG-verified settlement
+        // v10.11.106e SECURITY: /api/v1/mixer/settle REMOVED. The ring came from the caller and nothing
+        // bound it to `sender`, so a ring of the attacker's own keys could debit any sender's QUG. Not wired
+        // to any client (see q-quantum-mixing settlement.rs). Re-mount only with AuthenticatedWallet == sender.
         .route(
             "/api/v1/mixer/send",
             post(handlers::send_private_transaction),
@@ -26904,10 +26906,33 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // v9.2.0: q-flux reverse proxy metrics (admin)
         .route("/api/v1/admin/flux/stats", get(q_api_server::deploy_admin_api::flux_stats))
         // v8.2.0: Admin-only balance rebuild from chain (deterministic balance consensus)
-        .route("/api/v1/admin/rebuild-balances", post(handlers::admin_rebuild_balances))
+        // SECURITY (v10.11.106e): these three rewrite or wipe balances and were "protected" by a
+        // string match on the PUBLIC admin/founder address in X-Wallet-Auth (rebuild, purge) or
+        // by a loopback check (reset-balance-replay) that every quillon.xyz request passes,
+        // because q-flux proxies from 127.0.0.1. All three now require the same AEGIS-QL
+        // founder signature as /admin/deploy and /admin/dev-fee.
+        .route(
+            "/api/v1/admin/rebuild-balances",
+            post(handlers::admin_rebuild_balances).layer(axum::middleware::from_fn_with_state(
+                app_state.aegis_auth_state.clone(),
+                aegis_auth_middleware::verify_founder_signature,
+            )),
+        )
         // v1.0.2 SYNC-006: Admin reset to force re-run of post-checkpoint balance replay
-        .route("/api/v1/admin/reset-balance-replay", post(handlers::admin_reset_balance_replay))
-        .route("/api/v1/admin/purge-phase-data", post(admin_purge_phase_data))
+        .route(
+            "/api/v1/admin/reset-balance-replay",
+            post(handlers::admin_reset_balance_replay).layer(axum::middleware::from_fn_with_state(
+                app_state.aegis_auth_state.clone(),
+                aegis_auth_middleware::verify_founder_signature,
+            )),
+        )
+        .route(
+            "/api/v1/admin/purge-phase-data",
+            post(admin_purge_phase_data).layer(axum::middleware::from_fn_with_state(
+                app_state.aegis_auth_state.clone(),
+                aegis_auth_middleware::verify_founder_signature,
+            )),
+        )
         // v7.3.0: Node operator admin settings (--admin-wallet)
         .route("/api/v1/admin/is-admin", get(q_api_server::admin_settings_api::is_admin))
         .route("/api/v1/admin/settings", get(q_api_server::admin_settings_api::admin_settings))

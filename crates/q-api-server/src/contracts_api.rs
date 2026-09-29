@@ -2119,6 +2119,7 @@ pub struct TokenOperationResponse {
 
 /// Mint tokens to the contract owner
 pub async fn mint_tokens(
+    auth_wallet: crate::wallet_auth::AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<MintRequest>,
 ) -> Result<Json<ApiResponse<TokenOperationResponse>>, StatusCode> {
@@ -2163,6 +2164,14 @@ pub async fn mint_tokens(
     {
         return Ok(Json(ApiResponse::error(
             "Contract does not support minting".to_string(),
+        )));
+    }
+
+    // v10.11.106e SECURITY: only the contract's deployer may mint (same rule as airdrop_tokens). This
+    // route had NO auth: anyone could mint unlimited supply of any mintable token, or burn a deployer's.
+    if contract.deployer != auth_wallet.address {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: only the contract deployer can mint this contract's tokens".to_string(),
         )));
     }
 
@@ -2235,6 +2244,7 @@ pub async fn mint_tokens(
 
 /// Burn tokens from the contract owner
 pub async fn burn_tokens(
+    auth_wallet: crate::wallet_auth::AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<BurnRequest>,
 ) -> Result<Json<ApiResponse<TokenOperationResponse>>, StatusCode> {
@@ -2283,6 +2293,13 @@ pub async fn burn_tokens(
     }
 
     // Burn tokens from the contract owner
+    // v10.11.106e SECURITY: only the contract's deployer may burn (it burns FROM the deployer).
+    if contract.deployer != auth_wallet.address {
+        return Ok(Json(ApiResponse::error(
+            "Unauthorized: only the contract deployer can burn this contract's tokens".to_string(),
+        )));
+    }
+
     let owner = contract.deployer;
     let new_balance = {
         let mut token_balances = state.token_balances.write().await;

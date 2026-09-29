@@ -24,6 +24,33 @@ use crate::{ApiResponse, AppState};
 
 /// Extract authenticated wallet address from request headers.
 /// Payment endpoints that move money MUST verify the caller owns the wallet.
+
+/// The wallet named in a payment request, IF the caller proved they own it (v10.11.106e).
+///
+/// The old check compared the raw `X-Wallet-Auth` header TEXT with the requested wallet, so anyone
+/// who typed a victim's address into the header passed it: convert-from-qugusd + transfer +
+/// convert-to-qugusd chained into theft. Now the header must be the standard signed JSON
+/// (`{address, timestamp, signature}`, Ed25519 over SHA3(address || ts || path)), valid within
+/// 5 minutes for one of the payment routes, and its address must equal the requested wallet.
+fn verified_payment_wallet(headers: &HeaderMap, requested: &str) -> Option<String> {
+    const PAYMENT_PATHS: &[&str] = &[
+        "/api/v1/payment/balance",
+        "/api/v1/payment/withdraw",
+        "/api/v1/payment/convert-to-qugusd",
+        "/api/v1/payment/convert-from-qugusd",
+        "/api/v1/payment/transfer",
+    ];
+    let header = headers.get("x-wallet-auth")?.to_str().ok()?;
+    let want = hex::decode(requested.trim().strip_prefix("qnk").unwrap_or(requested.trim())).ok()?;
+    PAYMENT_PATHS.iter().find_map(|p| {
+        crate::wallet_auth::validate_wallet_auth_query(header, p)
+            .ok()
+            .filter(|addr| addr.as_slice() == want.as_slice())
+            .map(|_| requested.to_string())
+    })
+}
+
+#[allow(dead_code)]
 fn extract_wallet_from_headers(headers: &HeaderMap) -> Option<String> {
     // Try x-wallet-auth header first
     if let Some(wallet) = headers.get("x-wallet-auth").and_then(|v| v.to_str().ok()) {
@@ -468,7 +495,7 @@ pub async fn get_usd_balance(
     Json(request): Json<GetBalanceRequest>,
 ) -> Result<Json<ApiResponse<BalanceResponse>>, StatusCode> {
     // Auth: verify caller is the wallet owner
-    let auth_wallet = extract_wallet_from_headers(&headers);
+    let auth_wallet = verified_payment_wallet(&headers, &request.wallet_address);
     if auth_wallet.as_deref() != Some(&request.wallet_address) {
         warn!("Unauthorized balance query for wallet: {}", request.wallet_address);
         return Ok(Json(ApiResponse {
@@ -528,7 +555,7 @@ pub async fn withdraw_usd(
     Json(request): Json<WithdrawRequest>,
 ) -> Result<Json<ApiResponse<WithdrawResponse>>, StatusCode> {
     // Auth: verify caller is the wallet owner
-    let auth_wallet = extract_wallet_from_headers(&headers);
+    let auth_wallet = verified_payment_wallet(&headers, &request.wallet_address);
     if auth_wallet.as_deref() != Some(&request.wallet_address) {
         warn!("Unauthorized withdrawal attempt for wallet: {}", request.wallet_address);
         return Ok(Json(ApiResponse {
@@ -659,7 +686,7 @@ pub async fn convert_usd_to_qugusd(
     Json(request): Json<ConvertToQugusdRequest>,
 ) -> Result<Json<ApiResponse<ConvertToQugusdResponse>>, StatusCode> {
     // Auth: verify caller is the wallet owner
-    let auth_wallet = extract_wallet_from_headers(&headers);
+    let auth_wallet = verified_payment_wallet(&headers, &request.wallet_address);
     if auth_wallet.as_deref() != Some(&request.wallet_address) {
         warn!("Unauthorized USD-to-QUGUSD conversion attempt for wallet: {}", request.wallet_address);
         return Ok(Json(ApiResponse {
@@ -879,7 +906,7 @@ pub async fn convert_qugusd_to_usd(
     Json(request): Json<ConvertFromQugusdRequest>,
 ) -> Result<Json<ApiResponse<ConvertFromQugusdResponse>>, StatusCode> {
     // Auth — wallet must be the caller.
-    let auth_wallet = extract_wallet_from_headers(&headers);
+    let auth_wallet = verified_payment_wallet(&headers, &request.wallet_address);
     if auth_wallet.as_deref() != Some(&request.wallet_address) {
         warn!("Unauthorized QUGUSD-to-USD redemption attempt for wallet: {}", request.wallet_address);
         return Ok(Json(ApiResponse {
@@ -1067,7 +1094,7 @@ pub async fn transfer_usd(
     Json(request): Json<TransferUsdRequest>,
 ) -> Result<Json<ApiResponse<TransferUsdResponse>>, StatusCode> {
     // Auth: verify caller is the SENDER (from_wallet owner)
-    let auth_wallet = extract_wallet_from_headers(&headers);
+    let auth_wallet = verified_payment_wallet(&headers, &request.from_wallet);
     if auth_wallet.as_deref() != Some(&request.from_wallet) {
         warn!("Unauthorized transfer attempt from wallet: {}", request.from_wallet);
         return Ok(Json(ApiResponse {

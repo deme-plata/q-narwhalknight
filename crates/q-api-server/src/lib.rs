@@ -2666,7 +2666,18 @@ impl AppState {
             // the reserve ratio to the authoritative oracle price.
             {
                 let target_price = 3000.0_f64;
+                // v10.11.106e: STARTUP NEVER REWRITES RESERVES. The pool's reserves belong to its
+                // liquidity providers; forcing them to a $3000 target on boot changed the price
+                // and LP value behind everyone's back (and once pinned reserve1 at u128::MAX).
+                // A drift is now logged and left alone.
                 if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
+                    tracing::warn!(
+                        "💱 [v10.11.106e] QUG/QUGUSD pool price ${:.2} is outside ±10% of ${:.0}; reserves NOT rewritten (startup is read-only for pools)",
+                        pool_price, target_price
+                    );
+                }
+                const STARTUP_PEG_RESET: bool = false;
+                if STARTUP_PEG_RESET && pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
                     // Pool ratio drifted >10% from target — reset reserves
                     let pool_id = "pool-qug-qugusd-bootstrap".to_string();
                     if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
@@ -2742,6 +2753,12 @@ impl AppState {
                     token0_decimals: 24,
                     token1_decimals: 24,
                 };
+                // v10.11.106e: create the bootstrap pool only if it truly does not exist. This branch
+                // also ran when an EXISTING pool's price fell outside (0, 1e6), and `insert` then
+                // replaced real reserves with 10,000 unbacked QUG.
+                if liquidity_pools_map.contains_key(&pool_id) {
+                    tracing::warn!("💱 [v10.11.106e] {} exists with an out-of-range price; NOT overwritten", pool_id);
+                } else {
                 liquidity_pools_map.insert(pool_id.clone(), pool.clone());
                 if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
                     if let Err(e) = storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await {
@@ -2752,6 +2769,7 @@ impl AppState {
                     "🏊 [STARTUP v4.0.7] Created bootstrap QUG/QUGUSD pool: 10,000 QUG / {:.0} QUGUSD @ ${:.2}/QUG",
                     bootstrap_qugusd as f64 / 1e24, vault_price
                 );
+                } // v10.11.106e: end of 'only if missing'
             }
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");
@@ -4152,7 +4170,18 @@ impl AppState {
             // the reserve ratio to the authoritative oracle price.
             {
                 let target_price = 3000.0_f64;
+                // v10.11.106e: STARTUP NEVER REWRITES RESERVES. The pool's reserves belong to its
+                // liquidity providers; forcing them to a $3000 target on boot changed the price
+                // and LP value behind everyone's back (and once pinned reserve1 at u128::MAX).
+                // A drift is now logged and left alone.
                 if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
+                    tracing::warn!(
+                        "💱 [v10.11.106e] QUG/QUGUSD pool price ${:.2} is outside ±10% of ${:.0}; reserves NOT rewritten (startup is read-only for pools)",
+                        pool_price, target_price
+                    );
+                }
+                const STARTUP_PEG_RESET: bool = false;
+                if STARTUP_PEG_RESET && pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
                     // Pool ratio drifted >10% from target — reset reserves
                     let pool_id = "pool-qug-qugusd-bootstrap".to_string();
                     if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
@@ -4228,6 +4257,12 @@ impl AppState {
                     token0_decimals: 24,
                     token1_decimals: 24,
                 };
+                // v10.11.106e: create the bootstrap pool only if it truly does not exist. This branch
+                // also ran when an EXISTING pool's price fell outside (0, 1e6), and `insert` then
+                // replaced real reserves with 10,000 unbacked QUG.
+                if liquidity_pools_map.contains_key(&pool_id) {
+                    tracing::warn!("💱 [v10.11.106e] {} exists with an out-of-range price; NOT overwritten", pool_id);
+                } else {
                 liquidity_pools_map.insert(pool_id.clone(), pool.clone());
                 if let Ok(pool_bytes) = serde_json::to_vec(&pool) {
                     if let Err(e) = storage_engine.save_liquidity_pool(&pool_id, &pool_bytes).await {
@@ -4238,6 +4273,7 @@ impl AppState {
                     "🏊 [STARTUP v4.0.7] Created bootstrap QUG/QUGUSD pool: 10,000 QUG / {:.0} QUGUSD @ ${:.2}/QUG",
                     bootstrap_qugusd as f64 / 1e24, vault_price
                 );
+                } // v10.11.106e: end of 'only if missing'
             }
         }
         tracing::info!("💰 CollateralVault initialized - QUG/QUGUSD stablecoin system ready");

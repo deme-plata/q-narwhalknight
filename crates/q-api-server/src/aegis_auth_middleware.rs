@@ -189,22 +189,12 @@ pub async fn verify_founder_signature(
     // pipeline that constructs Requests without ConnectInfo). For Unix-socket deployments,
     // set `Q_ENABLE_LOCAL_ADMIN_BYPASS=1` so the bypass can engage; otherwise the bypass
     // is rejected and the request must pass normal AEGIS founder authentication.
-    if request.headers().get("X-Admin-Local").map(|v| v.as_bytes()) == Some(b"true") {
-        let is_local = request
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().is_loopback())
-            .unwrap_or_else(|| {
-                // Fail closed unless explicitly opted in.
-                std::env::var("Q_ENABLE_LOCAL_ADMIN_BYPASS").ok().as_deref() == Some("1")
-            });
-
-        if is_local {
-            info!("✅ Localhost admin bypass - X-Admin-Local header from loopback address");
-            return Ok(next.run(request).await);
-        } else {
-            warn!("❌ X-Admin-Local header rejected — non-loopback address or missing ConnectInfo (set Q_ENABLE_LOCAL_ADMIN_BYPASS=1 for unix-socket deployments)");
-        }
+    // v10.11.106e SECURITY: the X-Admin-Local "localhost bypass" is REMOVED. Behind q-flux every
+    // public request arrives from 127.0.0.1, so "header + loopback address" was satisfied by anyone
+    // on the internet: verified live 2026-09-29 (GET with the header returned 405, not 401), which
+    // opened every founder-gated route. Local tools must sign like everyone else.
+    if request.headers().contains_key("X-Admin-Local") {
+        warn!("❌ X-Admin-Local header ignored — the localhost bypass was removed in v10.11.106e; sign the request");
     }
 
     // Extract authentication headers

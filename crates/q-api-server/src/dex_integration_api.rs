@@ -974,6 +974,17 @@ pub async fn execute_swap(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SwapExecuteRequest>,
 ) -> Result<Json<DexApiResponse<SwapResult>>, StatusCode> {
+    // v10.11.106e SECURITY: disabled. This handler moved pool reserves and the collateral
+    // vault's QUG price but debited and credited NOBODY, and its "signature" check only
+    // required a non-empty string — anyone could reprice the pool and the vault oracle.
+    // Real swaps go through POST /api/v1/dex/swap (wallet-authenticated, moves the money).
+    #[allow(unreachable_code)]
+    {
+        let _ = (&state, &request);
+        return Ok(Json(DexApiResponse::error(
+            "This endpoint is retired: use POST /api/v1/dex/swap".to_string(),
+        )));
+    }
     // Comprehensive input validation
     if request.token_in.is_empty() || request.token_out.is_empty() {
         return Ok(Json(DexApiResponse::error(

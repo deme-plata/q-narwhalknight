@@ -476,8 +476,10 @@ fn calculate_lp_tokens(
             // = 5.4e41 > u128::MAX 3.4e38, and min() then picked the wrapped value. Measured live
             // 2026-09-28: a 10,000 QUG + 29,998,656 QUGUSD add minted 515,620,365 LP instead of
             // ~9.6e11 (3 % of the pool instead of ~98 %).
-            let liquidity0 = mul_div_u128(amount0, supply, r0);
-            let liquidity1 = mul_div_u128(amount1, supply, r1);
+            // v10.11.106e: exact 256-bit floor instead of mul_div_u128's f64 fallback. The live
+            // bootstrap LP supply is ~1.0e28, so even a 1 QUG add (1e24 x 1e28) overflowed.
+            let liquidity0 = mul_div_exact(amount0, supply, r0).unwrap_or(0);
+            let liquidity1 = mul_div_exact(amount1, supply, r1).unwrap_or(0);
 
             // Use minimum to ensure user doesn't get more LP tokens than they should
             // This enforces the constant product invariant
@@ -532,6 +534,45 @@ fn calculate_lp_tokens(
 /// The second term uses f64 only for the small correction when a * (b%d) also overflows.
 /// This fixes the critical bug where saturating_mul capped intermediate products at u128::MAX,
 /// producing near-zero swap outputs for QUG/QUGUSD pairs with large 24-decimal reserves.
+/// Exact `floor(a * b / d)` through a 256-bit intermediate (v10.11.106e).
+///
+/// `None` when `d == 0` or the quotient does not fit u128. Unlike [`mul_div_u128`] it never
+/// falls back to f64: LP shares are ownership of real money and must be exact and floored,
+/// so a provider can never be minted, or paid out, more than its share. With 24-decimal
+/// tokens and an LP supply of ~1e28 every realistic `amount * supply` exceeds u128 (3.4e38),
+/// which is exactly where the plain `*` wrapped silently in release builds.
+pub fn mul_div_exact(a: u128, b: u128, d: u128) -> Option<u128> {
+    if d == 0 {
+        return None;
+    }
+    const M: u128 = u64::MAX as u128;
+    let (a1, a0) = (a >> 64, a & M);
+    let (b1, b0) = (b >> 64, b & M);
+    let (p00, p01, p10, p11) = (a0 * b0, a0 * b1, a1 * b0, a1 * b1);
+    let mid = (p00 >> 64) + (p01 & M) + (p10 & M);
+    let lo = (p00 & M) | (mid << 64);
+    let hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    if hi == 0 {
+        return Some(lo / d);
+    }
+    if hi >= d {
+        return None; // quotient >= 2^128
+    }
+    // Restoring long division of the 256-bit (hi, lo) by d, one bit at a time. `rem < d`
+    // holds before every shift; a carry out of bit 127 means the true value is >= 2^128 > d.
+    let (mut rem, mut q) = (hi, 0u128);
+    for i in (0..128).rev() {
+        let carry = rem >> 127;
+        rem = (rem << 1) | ((lo >> i) & 1);
+        q <<= 1;
+        if carry == 1 || rem >= d {
+            rem = rem.wrapping_sub(d);
+            q |= 1;
+        }
+    }
+    Some(q)
+}
+
 pub fn mul_div_u128(a: u128, b: u128, d: u128) -> u128 {
     if d == 0 {
         return 0;
@@ -652,14 +693,19 @@ pub fn create_liquidity_router() -> Router<Arc<AppState>> {
         .route("/remove", post(remove_liquidity))
         .route("/pools", get(get_all_pools))
         .route("/pools/:pool_id", get(get_pool_info))
-        .route("/refresh-balances", post(refresh_token_balances))
+        // v10.11.106e SECURITY: /refresh-balances REMOVED — unauthenticated, it overwrote any deployer's
+        // token balance with `initialSupply - pool-locked`, ignoring sales/transfers (Balance Integrity Rule 1).
         .route("/swap-quote", post(get_swap_quote))
-        .route("/admin/reset-pool", post(admin_reset_pool_reserves))
+        // v10.11.106e SECURITY: /admin/reset-pool REMOVED. It set any pool's reserves from a
+        // request body and its only check was a key literal committed to the source (public on
+        // GitHub since 2026-06-10). Treat that key as burned. Pool repair is a reviewed,
+        // offline migration, never a public route.
 }
 
 /// Add liquidity to a pool
 /// v1.0.49-beta: CRITICAL FIX - Uses normalized addresses for pool lookup
 pub async fn add_liquidity(
+    auth_wallet: q_api_server::wallet_auth::AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddLiquidityRequest>,
 ) -> Result<Json<ApiResponse<AddLiquidityResponse>>, StatusCode> {
@@ -668,6 +714,15 @@ pub async fn add_liquidity(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+    // v10.11.106e SECURITY: the handler used to debit whatever `provider` the JSON named, with
+    // no signature at all — anyone could push anyone's QUG/QUGUSD into a pool (donated to the
+    // existing LPs). The signed X-Wallet-Auth (same extractor as /transactions/send) must now
+    // name the provider.
+    if provider != auth_wallet.address {
+        return Ok(Json(ApiResponse::error(
+            "Signed wallet does not match provider: you can only add your own liquidity".to_string(),
+        )));
+    }
 
     // Validate amounts
     if request.amount0 == 0 || request.amount1 == 0 {
@@ -1781,6 +1836,7 @@ pub async fn get_pool_info(
 
 /// Remove liquidity from a pool
 pub async fn remove_liquidity(
+    auth_wallet: q_api_server::wallet_auth::AuthenticatedWallet,
     State(state): State<Arc<AppState>>,
     Json(request): Json<RemoveLiquidityRequest>,
 ) -> Result<Json<ApiResponse<RemoveLiquidityResponse>>, StatusCode> {
@@ -1789,6 +1845,12 @@ pub async fn remove_liquidity(
         Ok(addr) => addr,
         Err(e) => return Ok(Json(ApiResponse::error(e))),
     };
+    // v10.11.106e SECURITY: same hole as add — only the signed owner may withdraw its LP.
+    if provider != auth_wallet.address {
+        return Ok(Json(ApiResponse::error(
+            "Signed wallet does not match provider: you can only remove your own liquidity".to_string(),
+        )));
+    }
 
     // Validate percentage
     if request.percentage == 0 || request.percentage > 100 {
@@ -1834,8 +1896,16 @@ pub async fn remove_liquidity(
             "Pool has zero LP token supply".to_string(),
         )));
     }
-    let amount0_to_return = (pool.reserve0 * lp_to_burn) / total_lp_supply;
-    let amount1_to_return = (pool.reserve1 * lp_to_burn) / total_lp_supply;
+    // v10.11.106e: `reserve * lp_to_burn` wrapped u128 in release (r1 ~3e31 x LP ~1e28) and paid
+    // out garbage. Exact 256-bit floor; refuse rather than pay a wrong amount.
+    let (Some(amount0_to_return), Some(amount1_to_return)) = (
+        mul_div_exact(pool.reserve0, lp_to_burn, total_lp_supply),
+        mul_div_exact(pool.reserve1, lp_to_burn, total_lp_supply),
+    ) else {
+        return Ok(Json(ApiResponse::error(
+            "Withdrawal amount could not be computed exactly; nothing was changed".to_string(),
+        )));
+    };
 
     // Check if tokens are native QUG or custom tokens
     let is_native_token0 =
@@ -1852,7 +1922,10 @@ pub async fn remove_liquidity(
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
         } else {
-            match resolve_token_symbol_for_wallet(&state, &pool.token0, Some(&provider)).await {
+            // v10.11.106e: the SAME normaliser as add. resolve_token_symbol_for_wallet maps
+            // "QUGUSD" to the legacy 0xCD01 key that send/balance never read, so withdrawn
+            // QUGUSD was stranded.
+            match normalize_token_to_address_for_wallet(&state, &pool.token0, Some(&provider)).await {
                 Ok(addr) => addr,
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
@@ -1868,7 +1941,10 @@ pub async fn remove_liquidity(
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
         } else {
-            match resolve_token_symbol_for_wallet(&state, &pool.token1, Some(&provider)).await {
+            // v10.11.106e: the SAME normaliser as add. resolve_token_symbol_for_wallet maps
+            // "QUGUSD" to the legacy 0xCD01 key that send/balance never read, so withdrawn
+            // QUGUSD was stranded.
+            match normalize_token_to_address_for_wallet(&state, &pool.token1, Some(&provider)).await {
                 Ok(addr) => addr,
                 Err(e) => return Ok(Json(ApiResponse::error(e))),
             }
@@ -2663,6 +2739,48 @@ mod lp_overflow_tests {
         let e24: u128 = 1_000_000_000_000_000_000_000_000;
         let minted = calculate_lp_tokens(10_000 * e24, 30_000_000 * e24, None, None, None);
         // sqrt(1e28 * 3e31) = sqrt(3e59) ~= 5.48e29
-        assert!(minted > 5_400_000_000_000_000_000_000_000_000_000u128, "minted {minted}");
+        assert!(minted > 540_000_000_000_000_000_000_000_000_000u128 && minted < 550_000_000_000_000_000_000_000_000_000u128, "minted {minted}"); // 5.4e29..5.5e29
+    }
+
+    use super::mul_div_exact;
+
+    #[test]
+    fn mul_div_exact_matches_plain_math_where_plain_math_fits() {
+        for (a, b, d) in [(0u128, 5, 7), (1, 1, 1), (10, 20, 3), (u64::MAX as u128, u64::MAX as u128, 12345),
+                          (123_456_789_012_345_678, 987_654_321, 1_000_000_007)] {
+            assert_eq!(mul_div_exact(a, b, d), Some(a * b / d), "{a}*{b}/{d}");
+        }
+        assert_eq!(mul_div_exact(5, 5, 0), None);
+    }
+
+    #[test]
+    fn mul_div_exact_is_exact_past_u128() {
+        // 2^100 * 2^100 / 2^80 = 2^120, far past u128 in the middle.
+        assert_eq!(mul_div_exact(1 << 100, 1 << 100, 1 << 80), Some(1 << 120));
+        // (x * y) / y == x for huge operands
+        let x = 30_563_263_535_345_581_228_742_401_851_392u128;
+        let y = 10_144_000_000_000_000_000_000_000_000u128;
+        assert_eq!(mul_div_exact(x, y, y), Some(x));
+        // floor, never up: (3 * big) / 2 with odd big
+        let big = (1u128 << 127) - 1;
+        assert_eq!(mul_div_exact(big, 3, 6), Some(big / 2));
+        // quotient that cannot fit u128 is refused, not wrapped
+        assert_eq!(mul_div_exact(u128::MAX, u128::MAX, 2), None);
+    }
+
+    /// Live bootstrap pool (2026-09-29): 10,188.21 QUG / 30,563,263.54 QUGUSD, LP supply 1.0144e28.
+    /// A 1 QUG + matching QUGUSD add must get 1/10,188 of the supply, not the wrapped 4.4e7 raw
+    /// the 11:56 add received on 09-28.
+    #[test]
+    fn a_small_add_to_the_live_bootstrap_pool_gets_its_share() {
+        let e24: u128 = 1_000_000_000_000_000_000_000_000;
+        let r0 = 10_188_210_939_915_193_720_649_023_488u128;
+        let r1 = 30_563_263_535_345_581_228_742_401_851_392u128;
+        let supply = 10_144_000_000_000_000_000_000_000_000u128;
+        let a1 = super::mul_div_exact(e24, r1, r0).unwrap(); // exact pool ratio
+        let minted = calculate_lp_tokens(e24, a1, Some(r0), Some(r1), Some(supply));
+        let expected = super::mul_div_exact(e24, supply, r0).unwrap();
+        assert!(minted <= expected && minted + 2 >= expected, "minted {minted} expected {expected}");
+        assert!(minted > 900_000_000_000_000_000_000_000, "share must be ~1e24 raw, got {minted}");
     }
 }
