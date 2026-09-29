@@ -2924,6 +2924,35 @@ impl Transaction {
     ///
     /// The public key is derived from the 'data' field if present (first 32 bytes),
     /// otherwise the 'from' field is used directly as the public key.
+    /// ADMISSION check for a NEW transaction entering the mempool (v10.11.106f).
+    ///
+    /// `verify_signature` also accepts `data[..32]` as the signer key, and `data` is chosen by
+    /// whoever builds the transaction — so a transfer FROM a victim, signed by an attacker who put
+    /// his own key in `data`, verified (probe test `signer_binding_probe`, 2026-09-29). Every
+    /// door that admits a new transaction (HTTP, Tor stem, mempool gossip) must use this instead:
+    /// the Ed25519 signature must be by `from` itself, and a coinbase-shaped transaction (`from`
+    /// = zero) is never admitted from outside. Block validation keeps `verify_signature`
+    /// unchanged, so historical blocks validate exactly as before (no consensus change).
+    pub fn verify_signature_for_admission(&self) -> Result<(), String> {
+        if self.is_coinbase() {
+            return Err("coinbase-shaped transaction (from = zero address) cannot be submitted".to_string());
+        }
+        match self.signature_phase {
+            TxSignaturePhase::Phase0Ed25519 => self.verify_ed25519_signature_impl(false),
+            TxSignaturePhase::HybridEd25519SQIsign => {
+                self.verify_ed25519_signature_impl(false)?;
+                self.verify_sqisign_signature()
+            }
+            TxSignaturePhase::HybridEd25519Dilithium5 => {
+                self.verify_ed25519_signature_impl(false)?;
+                self.verify_dilithium5_signature()
+            }
+            // PQ-only phases: `verify_signature` checks them against the attached PQ key; they
+            // carry no Ed25519 leg to bind to `from`, so they keep the existing check.
+            _ => self.verify_signature(),
+        }
+    }
+
     pub fn verify_signature(&self) -> Result<(), String> {
         // Coinbase transactions are exempt - they're signed at block level
         if self.is_coinbase() {
@@ -2959,6 +2988,11 @@ impl Transaction {
 
     /// Verify Ed25519 signature (Phase 0 or hybrid mode)
     fn verify_ed25519_signature(&self) -> Result<(), String> {
+        self.verify_ed25519_signature_impl(true)
+    }
+
+    /// `allow_data_key = false` is the ADMISSION rule (v10.11.106f): only the sender's own key.
+    fn verify_ed25519_signature_impl(&self, allow_data_key: bool) -> Result<(), String> {
         use ed25519_dalek::{Signature, VerifyingKey, Verifier};
 
         // Signature is MANDATORY for all non-coinbase transactions
@@ -2993,7 +3027,7 @@ impl Transaction {
         //     corresponding private key, so this adds zero forgeability.
         let mut candidate_keys: Vec<[u8; 32]> = Vec::with_capacity(2);
         candidate_keys.push(self.from);
-        if self.data.len() >= 32 {
+        if allow_data_key && self.data.len() >= 32 {
             let mut pk = [0u8; 32];
             pk.copy_from_slice(&self.data[..32]);
             if pk != self.from {
@@ -5214,5 +5248,82 @@ mod network_separation_tests {
         assert_ne!(testnet_msg.chain_id, mainnet_msg.chain_id);
         assert!(!testnet_msg.verify_network(&mainnet));
         assert!(!mainnet_msg.verify_network(&testnet));
+    }
+}
+
+/// v10.11.106f SECURITY PROBE (2026-09-29): a native transfer must only verify when the SENDER
+/// (`from`) signed it. `verify_ed25519_signature` also accepts `data[..32]` as the signer key,
+/// and `data` is chosen by whoever builds the transaction. This test is the attack: `from` is
+/// the victim, `data` carries the attacker's own public key, and the attacker signs.
+#[cfg(test)]
+mod signer_binding_probe {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn transfer(from: [u8; 32], to: [u8; 32], data: Vec<u8>) -> Transaction {
+        Transaction {
+            id: [0u8; 32],
+            from,
+            to,
+            amount: 1_000_000_000_000_000_000_000_000,
+            fee: 0,
+            nonce: 1,
+            signature: vec![],
+            timestamp: chrono::Utc::now(),
+            data,
+            token_type: TokenType::QUG,
+            fee_token_type: TokenType::QUG,
+            tx_type: TransactionType::default(),
+            pqc_signature: None,
+            signature_phase: TxSignaturePhase::Phase0Ed25519,
+            pqc_public_key: None,
+            zk_proof_bundle: None,
+            privacy_level: TransactionPrivacyLevel::Transparent,
+            bulletproof: None,
+            nullifier: None,
+            memo: None,
+        }
+    }
+
+    #[test]
+    fn the_real_sender_can_sign() {
+        let alice = SigningKey::from_bytes(&[11u8; 32]);
+        let mut tx = transfer(alice.verifying_key().to_bytes(), [9u8; 32], vec![]);
+        tx.signature = alice.sign(&tx.signable_payload()).to_bytes().to_vec();
+        assert!(tx.verify_signature().is_ok());
+    }
+
+    #[test]
+    fn a_stranger_cannot_sign_for_the_sender_by_putting_his_key_in_data() {
+        let victim = SigningKey::from_bytes(&[1u8; 32]);
+        let attacker = SigningKey::from_bytes(&[2u8; 32]);
+        let mut tx = transfer(
+            victim.verifying_key().to_bytes(),
+            attacker.verifying_key().to_bytes(),
+            attacker.verifying_key().to_bytes().to_vec(),
+        );
+        tx.signature = attacker.sign(&tx.signable_payload()).to_bytes().to_vec();
+        // The legacy rule (block validation) still accepts it — that is the hole, documented:
+        assert!(tx.verify_signature().is_ok(), "legacy rule unchanged for historical blocks");
+        // The admission rule (every door for NEW transactions) must refuse it:
+        assert!(
+            tx.verify_signature_for_admission().is_err(),
+            "FORGERY ACCEPTED: a transfer FROM the victim verified with the ATTACKER's key taken from data[..32]"
+        );
+    }
+
+    #[test]
+    fn the_real_sender_passes_admission_even_with_data() {
+        let alice = SigningKey::from_bytes(&[11u8; 32]);
+        let mut tx = transfer(alice.verifying_key().to_bytes(), [9u8; 32], vec![7u8; 40]);
+        tx.signature = alice.sign(&tx.signable_payload()).to_bytes().to_vec();
+        assert!(tx.verify_signature_for_admission().is_ok());
+    }
+
+    #[test]
+    fn a_coinbase_shaped_transaction_is_never_admitted() {
+        let tx = transfer([0u8; 32], [9u8; 32], vec![]);
+        assert!(tx.verify_signature().is_ok(), "coinbase is exempt in block validation");
+        assert!(tx.verify_signature_for_admission().is_err(), "but never admitted from outside");
     }
 }

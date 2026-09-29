@@ -1766,6 +1766,13 @@ impl BrowserTransaction {
         if self.public_key.len() != 32 {
             return Err(format!("Invalid public key length: expected 32, got {}", self.public_key.len()));
         }
+        // v10.11.106f SECURITY: the key that signs must BE the sender. Before this, a browser tx
+        // was verified against whatever `public_key` it carried, never compared with `from`, and
+        // the key was then copied into `data` — so a transfer FROM anyone, signed by anyone who
+        // attached his own key, passed. A Quillon address is its Ed25519 public key.
+        if self.public_key.as_slice() != &from[..] {
+            return Err("Browser transaction public key does not match the sender address".to_string());
+        }
 
         // =====================================================================
         // v3.5.14-beta CRITICAL: Verify signature using BROWSER hash format
@@ -4999,7 +5006,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         }
                     };
                     let tx_hash = tx.id;
-                    if let Err(e) = tx.verify_signature() {
+                    // v10.11.106f: Tor-stem txs are NEW admissions — sender-bound signature only.
+                    if let Err(e) = tx.verify_signature_for_admission() {
                         warn!("🧅 [STEM-RX] reject {} bad sig: {}", hex::encode(&tx_hash[..8]), e);
                         continue;
                     }
@@ -10645,7 +10653,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             // browser-compatible hash format, so skip re-verification (which would fail due to
                             // different hash format)
                             if !is_browser_tx {
-                                if let Err(sig_err) = tx.verify_signature() {
+                                // v10.11.106f: gossip txs are NEW admissions — sender-bound signature only.
+                                if let Err(sig_err) = tx.verify_signature_for_admission() {
                                     warn!(
                                         "🚫 [TX-REJECT] Invalid signature for transaction {} from gossipsub: {}",
                                         hex::encode(&tx_hash[..8]),

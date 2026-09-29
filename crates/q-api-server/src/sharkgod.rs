@@ -86,7 +86,8 @@ pub async fn sharkgod_submit_handler(
     // ========================================================================
 
     // 1a. Signature verification
-    if let Err(sig_error) = tx.verify_signature() {
+    // v10.11.106f: ADMISSION rule — signed by `from` itself, never coinbase-shaped.
+    if let Err(sig_error) = tx.verify_signature_for_admission() {
         warn!(
             "🦈 [SHARKGOD] Signature FAILED: {}",
             sig_error

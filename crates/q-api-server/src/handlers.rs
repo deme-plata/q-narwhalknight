@@ -3031,7 +3031,8 @@ pub async fn submit_transaction(
     // All non-coinbase transactions MUST have valid Ed25519 signatures.
     // This prevents unsigned/forged transactions from entering the mempool.
     // ============================================================================
-    if let Err(sig_error) = request.transaction.verify_signature() {
+    // v10.11.106f: ADMISSION rule — signed by `from` itself, never coinbase-shaped.
+    if let Err(sig_error) = request.transaction.verify_signature_for_admission() {
         tracing::warn!(
             "🚨 [SECURITY] Transaction signature verification failed: {}",
             sig_error
@@ -6226,7 +6227,7 @@ pub async fn send_transaction_signed(
             }
         }
 
-        if let Err(e) = tx.verify_signature() {
+        if let Err(e) = tx.verify_signature_for_admission() {
             warn!(
                 "🛡 [SEND-SIGNED v10.11.72] client signature REJECTED for {}: {}",
                 q_log_privacy::mask_addr(&hex::encode(from_address)),
