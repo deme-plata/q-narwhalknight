@@ -1112,7 +1112,8 @@ impl MiningStatistics {
         if let Some(stats) = self.active_miners.get_mut(&key) {
             stats.blocks_found += 1;
             stats.rewards_earned += reward_amount;
-            tracing::info!(
+            // v10.11.110: debug, not info — with the lookup key fixed this fires ~30x per block.
+            tracing::debug!(
                 "🏆 [MINING] Block found by {}:{} - total blocks: {}, total rewards: {} QUG",
                 &miner_address[..16.min(miner_address.len())],
                 worker_id,
@@ -1125,7 +1126,7 @@ impl MiningStatistics {
                 if k.starts_with(miner_address) {
                     stats.blocks_found += 1;
                     stats.rewards_earned += reward_amount;
-                    tracing::info!(
+                    tracing::debug!(
                         "🏆 [MINING] Block found by {} (matched via address) - total blocks: {}, total rewards: {} QUG",
                         &miner_address[..16.min(miner_address.len())],
                         stats.blocks_found,
@@ -1134,7 +1135,9 @@ impl MiningStatistics {
                     return;
                 }
             }
-            tracing::warn!(
+            // v10.11.110: remaining misses are legitimate (miner idle with hash_rate 0, evicted
+            // after 300 s, or beyond the 500-miner cap) — telemetry only, so debug.
+            tracing::debug!(
                 "⚠️ [MINING] Block found but miner {}:{} not in active stats",
                 miner_address, worker_id
             );

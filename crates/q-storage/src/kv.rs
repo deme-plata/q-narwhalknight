@@ -2454,22 +2454,21 @@ impl RocksDBKV {
             db.write_opt(batch, &write_opts)
                 .context("RocksDB batch write failed")?;
 
-            // v1.0.77-beta: Keep flush_cf() for crash safety
-            // Without explicit flushes, kill -9 causes data loss because:
-            // - set_sync(false) only writes to WAL buffer
-            // - WAL may not be fully synced to disk on hard kill
-            // - Blocks 299900-304400 were lost due to this
+            // v1.0.77-beta added a flush_cf("blocks") here after blocks 299900-304400 were lost on
+            // kill -9, back when commits were written with set_sync(false).
             //
-            // SOLUTION: Keep the flush but only on critical column families
-            // and only when the batch contains important data (blocks)
-            let cf_names = vec!["blocks"]; // Only flush blocks CF for safety
-
-            for cf_name in cf_names {
-                if let Some(cf) = db.cf_handle(cf_name) {
-                    if let Err(e) = db.flush_cf(&cf) {
-                        tracing::warn!("⚠️  Failed to flush CF {} after commit: {}", cf_name, e);
-                    }
-                }
+            // v10.11.110: replaced by a WAL sync. Measured on production (2026-10-01): every
+            // block's commit took ~50-70 ms, because this forced a memtable -> new L0 SST flush of
+            // the blocks CF on EVERY commit (one SST per block, plus compaction behind it). It did
+            // not even cover this batch: the only caller (QTransaction::commit) writes the
+            // manifest CF with set_sync(true) + WAL. What the flush was really protecting is any
+            // EARLIER unsynced write (sync=false, WAL on: kv.rs 1841/2385, safe_batched_writer,
+            // async_pipeline). flush_wal(true) fsyncs the WAL, which makes every such write
+            // durable — in ALL column families, not just blocks — without writing an SST.
+            // WAL-disabled writes would not be covered, but the only WAL-disabled path,
+            // write_batch_bulk(), has no caller (checked 2026-10-01).
+            if let Err(e) = db.flush_wal(true) {
+                tracing::warn!("⚠️  Failed to sync WAL after commit: {}", e);
             }
 
             Ok::<(), anyhow::Error>(())

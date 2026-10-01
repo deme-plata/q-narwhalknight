@@ -738,11 +738,24 @@ impl BlockProducer {
                     // the finality window of delta+1 for the NEXT block proposal
                     if self.current_height > committed_round + delta {
                         let new_committed = self.current_height.saturating_sub(delta);
-                        warn!(
-                            "🔧 [AUTO-ADVANCE] Committed round {} is stale (current height {}), \
-                            advancing to {} to unblock production",
-                            committed_round, self.current_height, new_committed
-                        );
+                        // v10.11.110: the producer's DAG-Knight instance is never fed certificates
+                        // (those go to AppState.consensus), so in steady state this fires on every
+                        // block with a gap of exactly delta+1 (measured: once per block on
+                        // production, 2026-10-01). Same action as before; only the steady-state
+                        // case is logged at debug. A larger gap (restart, sync jump) still WARNs.
+                        if self.current_height - committed_round == delta + 1 {
+                            debug!(
+                                "🔧 [AUTO-ADVANCE] Committed round {} is stale (current height {}), \
+                                advancing to {} to unblock production",
+                                committed_round, self.current_height, new_committed
+                            );
+                        } else {
+                            warn!(
+                                "🔧 [AUTO-ADVANCE] Committed round {} is stale (current height {}), \
+                                advancing to {} to unblock production",
+                                committed_round, self.current_height, new_committed
+                            );
+                        }
                         dag_knight.advance_committed_round(new_committed).await;
                         // Continue with block production - committed round is now valid
                     }

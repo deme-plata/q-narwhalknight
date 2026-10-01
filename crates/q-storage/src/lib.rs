@@ -6271,8 +6271,14 @@ impl QStorage {
         // Build prefix for wallet (first 32 bytes of key)
         let prefix = wallet.to_vec();
 
-        // Scan wallet index with prefix
-        match self.hot_db.scan_prefix(CF_WALLET_TX_INDEX, &prefix).await {
+        // Scan wallet index with prefix.
+        // v10.11.110: bounded seek instead of a full prefix scan. Keys are
+        // [wallet][i64::MAX - ts][txid8], i.e. newest-first, and every caller wants at most
+        // `limit` (100 / 25) — but scan_prefix copied up to 100,000 entries (~8 MB) first and hit
+        // its SCAN-CAP on busy wallets (measured on production 2026-10-01). Same order, same
+        // first `limit` results; the margin covers duplicate index entries and missing txs.
+        let scan_cap = limit.saturating_mul(4).saturating_add(64).min(100_000);
+        match self.hot_db.scan_prefix_seek(CF_WALLET_TX_INDEX, &prefix, scan_cap).await {
             Ok(entries) => {
                 let mut seen_tx_ids = std::collections::HashSet::new();
 

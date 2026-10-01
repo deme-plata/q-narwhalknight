@@ -14859,7 +14859,7 @@ dependencies = [
 
 [[package]]
 name = "q-api-server"
-version = "10.11.109"
+version = "10.11.110"
 dependencies = [
  "anyhow",
  "argon2",

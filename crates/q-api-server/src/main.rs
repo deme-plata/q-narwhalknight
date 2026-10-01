@@ -17817,6 +17817,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         if db_height > prev {
                             m.blocks_synced_total.inc_by(db_height - prev);
                         }
+                        // v10.11.110: qnk_network_max_height and qnk_gap_to_tip were registered
+                        // but never set (read 0 on production, 2026-10-01). Same view /status uses.
+                        let net = app_state_height_reconcile.network_max_height_view().await;
+                        m.network_max_height.set(net as i64);
+                        m.gap_to_tip.set((net as i64 - db_height as i64).max(0));
                     }
                 }
             }
@@ -18614,6 +18619,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // Difficulty verification
                                     if !(submission.hash < submission.difficulty_target) {
                                         r_difficulty.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        // v10.11.110 DIAGNOSTIC (log only, validity unchanged): ~18 % of
+                                        // solutions are rejected here on production (2026-10-01) and the cause
+                                        // is unproven. One sample per minute: leading zero bits of the hash vs
+                                        // the target. hash_bits just below target_bits = a solution found
+                                        // against an easier (e.g. 16-bit) challenge; far below = not a real
+                                        // solution.
+                                        static DIFF_REJECT_SAMPLE: q_storage::log_ratelimit::RateLimiter =
+                                            q_storage::log_ratelimit::RateLimiter::new(60);
+                                        if let Some(n) = DIFF_REJECT_SAMPLE.check() {
+                                            let lzb = |x: &[u8; 32]| -> u32 {
+                                                let mut bits = 0u32;
+                                                for byte in x.iter() {
+                                                    if *byte == 0 { bits += 8; } else { bits += byte.leading_zeros(); break; }
+                                                }
+                                                bits
+                                            };
+                                            info!(
+                                                "🔬 [DIFF-REJECT SAMPLE] hash_bits={} target_bits={} (+{} rejects since last sample)",
+                                                lzb(&submission.hash), lzb(&submission.difficulty_target), n
+                                            );
+                                        }
                                         return None;
                                     }
                                     p_vdf.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -18659,10 +18685,16 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     }
                     batch_buffer = verified_result.0;
                     let rejected_count = verified_result.1;
+                    // v10.11.110: measured 12.7 lines per block on production (2026-10-01). The
+                    // counters are per batch, so this shows ONE batch as a sample, at most every
+                    // 30 s; the line says how many batch lines were suppressed in between.
+                    static SHARD_REJECT_LOG: q_storage::log_ratelimit::RateLimiter =
+                        q_storage::log_ratelimit::RateLimiter::new(30);
                     if rejected_count > 0 {
+                        if let Some(suppressed) = SHARD_REJECT_LOG.check() {
                         warn!(
                             "🛡️ [Shard {}] Rejected {}/{} — genus2_proof={}, genus2_hash={}, blake3_vdf={}, \
-                             difficulty={}, passed={}, no_challenge={}, path_genus2={}, path_blake3={}",
+                             difficulty={}, passed={}, no_challenge={}, path_genus2={}, path_blake3={} (sample batch; +{} batch lines suppressed)",
                             shard_id, rejected_count, pre_verify_count,
                             reject_genus2_proof.load(std::sync::atomic::Ordering::Relaxed),
                             reject_genus2_hash.load(std::sync::atomic::Ordering::Relaxed),
@@ -18672,7 +18704,9 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                             no_challenge.load(std::sync::atomic::Ordering::Relaxed),
                             path_genus2.load(std::sync::atomic::Ordering::Relaxed),
                             path_blake3.load(std::sync::atomic::Ordering::Relaxed),
+                            suppressed,
                         );
+                        }
                     }
 
                     let batch_size = batch_buffer.len();
@@ -19836,10 +19870,13 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             // regardless of how many solutions they contributed to this block
                                             let mut credited_miners = std::collections::HashSet::new();
                                             for solution in &new_block.mining_solutions {
-                                                let miner_address_hex = hex::encode(solution.miner_address);
+                                                // v10.11.110: the stats map is keyed "qnk<hex>:<worker>" (handlers.rs
+                                                // miner_address_str, worker default "direct"); a bare-hex key missed 100 %
+                                                // of lookups (30 WARN lines per block on production). Telemetry only.
+                                                let miner_address_hex = format!("qnk{}", hex::encode(solution.miner_address));
                                                 let worker_id = solution.miner_id.clone()
                                                     .or_else(|| solution.worker_name.clone())
-                                                    .unwrap_or_else(|| "default".to_string());
+                                                    .unwrap_or_else(|| "direct".to_string());
                                                 let miner_key = format!("{}:{}", miner_address_hex, worker_id);
                                                 if credited_miners.insert(miner_key) {
                                                     // First solution from this miner in this block — count as 1 block found
@@ -21575,10 +21612,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                     // v10.1.1: Track unique miners — 1 block_found per miner per block
                                     let mut credited_miners = std::collections::HashSet::new();
                                     for solution in &new_block.mining_solutions {
-                                        let miner_address_hex = hex::encode(solution.miner_address);
+                                        // v10.11.110: key format must match the stats map ("qnk<hex>:<worker>").
+                                        let miner_address_hex = format!("qnk{}", hex::encode(solution.miner_address));
                                         let worker_id = solution.miner_id.clone()
                                             .or_else(|| solution.worker_name.clone())
-                                            .unwrap_or_else(|| "default".to_string());
+                                            .unwrap_or_else(|| "direct".to_string());
                                         let miner_key = format!("{}:{}", miner_address_hex, worker_id);
                                         if credited_miners.insert(miner_key) {
                                             mining_stats.record_block_found(

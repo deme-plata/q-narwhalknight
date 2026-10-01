@@ -555,11 +555,16 @@ impl QTransaction {
         );
 
         // Performance warning if commit took too long
+        // v10.11.110: fired on ~every block on production (typ. 50-70 ms, 2026-10-01) — keep
+        // one line per minute with the count, so a real regression is still visible.
+        static SLOW_COMMIT_LOG: crate::log_ratelimit::RateLimiter = crate::log_ratelimit::RateLimiter::new(60);
         if elapsed.as_millis() > 10 {
-            warn!(
-                "⚠️  Transaction {} commit took {:?} (target: <10ms)",
-                self.tx_id, elapsed
-            );
+            if let Some(n) = SLOW_COMMIT_LOG.check() {
+                warn!(
+                    "⚠️  Transaction {} commit took {:?} (target: <10ms) (+{} slow commits since last line)",
+                    self.tx_id, elapsed, n
+                );
+            }
         }
 
         Ok(())
@@ -942,8 +947,11 @@ impl QTransaction {
         info!("✅ Transaction {} committed successfully ({} balance updates, {:?}, sled)",
               self.tx_id, updates.len(), elapsed);
 
+        static SLOW_COMMIT_SLED_LOG: crate::log_ratelimit::RateLimiter = crate::log_ratelimit::RateLimiter::new(60);
         if elapsed.as_millis() > 10 {
-            warn!("⚠️  Transaction {} commit took {:?} (target: <10ms)", self.tx_id, elapsed);
+            if let Some(n) = SLOW_COMMIT_SLED_LOG.check() {
+                warn!("⚠️  Transaction {} commit took {:?} (target: <10ms) (+{} slow commits since last line)", self.tx_id, elapsed, n);
+            }
         }
 
         Ok(())

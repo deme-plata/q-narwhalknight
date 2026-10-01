@@ -11992,10 +11992,16 @@ pub async fn get_mining_challenge(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(32);
     let difficulty_bits = if difficulty_bits > max_difficulty_bits {
-        warn!(
-            "⚙️ [v10.3.12] Difficulty capped: {} → {} bits (Q_MAX_DIFFICULTY_BITS={})",
-            difficulty_bits, max_difficulty_bits, max_difficulty_bits
-        );
+        // v10.11.110: an operator-configured cap, hit on every challenge (measured 1.2 lines per
+        // block, 2026-10-01) — once every 5 minutes is enough to keep it visible.
+        static DIFFICULTY_CAP_LOG: q_storage::log_ratelimit::RateLimiter =
+            q_storage::log_ratelimit::RateLimiter::new(300);
+        if let Some(n) = DIFFICULTY_CAP_LOG.check() {
+            warn!(
+                "⚙️ [v10.3.12] Difficulty capped: {} → {} bits (Q_MAX_DIFFICULTY_BITS={}) (+{} similar since last line)",
+                difficulty_bits, max_difficulty_bits, max_difficulty_bits, n
+            );
+        }
         max_difficulty_bits
     } else {
         difficulty_bits

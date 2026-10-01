@@ -6113,6 +6113,23 @@ impl UnifiedNetworkManager {
             for msg in batch {
                 let ident_topic = IdentTopic::new(&msg.topic);
                 let topic_str = msg.topic.clone();
+                // v10.11.110: skip a publish no connected peer can receive. gossipsub's publish()
+                // would fail with NoPeersSubscribedToTopic anyway — before caching anything —
+                // but only AFTER copying, encoding, signing and hashing the payload (measured on
+                // production 2026-10-01: miner-stats batches of ~37 KB, ~0.7 per block, plus a
+                // finality-cert per block, all to topics no peer subscribes to). Same check
+                // publish() uses (all_peers + topic). Block topics always go through, so a block
+                // that reaches nobody still produces its warning.
+                if !topic_str.contains("/blocks") {
+                    let th = ident_topic.hash();
+                    let has_subscriber = self.swarm.behaviour().gossipsub
+                        .all_peers()
+                        .any(|(_, topics)| topics.contains(&&th));
+                    if !has_subscriber {
+                        debug!("[QUEUE DRAIN] skip {} ({} bytes): no subscribed peer", topic_str, msg.data.len());
+                        continue;
+                    }
+                }
                 // v9.1.0: PoW stamp outgoing messages (opt-in via Q_POW_STAMPS=1)
                 let publish_data = if pow_stamps_enabled() {
                     crate::pow_stamp::stamp_and_prepend(&msg.data)
@@ -6141,7 +6158,23 @@ impl UnifiedNetworkManager {
                         if topic_str.contains("mining-solutions") {
                             debug!("[QUEUE DRAIN] dropped low-prio {} ({} bytes): {}", topic_str, data_len, e);
                         } else {
-                            warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e);
+                            // v10.11.110: "no peer subscribed" is the normal state for topics like
+                            // miner-stats / finality-certs (measured ~1.7 lines per block on
+                            // production, 2026-10-01). Other publish errors keep their own limiter
+                            // so a real failure is never hidden behind that noise.
+                            static NO_SUBSCRIBER_LOG: q_storage::log_ratelimit::RateLimiter =
+                                q_storage::log_ratelimit::RateLimiter::new(60);
+                            static PUBLISH_ERR_LOG: q_storage::log_ratelimit::RateLimiter =
+                                q_storage::log_ratelimit::RateLimiter::new(30);
+                            let limiter = if e.to_string().contains("NoPeersSubscribedToTopic") {
+                                &NO_SUBSCRIBER_LOG
+                            } else {
+                                &PUBLISH_ERR_LOG
+                            };
+                            match limiter.check() {
+                                Some(n) => warn!("⚠️ [QUEUE DRAIN] Failed to publish {} ({} bytes): {} (+{} similar since last line)", topic_str, data_len, e, n),
+                                None => debug!("[QUEUE DRAIN] Failed to publish {} ({} bytes): {}", topic_str, data_len, e),
+                            }
                         }
                     }
                 }
