@@ -1103,13 +1103,24 @@ pub async fn crypto_capabilities(
 pub async fn get_block_by_height(
     Path(height): Path<u64>,
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<ApiResponse<q_types::QBlock>>, StatusCode> {
     debug!("📥 HTTP request for block at height {}", height);
+
+    // v10.11.109 loop guard: a request carrying X-Qnk-Archive-Fallback IS another node's archive
+    // fallback. Answer from LOCAL storage only — never start a fallback of our own — so a
+    // request can neither loop back to itself nor chain across archive nodes.
+    let from_archive_fallback = headers.contains_key(q_storage::archive_guard::LOOP_GUARD_HEADER);
 
     // v10.3.6: Use get_qblock_any_format() to search BOTH qblock:height:{N}
     // AND qblock:dag:{N}:{proposer} keys. Fixes checkpoint sync HTTP probe
     // returning 404 for 545K blocks stored in DAG format.
-    match state.storage_engine.get_qblock_any_format(height).await {
+    let lookup = if from_archive_fallback {
+        state.storage_engine.get_qblock_any_format_local(height).await
+    } else {
+        state.storage_engine.get_qblock_any_format(height).await
+    };
+    match lookup {
         Ok(Some(block)) => {
             debug!("✅ Serving block at height {} (any-format)", height);
             Ok(Json(ApiResponse::success(block)))

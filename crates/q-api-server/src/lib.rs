@@ -365,6 +365,7 @@ pub mod admin_settings_api; // ✅ v7.3.0: Node operator admin settings API (--a
 pub mod deploy_admin_api; // ✅ v5.1.1: Deploy admin panel API (master-wallet-only)
 pub mod node_auto_updater; // ✅ v8.5.0: P2P auto-update with Ed25519 quorum verification
 pub mod state_sync_api; // ✅ v5.2.0: HTTP full state sync (contracts, pools, balances) from bootstrap peers
+pub mod bootstrap_verify; // v10.11.109: verify a peer balance snapshot against the producer-signed header root
 pub mod miner_link_api; // ✅ v7.2.0: WebSocket relay for wallet ↔ personal miner communication
 pub mod node_setup; // v8.6.5: Automatic node setup wizard via OAuth2 device login
 pub mod quorum_commit; // ✅ Phase 1: Multi-validator balance agreement (quorum commit broadcast)

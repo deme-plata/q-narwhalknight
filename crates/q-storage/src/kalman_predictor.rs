@@ -223,7 +223,15 @@ impl KalmanNetworkPredictor {
     ) -> NetworkState {
         // Validate inputs - reject invalid measurements
         if measured_bandwidth <= 0.0 || !measured_bandwidth.is_finite() {
-            warn!("🔭 [KALMAN] Rejecting invalid bandwidth: {}", measured_bandwidth);
+            // v10.11.109: a zero/NaN bandwidth sample is the NORMAL result of a sync interval in
+            // which no chunk arrived (every chunk timed out). Measured ~20 lines/s at WARN on a
+            // fresh syncing node. Keep the first line + a periodic count, drop the rest to debug.
+            static BW_LOG: crate::log_ratelimit::RateLimiter = crate::log_ratelimit::RateLimiter::new(30);
+            match BW_LOG.check() {
+                Some(0) => warn!("🔭 [KALMAN] Rejecting invalid bandwidth: {}", measured_bandwidth),
+                Some(n) => warn!("🔭 [KALMAN] Rejecting invalid bandwidth: {} (+{} similar in the last 30s)", measured_bandwidth, n),
+                None => debug!("🔭 [KALMAN] Rejecting invalid bandwidth: {}", measured_bandwidth),
+            }
             return self.get_state();
         }
         if measured_latency <= 0.0 || !measured_latency.is_finite() {

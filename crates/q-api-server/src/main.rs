@@ -16875,7 +16875,15 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                         }
                     }
                 } else {
-                    warn!("Unknown gossipsub topic: {}, dropping", topic);
+                    // v10.11.109: peers publish topics this node does not subscribe to (e.g.
+                    // /qnk/mainnet-genesis/mining-challenges) every ~2 s; one line per 30 s is enough.
+                    static UNKNOWN_TOPIC_LOG: q_storage::log_ratelimit::RateLimiter =
+                        q_storage::log_ratelimit::RateLimiter::new(30);
+                    match UNKNOWN_TOPIC_LOG.check() {
+                        Some(0) => warn!("Unknown gossipsub topic: {}, dropping", topic),
+                        Some(n) => warn!("Unknown gossipsub topic: {}, dropping (+{} similar in the last 30s)", topic, n),
+                        None => debug!("Unknown gossipsub topic: {}, dropping", topic),
+                    }
                 }
             }
             warn!("📨 Gossipsub processor channel closed");
@@ -26740,6 +26748,8 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         // no-auth read-only integrity surface. Cross-diff via
         // tools/quillon-wallet-mcp/cross_node_root_diff.mjs.
         .route("/api/v1/integrity/balance-root", get(handlers::balance_root_integrity))
+        .route("/api/v1/integrity/bootstrap-verdict", get(q_api_server::bootstrap_verify::bootstrap_verdict_handler)) // v10.11.109
+        .route("/api/v1/integrity/status", get(q_api_server::bootstrap_verify::bootstrap_verdict_handler)) // v10.11.109 alias
         // v10.11.93: height-stamped root history — the comparable one.
         .route("/api/v1/integrity/balance-root/journal", get(handlers::balance_root_journal))
         // 2026-08-17: light-client Merkle proof — the piece that lets anyone

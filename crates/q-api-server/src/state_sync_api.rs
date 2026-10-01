@@ -947,7 +947,20 @@ async fn merge_p2p_response(
             // Only import if peer is ahead AND has more wallets
             let peer_has_more = peer_wallet_count > our_wallet_count + 5;
 
-            if response.block_height > our_height && peer_has_more {
+            // v10.11.109: the last condition (a) claims the one-time import atomically — two
+            // concurrent state-sync responses both used to see "not done" and import twice
+            // (measured on a rig follower: from another fresh node, then from Epsilon) — and
+            // (b) checks the snapshot against the producer-signed header that commits its
+            // balance root (shadow by default; Q_BOOTSTRAP_VERIFY=enforce refuses unverified).
+            if response.block_height > our_height
+                && peer_has_more
+                && crate::bootstrap_verify::claim_and_verify_import(
+                    app_state.bootstrap_wallet_sync_done.as_ref(),
+                    &response.wallet_balances,
+                    response.block_height,
+                )
+                .await
+            {
                 info!("🚀 [BOOTSTRAP SYNC v8.8.1] One-time wallet balance import: {} wallets from peer \
                        at height {} (we have {} wallets at height {})",
                       peer_wallet_count, response.block_height, our_wallet_count, our_height);
@@ -1124,10 +1137,14 @@ async fn merge_p2p_response(
     // ---- v1.0.3: Balance state hash divergence detection ----
     if let Some(ref peer_hash) = response.balance_state_hash {
         let our_height = app_state.current_height_atomic.load(std::sync::atomic::Ordering::Relaxed);
-        // Only compare if we're at similar heights (within 100 blocks)
-        if our_height > 0 && response.block_height > 0
-            && (our_height as i64 - response.block_height as i64).unsigned_abs() < 100
-        {
+        // v10.11.109: compare at the SAME height only. Balances change every block (mining
+        // rewards), so two honest nodes even one block apart have different hashes — the old
+        // "within 100 blocks" window turned every small height difference into a "CRITICAL
+        // MISMATCH" (the false-fork trap SIGIL learned on 2026-09-10). Unequal heights are
+        // counted as skipped, not as evidence.
+        if our_height > 0 && response.block_height > 0 && our_height != response.block_height {
+            crate::bootstrap_verify::note_divergence_skipped();
+        } else if our_height > 0 && response.block_height > 0 {
             // Compute our own balance state hash (same format as response builder)
             let our_hash = {
                 let wb = app_state.wallet_balances.read().await;
@@ -1145,6 +1162,9 @@ async fn merge_p2p_response(
                 hasher.finalize().to_hex().to_string()
             };
 
+            crate::bootstrap_verify::note_divergence_check(
+                &our_hash == peer_hash, our_height, response.block_height, &our_hash, peer_hash,
+            );
             if &our_hash == peer_hash {
                 info!("✅ [DIVERGENCE CHECK] Balance hash MATCHES peer at heights ~{}/{} (hash={}..)",
                       our_height, response.block_height, &peer_hash[..12]);

@@ -3378,7 +3378,15 @@ impl TurboSyncManager {
                 // v8.7.4: 10x boost for supernode peers (10Gbit+ servers)
                 // Hardcoded Epsilon peer ID + env-configured supernodes
                 const EPSILON_PEER: &str = "12D3KooWFpbXxxZJQ4FX9FGXrE5vaeNTCnZmLn6bqToRCMuiMpxM";
-                let is_supernode = peer_id.contains(EPSILON_PEER) || EPSILON_PEER.contains(peer_id)
+                // v10.11.109: Q_EPSILON_SUPERNODE_BOOST=0 turns the hardcoded 10x preference off,
+                // so a node can be made to sync from its OTHER peers (decentralization tests;
+                // measured 10-01: a follower bootstrapped only from a non-Epsilon peer still
+                // fetched every chunk from Epsilon). Default unchanged (on).
+                let epsilon_boost = std::env::var("Q_EPSILON_SUPERNODE_BOOST")
+                    .map(|v| v != "0")
+                    .unwrap_or(true);
+                let is_supernode = (epsilon_boost && !peer_id.is_empty()
+                        && (peer_id.contains(EPSILON_PEER) || EPSILON_PEER.contains(peer_id)))
                     || self.config.supernode_peers.iter()
                         .any(|p| peer_id.contains(p.as_str()) || p.contains(peer_id));
                 // 3x boost for preferred peers (1Gbit servers)
@@ -3609,12 +3617,17 @@ impl TurboSyncManager {
         // Epsilon (89.149.241.126) is the 10Gbit supernode with the deepest block history
         // (~292K floor vs ~13.9M on Beta). It must be first so the binary search converges
         // to the earliest available height rather than Beta's truncated floor.
-        let bootstrap_urls = [
-            "http://89.149.241.126:8080",   // Epsilon  — 10Gbit supernode, PRIMARY (deepest history)
-            "http://5.79.79.158:8080",      // Delta    — 1Gbit, secondary
-            "http://109.205.176.60:8808",   // Gamma    — 1Gbit, tertiary (API port 8808)
-            "http://185.182.185.227:8080",  // Beta     — 100Mbit, fallback
-        ];
+        // v10.11.109: Delta, Gamma and Beta are permanently gone (2026-07/08) — each dead entry
+        // cost a fresh node an 8 s connect timeout per binary-search step. Q_PROBE_URLS
+        // (comma-separated) overrides; an entry that is THIS node is skipped (no self-probe).
+        let bootstrap_urls: Vec<String> = std::env::var("Q_PROBE_URLS")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.split(',').map(|s| s.trim().trim_end_matches('/').to_string()).collect())
+            .unwrap_or_else(|| vec!["http://89.149.241.126:8080".to_string()]) // Epsilon — 10Gbit supernode
+            .into_iter()
+            .filter(|u| !crate::archive_guard::base_is_self(u))
+            .collect();
 
         // Probe helper: check if ANY peer has a block at height h
         // v10.3.6: Uses /api/v1/sync/blocks?from_height=X&limit=1 instead of

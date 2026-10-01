@@ -203,6 +203,9 @@ impl StakingTier {
 }
 
 pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
+pub mod archive_guard; // v10.11.109: self-detection, loop-guard header, negative cache for the Format-4 archive fallback
+pub mod balance_root; // v10.11.109: balance_root_v1 as a pure fn — shared by the node and snapshot verification
+pub mod log_ratelimit; // v10.11.109: "log at most once per interval" gate for hot-path warnings
 #[cfg(not(target_os = "windows"))]
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_checkpoint; // v10.4.12: Hardcoded Epsilon balance snapshot — idempotent one-time import
@@ -2868,6 +2871,17 @@ impl QStorage {
     /// This enables serving historical blocks that were stored by older code versions.
     /// READ-ONLY: never modifies any data.
     pub async fn get_qblock_any_format(&self, height: u64) -> Result<Option<q_types::block::QBlock>> {
+        // Local formats 1-3 first; only a genuine local miss may go to the network.
+        if let Some(block) = self.get_qblock_any_format_local(height).await? {
+            return Ok(Some(block));
+        }
+        self.fetch_qblock_from_archive(height).await
+    }
+
+    /// Formats 1-3 ONLY — never touches the network. Used by the HTTP handler when the caller
+    /// is itself an archive fallback (loop guard), so a request can never fan out again.
+    /// READ-ONLY: never modifies any data.
+    pub async fn get_qblock_any_format_local(&self, height: u64) -> Result<Option<q_types::block::QBlock>> {
         // === Format 1: Current string key "qblock:height:{N}" ===
         if let Some(block) = self.get_qblock_by_height(height).await? {
             return Ok(Some(block));
@@ -2991,19 +3005,66 @@ impl QStorage {
             }
         }
 
-        // === Format 4: Archive node HTTP fallback ===
-        // Nodes that warp-synced from a checkpoint (~height 16,538,868) have no blocks
-        // below that height locally.  For those gaps, transparently fetch from the
-        // archive node (Epsilon) which holds full history from genesis.
-        //
-        // Guard: only for heights at or below the checkpoint so we never create a
-        // recursive loop (the archive node itself always has these blocks locally).
-        // The env var Q_ARCHIVE_NODE_URL lets operators override the default URL.
+        Ok(None)
+    }
+
+    /// === Format 4: Archive node HTTP fallback ===
+    /// Nodes that warp-synced from a checkpoint (~height 16,538,868) have no blocks
+    /// below that height locally.  For those gaps, fetch from the archive node.
+    ///
+    /// v10.11.109 — the old version assumed "the archive node itself always has these blocks
+    /// locally" and so never guarded against being the archive node. It is not true on Epsilon
+    /// (census 2026-10-01 of a 09-26 copy: every height from 19 M is stored, but only 41-93 % of
+    /// 6-19 M and 1-6 % below 6 M), where the default
+    /// archive URL is Epsilon's own public IP: every missing early height made Epsilon call
+    /// itself and block a thread for the 10 s timeout, and the block-pack serving loops (which
+    /// call this per height) made a 200-block chunk take ~25 s. Guards, in order:
+    ///   1. `Q_ARCHIVE_FALLBACK=0` switches it off;
+    ///   2. only heights at or below the checkpoint;
+    ///   3. never when the archive URL points at THIS node (no self-call, no network at all);
+    ///   4. a remembered miss is not asked again for 5 minutes;
+    ///   5. at most `MAX_INFLIGHT` fetches at once — extra callers get a miss immediately;
+    ///   6. the outgoing request carries `X-Qnk-Archive-Fallback`, which makes the receiving
+    ///      node answer from local storage only (see `get_block_by_height`).
+    /// The env var Q_ARCHIVE_NODE_URL lets operators override the default URL.
+    async fn fetch_qblock_from_archive(&self, height: u64) -> Result<Option<q_types::block::QBlock>> {
         const ARCHIVE_CHECKPOINT_HEIGHT: u64 = 16_538_868;
-        if height <= ARCHIVE_CHECKPOINT_HEIGHT {
+        static ARCHIVE_PERMITS: once_cell::sync::Lazy<tokio::sync::Semaphore> =
+            once_cell::sync::Lazy::new(|| tokio::sync::Semaphore::new(archive_guard::MAX_INFLIGHT));
+
+        if !archive_guard::fallback_enabled() || height > ARCHIVE_CHECKPOINT_HEIGHT {
+            return Ok(None);
+        }
+        if archive_guard::recent_miss(height) {
+            return Ok(None);
+        }
+        {
             // Resolve the archive base URL at call-time (cheap env-var read, no lock).
             let archive_base = std::env::var("Q_ARCHIVE_NODE_URL")
                 .unwrap_or_else(|_| "http://89.149.241.126:8080".to_string());
+
+            // Guard 3: is the "archive" this very node? Cached after the first answer; only that
+            // first call (possible DNS lookup) goes through the blocking pool.
+            let is_self = match archive_guard::cached_base_is_self(&archive_base) {
+                Some(v) => v,
+                None => {
+                    let base_for_check = archive_base.clone();
+                    tokio::task::spawn_blocking(move || archive_guard::base_is_self(&base_for_check))
+                        .await
+                        .unwrap_or(false)
+                }
+            };
+            if is_self {
+                debug!("📡 [ARCHIVE] {} is this node — no fallback for height {}", archive_base, height);
+                return Ok(None);
+            }
+
+            // Guard 5: bounded concurrency — never queue, just report a miss.
+            let _permit = match ARCHIVE_PERMITS.try_acquire() {
+                Ok(p) => p,
+                Err(_) => return Ok(None),
+            };
+
             let url = format!("{}/api/v1/blocks/{}", archive_base, height);
 
             // ureq is a blocking HTTP client — must run inside spawn_blocking to avoid
@@ -3011,6 +3072,7 @@ impl QStorage {
             let url_clone = url.clone();
             let fetch_result = tokio::task::spawn_blocking(move || -> Option<q_types::block::QBlock> {
                 match ureq::get(&url_clone)
+                    .set(archive_guard::LOOP_GUARD_HEADER, "1") // guard 6
                     .timeout(std::time::Duration::from_secs(10))
                     .call()
                 {
@@ -3048,6 +3110,7 @@ impl QStorage {
                 }
                 Ok(None) => {
                     debug!("📡 [ARCHIVE] Archive node returned no block at height {} ({})", height, url);
+                    archive_guard::note_miss(height); // guard 4
                 }
                 Err(e) => {
                     debug!("📡 [ARCHIVE] spawn_blocking error for archive fetch at height {}: {}", height, e);
@@ -5413,42 +5476,11 @@ impl QStorage {
     pub async fn compute_balance_root_for_block(&self) -> Result<[u8; 32]> {
         let balances = self.load_wallet_balances().await?;
 
-        // BAL-001: Explicit zero-balance exclusion — zero-balance entries must NOT appear in
-        // the root. A node that has stored a zero balance for a wallet (e.g. after a drain)
-        // MUST NOT include it here. Nodes that never wrote the entry agree: both see nothing.
-        let mut sorted: Vec<([u8; 32], u128)> = balances
-            .into_iter()
-            .filter(|(_, amount)| *amount > 0)
-            .collect();
-
-        if sorted.is_empty() {
-            return Ok([0u8; 32]);
-        }
-
-        // BAL-001: Sort by raw address bytes — deterministic regardless of HashMap or DB order.
-        // Use rayon parallel sort for large wallet sets (benchmark: ~6× faster at 100K wallets).
-        sorted.par_sort_unstable_by_key(|(addr, _)| *addr);
-
-        // Compute leaf hashes in parallel then feed sequentially into the root hasher.
-        // Parallel leaf hashing is safe because each entry is independent; the final
-        // sequential root update preserves the deterministic order fixed by the sort above.
-        let leaf_hashes: Vec<[u8; 32]> = sorted
-            .par_iter()
-            .map(|(addr, amount)| {
-                let mut leaf_hasher = blake3::Hasher::new();
-                leaf_hasher.update(addr.as_slice());
-                leaf_hasher.update(&amount.to_be_bytes()); // big-endian per spec — NEVER change
-                *leaf_hasher.finalize().as_bytes()
-            })
-            .collect();
-
-        let mut root_hasher = blake3::Hasher::new();
-        root_hasher.update(b"balance_root_v1"); // domain separator — NEVER change
-        for leaf in &leaf_hashes {
-            root_hasher.update(leaf);
-        }
-
-        Ok(*root_hasher.finalize().as_bytes())
+        // BAL-001 (zero-balance exclusion, sort by raw address, big-endian leaf, domain
+        // separator) lives in `balance_root::balance_root_v1` since v10.11.109 — moved, not
+        // changed — so a peer's balance snapshot can be hashed by exactly the same code and
+        // checked against the header that committed it.
+        Ok(balance_root::balance_root_v1(balances))
     }
 
     /// Save total minted supply to persistent storage (enforces 21M QUG hard cap)
