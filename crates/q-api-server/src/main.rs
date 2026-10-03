@@ -21252,7 +21252,21 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 // v7.4.2: Skip enforcement during grace period (first 2 ticks = 120s).
                 // After SIGKILL/OOM-kill, producers may briefly diverge on startup.
                 // Enforcing at +60s caused spurious crashes during ha-deploy.
-                if watchdog_tick_count >= HEIGHT_INVARIANT_GRACE_TICKS {
+                // v10.11.112: and never while syncing. Turbo sync advances the stored pointer by whole
+                // gaps (1,000-5,000 heights at a time), so producer heights diverge transiently; a
+                // node far behind the network has nothing to produce. The rig's fresh full-archive
+                // nodes were killed 3 times this way (spread 1,250 / 2,000 / 5,000 at 13.7-14.6 M,
+                // 2026-10-03). Same rule as the production-loop watchdog above: enforce at the tip.
+                let invariant_local_h = app_state_watchdog
+                    .storage_engine
+                    .get_highest_contiguous_block()
+                    .await
+                    .unwrap_or(0);
+                let invariant_net_h = app_state_watchdog
+                    .highest_network_height
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let invariant_syncing = invariant_net_h > invariant_local_h.saturating_add(10);
+                if watchdog_tick_count >= HEIGHT_INVARIANT_GRACE_TICKS && !invariant_syncing {
                     if let Err(e) = app_state_watchdog
                         .block_producer_pool
                         .enforce_height_invariant(&app_state_watchdog.storage_engine)
