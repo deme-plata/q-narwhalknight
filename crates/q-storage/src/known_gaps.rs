@@ -250,6 +250,26 @@ impl KnownGaps {
             .map(|(s, e)| s <= height && height <= e)
             .unwrap_or(false)
     }
+
+    /// v10.11.112-rc12: is EVERY height in `start..=end` inside a declared gap?
+    ///
+    /// The list is kept merged (adjacent intervals coalesce), so full coverage
+    /// means ONE interval contains the whole range. The sync client asks this
+    /// before it moves the contiguous pointer over heights it did not receive:
+    /// only a declared permanent gap may be skipped. A stretch a server simply
+    /// did not serve yet (a reply cap, a short reply) is not absent, it is
+    /// pending, and must be re-requested — measured 2026-10-14: a server capped
+    /// at 150 blocks per reply plus an unconditional skip left a fresh node with
+    /// 150 of every 1,000 heights of a 100 %-dense chain.
+    pub fn covers_range(&self, start: u64, end: u64) -> bool {
+        if start > end {
+            return false;
+        }
+        self.gaps
+            .read()
+            .iter()
+            .any(|(s, e)| *s <= start && end <= *e)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +353,28 @@ mod tests {
         let gaps = KnownGaps::parse("42:42");
         assert_eq!(gaps.snapshot().as_slice(), &[(42, 42)]);
         assert!(gaps.contains(42));
+    }
+
+    #[test]
+    fn covers_range_only_inside_one_declared_gap_v10_11_112() {
+        let gaps = KnownGaps::parse("100:200, 300:400");
+        assert!(gaps.covers_range(100, 200));
+        assert!(gaps.covers_range(150, 160));
+        assert!(gaps.covers_range(100, 100));
+        assert!(!gaps.covers_range(99, 100), "99 is not declared");
+        assert!(!gaps.covers_range(200, 201), "201 is not declared");
+        assert!(!gaps.covers_range(150, 350), "201..=299 is not declared");
+        assert!(!gaps.covers_range(500, 600));
+        assert!(!gaps.covers_range(10, 5), "inverted range is never covered");
+        // Adjacent declarations merge into one interval and cover the join.
+        let adjacent = KnownGaps::parse("100:200, 201:300");
+        assert!(adjacent.covers_range(150, 250));
+        // A runtime-added gap counts too.
+        assert!(adjacent.add_gap(1_000, 1_999));
+        assert!(adjacent.covers_range(1_000, 1_999));
+        // Nothing declared → nothing covered (the 150-cap case).
+        assert!(!KnownGaps::parse("").covers_range(1, 1));
+        assert!(!KnownGaps::parse("").covers_range(150, 999));
     }
 
     #[test]

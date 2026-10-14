@@ -5278,9 +5278,14 @@ impl TurboSyncManager {
                 let near_tip = network_height > 0 && highest_contiguous + 5_000 >= network_height;
                 const MAX_UNREGISTERED_GAP_SKIP: u64 = 10_000;
 
-                if blocks_forward == 0 && gap_size > 0 && !near_tip && gap_size <= MAX_UNREGISTERED_GAP_SKIP {
+                // v10.11.112-rc12: and only when the stretch is a DECLARED permanent gap —
+                // see the same rule in apply_blocks_vec (the direct path). An undeclared
+                // stretch is pending, not absent: the blocks are stored below, the pointer
+                // stays, extend_pointer_over_stored_heights catches up once the stretch arrives.
+                let declared_gap = self.known_gaps.covers_range(highest_contiguous + 1, block.header.height - 1);
+                if blocks_forward == 0 && gap_size > 0 && !near_tip && gap_size <= MAX_UNREGISTERED_GAP_SKIP && declared_gap {
                     warn!(
-                        "🔍 [v10.11.104 GAP SKIP] Historical gap at start of pack {}-{}: {} heights ({}-{}), advancing pointer",
+                        "🔍 [v10.11.104 GAP SKIP] Historical gap at start of pack {}-{}: {} heights ({}-{}) — declared permanent gap, advancing pointer",
                         pack.start_height, pack.end_height, gap_size,
                         highest_contiguous + 1, block.header.height - 1
                     );
@@ -5288,7 +5293,14 @@ impl TurboSyncManager {
                     blocks_forward += 1; // Count this as a forward block
                     gap_detected = false; // Reset gap detection since we skipped it
                 } else {
-                    if near_tip {
+                    if blocks_forward == 0 && gap_size > 0 && !near_tip && gap_size <= MAX_UNREGISTERED_GAP_SKIP && !declared_gap {
+                        warn!(
+                            "🚫 [GAP SKIP REFUSED-UNDECLARED v10.11.112] Pack {}-{}: {} heights ({}-{}) at start are not a \
+                             declared permanent gap — blocks stored, pointer stays at {}; the stretch will be re-requested",
+                            pack.start_height, pack.end_height, gap_size,
+                            highest_contiguous + 1, block.header.height - 1, highest_contiguous
+                        );
+                    } else if near_tip {
                         warn!(
                             "⏸️ [TIP GAP STOP] Gap of {} blocks ({}-{}) at live tip (contiguous={}, network={}) \
                              in pack {}-{} — NOT skipping, gossipsub will fill it. Height pointer stays at {}.",
@@ -5837,6 +5849,10 @@ impl TurboSyncManager {
         // We acquire it here unconditionally to be safe for any future code paths.
         let current_db_height = current_height; // Already fetched at start of function
 
+        // v10.11.112-rc12: catch up over heights already stored above the pointer and over
+        // declared permanent gaps (see extend_pointer_over_stored_heights).
+        highest_contiguous = self.extend_pointer_over_stored_heights(highest_contiguous).await;
+
         if highest_contiguous > current_db_height {
             // 🚨 v2.2.0: Acquire global lock for pointer update
             let _global_guard = self.storage.acquire_global_write_lock().await;
@@ -6035,9 +6051,32 @@ impl TurboSyncManager {
                         );
                         break;
                     }
+                    // v10.11.112-rc12: only a DECLARED permanent gap may be skipped.
+                    // Measured 2026-10-14 (rig follower F116 against production): the serving
+                    // node answers a 1,000-block chunk with at most Q_BLOCK_PACK_MAX=150 blocks;
+                    // the client booked the chunk complete and THIS branch then walked the
+                    // pointer over the 850 heights the server never sent. A fresh node kept
+                    // 150 of every 1,000 heights of a 100 %-dense chain and reported a
+                    // successful sync. Heights nobody has declared absent are not absent,
+                    // they are not served yet: store the blocks, leave the pointer where it
+                    // is, and let the continuation/scheduler re-request the stretch. The
+                    // pointer later catches up over already-stored heights (extend_pointer_
+                    // over_stored_heights), so out-of-order arrival from parallel streams
+                    // still completes.
+                    let gap_lo = highest_contiguous + 1;
+                    let gap_hi = block.header.height - 1;
+                    if !self.known_gaps.covers_range(gap_lo, gap_hi) {
+                        warn!(
+                            "🚫 [GAP SKIP REFUSED-UNDECLARED v10.11.112] {} heights ({}-{}) at start of batch \
+                             are not a declared permanent gap — storing the {} received blocks, pointer stays at {}; \
+                             the stretch will be re-requested",
+                            gap_size, gap_lo, gap_hi, blocks.len(), highest_contiguous
+                        );
+                        break;
+                    }
                     warn!(
-                        "🔍 [v6.1.0 GAP SKIP] Historical gap at start of batch: {} heights ({}-{}), advancing pointer",
-                        gap_size, highest_contiguous + 1, block.header.height - 1
+                        "🔍 [v6.1.0 GAP SKIP] Historical gap at start of batch: {} heights ({}-{}) — declared permanent gap, advancing pointer",
+                        gap_size, gap_lo, gap_hi
                     );
                     highest_contiguous = block.header.height;
                     blocks_forward += 1;
@@ -6181,6 +6220,11 @@ impl TurboSyncManager {
             self.storage.sync_wal().await?;
         }
 
+        // v10.11.112-rc12: catch up over heights that are already stored above the pointer
+        // (out-of-order arrival from parallel streams, earlier continuation rounds) and over
+        // declared permanent gaps. Exact-key probes, no deserialisation.
+        highest_contiguous = self.extend_pointer_over_stored_heights(highest_contiguous).await;
+
         // Update height pointer if increased
         if highest_contiguous > current_height {
             let _global_guard = self.storage.acquire_global_write_lock().await;
@@ -6204,6 +6248,61 @@ impl TurboSyncManager {
         );
 
         Ok(())
+    }
+
+    /// v10.11.112-rc12: after a batch computed the new contiguous pointer, walk it forward
+    /// over heights that are ALREADY stored (out-of-order arrival from parallel streams,
+    /// a continuation round that landed earlier, a restart with the pointer behind) and
+    /// over declared permanent gaps. This is what lets the client refuse to skip
+    /// undeclared stretches (see the GAP SKIP REFUSED-UNDECLARED rule) without stalling:
+    /// a stretch that arrives later is picked up here. Exact-key probes in all three
+    /// block key formats, 1,000 heights per probe, at most 200,000 heights per call.
+    /// Read-only on storage; the caller persists the pointer.
+    async fn extend_pointer_over_stored_heights(&self, pointer: u64) -> u64 {
+        const PROBE_BATCH: u64 = 1_000;
+        const MAX_EXTEND_PER_CALL: u64 = 200_000;
+        let start = pointer;
+        let mut p = pointer;
+        loop {
+            if p.saturating_sub(start) >= MAX_EXTEND_PER_CALL {
+                break;
+            }
+            // A declared permanent gap directly above the pointer is jumped, never probed.
+            if let Some((gs, ge)) = self.known_gaps.next_gap_above(p) {
+                if p + 1 >= gs && p + 1 <= ge {
+                    p = ge;
+                    continue;
+                }
+            }
+            let candidates: Vec<u64> = (p + 1..=p + PROBE_BATCH).collect();
+            let present = match self.storage.heights_with_any_block_key(&candidates).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("⚠️ [POINTER EXTEND v10.11.112] probe above {} failed: {} — leaving the pointer", p, e);
+                    break;
+                }
+            };
+            // `present` keeps candidate order: advance while the run is consecutive.
+            let mut advanced = 0u64;
+            for h in present {
+                if h == p + 1 {
+                    p = h;
+                    advanced += 1;
+                } else {
+                    break;
+                }
+            }
+            if advanced < PROBE_BATCH {
+                break;
+            }
+        }
+        if p > start {
+            info!(
+                "⏩ [POINTER EXTEND v10.11.112] contiguous {} → {} over {} already-stored heights and declared gaps",
+                start, p, p - start
+            );
+        }
+        p
     }
 
     /// Download and apply a single chunk from a peer
@@ -6317,7 +6416,20 @@ impl TurboSyncManager {
         // - Point-to-point communication (no broadcast flooding)
         // - Built-in 60s timeout (vs gossipsub's unreliable delivery)
         // ========================================
-        let pack = if let Some(network_tx) = &self.network_tx {
+        // v10.11.112-rc12 CONTINUATION: `cursor` is the first height still wanted from this
+        // chunk. A reply that stops short of `end_height` (server reply cap Q_BLOCK_PACK_MAX,
+        // byte budget, signature-truncated tail) is applied and then the REMAINDER is
+        // requested again from the same peer, until the chunk's last height has arrived or
+        // the peer stops making progress. Before this, a short reply was booked as the whole
+        // chunk (every client version): against a server capped at 150 blocks per reply a
+        // fresh node kept 150 of every 1,000 dense heights and reported a successful sync
+        // (measured 2026-10-14, rig follower F116 vs production).
+        let mut cursor = start_height;
+        let mut continuation_rounds: u32 = 0;
+        const MAX_CONTINUATION_ROUNDS: u32 = 4_096;
+        let pack = loop {
+            let round_start = Instant::now();
+            let fallback_pack = if let Some(network_tx) = &self.network_tx {
             // Create oneshot channel for response
             let (response_tx, response_rx) = oneshot::channel();
 
@@ -6325,7 +6437,7 @@ impl TurboSyncManager {
             // This is much more reliable for large block batches
             if let Err(e) = network_tx.send(NetworkRequest::RequestBlockRangeDirect {
                 peer_id: Some(peer.to_string()), // Send to specific peer
-                start_height,
+                start_height: cursor,
                 end_height,
                 response_tx,
             }) {
@@ -6333,11 +6445,16 @@ impl TurboSyncManager {
             }
 
             // 🚀 v1.0.5-beta: Record request sent for RTT tracking
-            pipeline_slot.sent(start_height, end_height).await;
+            pipeline_slot.sent(cursor, end_height).await;
 
             // 📨 v1.3.9-beta: LOUD direct request logging
-            info!("📨 [P2P DIRECT] Requesting blocks {}..={} via request-response from {}",
-                  start_height, end_height, peer);
+            if continuation_rounds == 0 {
+                info!("📨 [P2P DIRECT] Requesting blocks {}..={} via request-response from {}",
+                      cursor, end_height, peer);
+            } else {
+                info!("📨 [P2P DIRECT] Requesting blocks {}..={} via request-response from {} (continuation round {} of chunk {}..={})",
+                      cursor, end_height, peer, continuation_rounds, start_height, end_height);
+            }
 
             // 🚀 v3.4.7-beta: Use adaptive timeout (10s-45s range for faster retry)
             // 🔭 v1.0.2-KALMAN: Blend Kalman-predicted timeout (30% weight) with RTT-based (70%)
@@ -6374,10 +6491,11 @@ impl TurboSyncManager {
                     match blocks_result {
                         Ok(blocks) => {
                             // 🚀 v1.0.5-beta: Record response received for RTT tracking
-                            pipeline_slot.received(start_height).await;
+                            pipeline_slot.received(cursor).await;
 
                             // 🚀 v1.0.50-beta: Record RTT for adaptive timeout adjustment
-                            let rtt_ms = chunk_start.elapsed().as_millis() as u64;
+                            // (v10.11.112-rc12: per round, so continuation rounds do not inflate it)
+                            let rtt_ms = round_start.elapsed().as_millis() as u64;
                             {
                                 let mut timeout_calc = self.adaptive_timeout.write().await;
                                 timeout_calc.record_rtt(rtt_ms);
@@ -6391,10 +6509,14 @@ impl TurboSyncManager {
                             // Previously (v10.2.8) this was treated as FAILURE, but combined with
                             // v10.2.9's early-abort on missing blocks in get_qblocks_range(),
                             // it created a deadlock: server returns 0 (by design) → client rejects 0 (by design).
-                            let requested_size = end_height.saturating_sub(start_height) + 1;
+                            // v10.11.112-rc12: the contiguous pointer is NOT moved by this — an
+                            // empty tail is left to the permanent-gap pipeline (an archive server
+                            // declares it) or to the next scheduler round.
+                            let requested_size = end_height.saturating_sub(cursor) + 1;
                             if blocks.is_empty() && requested_size > 0 {
-                                info!("📭 [SPARSE-SYNC] Peer {} returned 0 blocks for range {}-{} (requested {}) — sparse DAG, advancing cursor",
-                                      peer, start_height, end_height, requested_size);
+                                info!("📭 [SPARSE-SYNC] Peer {} returned 0 blocks for range {}-{} (requested {}) — sparse DAG, advancing cursor{}",
+                                      peer, cursor, end_height, requested_size,
+                                      if continuation_rounds > 0 { format!(" (empty tail of chunk {}..={} after {} continuation round(s))", start_height, end_height, continuation_rounds) } else { String::new() });
                                 // Skip apply_blocks_vec — nothing to apply. Just advance past this range.
                                 self.metrics.active_parallel_streams.fetch_sub(1, Ordering::Relaxed);
 
@@ -6411,7 +6533,7 @@ impl TurboSyncManager {
                                 return Ok(());
                             }
 
-                            let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(start_height);
+                            let actual_start = blocks.first().map(|b| b.header.height).unwrap_or(cursor);
                             let actual_end = blocks.last().map(|b| b.header.height).unwrap_or(end_height);
 
                             // 🚀 v1.0.50-beta: Track successful download for peer scoring
@@ -6467,8 +6589,42 @@ impl TurboSyncManager {
                                 self.apollo_update_kalman(bandwidth_mbps, latency_ms, 0.0).await;
                             }
 
-                            info!("🚀 Downloaded+applied chunk {}-{} from {} in {}ms (direct, retry: {})",
-                                  start_height, end_height, peer, chunk_time.as_millis(), retry_count);
+                            // v10.11.112-rc12 CONTINUATION: the chunk is complete only when the last
+                            // block received is the chunk's last height. Otherwise ask the same peer
+                            // for the remainder. No progress (last block below the cursor) or an
+                            // absurd number of rounds → error, so the retry/peer-rotation logic in
+                            // download_chunks_parallel takes over instead of booking a hole.
+                            if actual_end < end_height {
+                                if actual_end < cursor {
+                                    anyhow::bail!(
+                                        "peer {} answered {}..={} with blocks ending at {} (below the cursor) — no progress. Will retry.",
+                                        peer, cursor, end_height, actual_end
+                                    );
+                                }
+                                continuation_rounds += 1;
+                                if continuation_rounds > MAX_CONTINUATION_ROUNDS {
+                                    anyhow::bail!(
+                                        "chunk {}..={} still incomplete after {} continuation rounds (served up to {}). Will retry.",
+                                        start_height, end_height, continuation_rounds, actual_end
+                                    );
+                                }
+                                let next = actual_end + 1;
+                                info!("🔁 [CONTINUATION v10.11.112] peer {} served {} blocks {}..={} of requested {}..={} — re-requesting {}..={} (round {}, chunk {}..={})",
+                                      peer, block_count, actual_start, actual_end, cursor, end_height, next, end_height,
+                                      continuation_rounds, start_height, end_height);
+                                cursor = next;
+                                // this round's fetch_sub above balanced the fetch_add before the loop
+                                self.metrics.active_parallel_streams.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+
+                            if continuation_rounds > 0 {
+                                info!("🚀 Downloaded+applied chunk {}-{} from {} in {}ms (direct, retry: {}, completed in {} continuation rounds)",
+                                      start_height, end_height, peer, chunk_start.elapsed().as_millis(), retry_count, continuation_rounds + 1);
+                            } else {
+                                info!("🚀 Downloaded+applied chunk {}-{} from {} in {}ms (direct, retry: {})",
+                                      start_height, end_height, peer, chunk_time.as_millis(), retry_count);
+                            }
 
                             return Ok(());
                         }
@@ -6599,6 +6755,8 @@ impl TurboSyncManager {
             // Network not configured, use local pack creation (hybrid mode)
             debug!("📦 [TURBO SYNC HYBRID] Network not available, using local pack creation");
             self.create_block_pack(start_height, end_height).await?
+        };
+            break fallback_pack;
         };
 
         // Apply the pack
