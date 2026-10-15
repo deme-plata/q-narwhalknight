@@ -428,32 +428,6 @@ fn default_token_decimals() -> u8 {
     24 // Default to 24 for QUG/QUGUSD (existing pools assumed to be QUG pairs)
 }
 
-/// v10.11.95: Convert an f64 amount in *base units* to u128 WITHOUT the silent
-/// saturation that `as u128` performs.
-///
-/// Rust float→int `as` casts saturate at the integer's bounds (since 1.45): they do
-/// not wrap and do not panic. That behaviour silently pinned the QUG/QUGUSD pool's
-/// QUGUSD reserve at `u128::MAX` (measured 2026-08-09: 99.999999999652% of the
-/// ceiling), which made every QUGUSD→QUG swap larger than ~1182 QUGUSD fail with
-/// "Pool calculation overflow" — and made every *smaller* swap silently misprice
-/// against a nonsense reserve. Worse, the reset that produced it re-ran on every
-/// startup, so the corruption regenerated after each restart.
-///
-/// Returns `None` for anything not exactly representable as a u128 (NaN, infinite,
-/// negative, or ≥ 2^128). Callers MUST fail loud and refuse to write on `None`
-/// rather than substituting a clamped value.
-fn checked_u128_from_f64(value: f64) -> Option<u128> {
-    if !value.is_finite() || value < 0.0 {
-        return None;
-    }
-    // 2^128 exactly; any f64 at or above this cannot be represented as a u128.
-    // Comparing in f64 is sound here because 2^128 is exactly representable.
-    if value >= 340_282_366_920_938_463_463_374_607_431_768_211_456.0_f64 {
-        return None;
-    }
-    Some(value as u128)
-}
-
 /// v7.2.5: Bootstrap bridge token AMM pools (wBTC/QUG, wZEC/QUG, wIRON/QUG, wETH/QUG)
 /// v8.2.7: Dynamic oracle prices — fetches live BTC/ETH/ZEC prices from CoinGecko/Binance
 /// Called during AppState initialization to create cross-chain trading pairs
@@ -2660,68 +2634,12 @@ impl AppState {
                     break;
                 }
             }
-            // v8.5.9: Force pool reserves to match $3000 target price on every startup.
-            // Ghost trades from the supply inflation bug contaminated reserves — rather than
-            // deleting the pool (which re-bootstraps with stale data), we directly correct
-            // the reserve ratio to the authoritative oracle price.
-            {
-                let target_price = 3000.0_f64;
-                // v10.11.106e: STARTUP NEVER REWRITES RESERVES. The pool's reserves belong to its
-                // liquidity providers; forcing them to a $3000 target on boot changed the price
-                // and LP value behind everyone's back (and once pinned reserve1 at u128::MAX).
-                // A drift is now logged and left alone.
-                if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
-                    tracing::warn!(
-                        "💱 [v10.11.106e] QUG/QUGUSD pool price ${:.2} is outside ±10% of ${:.0}; reserves NOT rewritten (startup is read-only for pools)",
-                        pool_price, target_price
-                    );
-                }
-                const STARTUP_PEG_RESET: bool = false;
-                if STARTUP_PEG_RESET && pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
-                    // Pool ratio drifted >10% from target — reset reserves
-                    let pool_id = "pool-qug-qugusd-bootstrap".to_string();
-                    if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
-                        // DashMap RefMut derefs directly to LiquidityPool
-                        let qug_reserve_f64 = pool_ref.reserve0 as f64 / 1e24;
-                        // v10.11.95: CHECKED. `as u128` saturates rather than failing, which is
-                        // precisely how this pool's QUGUSD reserve got pinned at u128::MAX and
-                        // then re-pinned on every restart. Refuse to write what we cannot
-                        // represent instead of silently clamping.
-                        match checked_u128_from_f64(qug_reserve_f64 * target_price * 1e24) {
-                            Some(new_qugusd_reserve) => {
-                                tracing::warn!(
-                                    "💱 [v8.5.9] Pool price ${:.2} drifted from target ${:.0} — resetting reserves (QUG={:.2}, QUGUSD: {:.0} → {:.0})",
-                                    pool_price, target_price, qug_reserve_f64,
-                                    pool_ref.reserve1 as f64 / 1e24, new_qugusd_reserve as f64 / 1e24
-                                );
-                                pool_ref.reserve1 = new_qugusd_reserve;
-                                let new_lp_supply = checked_u128_from_f64(
-                                    (pool_ref.reserve0 as f64 * new_qugusd_reserve as f64).sqrt(),
-                                )
-                                .unwrap_or(pool_ref.lp_token_supply);
-                                pool_ref.lp_token_supply = new_lp_supply;
-                                // Serialize and persist
-                                if let Ok(data) = serde_json::to_vec(&*pool_ref) {
-                                    let _ = storage_engine.save_liquidity_pool(&pool_id, &data).await;
-                                }
-                                pool_price = target_price;
-                            }
-                            None => {
-                                tracing::error!(
-                                    "🚨 [v10.11.95] REFUSING to reset pool {}: QUG reserve {:.2} × ${:.0} \
-                                     does not fit in u128 — the old code saturated here and corrupted the \
-                                     pool. Reserves left UNCHANGED. reserve0 is itself contaminated \
-                                     (bootstrap value is 10,000 QUG) and needs an operator decision, not a \
-                                     derived rewrite.",
-                                    pool_id, qug_reserve_f64, target_price
-                                );
-                            }
-                        }
-                    }
-                    vault_w.qug_price_usd = target_price;
-                    vault_w.last_price_update = chrono::Utc::now().timestamp();
-                }
-            }
+            // v10.11.114: the v8.5.9 startup reset that forced this pool back to $3000 is
+            // gone. Whenever the pool had moved more than 10% from $3000 it rewrote the QUGUSD
+            // reserve to reserve0 × 3000 on boot, so every restart (crash, watchdog, deploy)
+            // created or destroyed QUGUSD nobody had deposited (2026-10-15 10:18: $1,710 →
+            // exactly $3,000.0, ≈ +21 M QUGUSD in the pool). Only swaps and liquidity changes
+            // may move a pool's ratio; the vault price below follows the pool, never the reverse.
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
                 vault_w.last_price_update = chrono::Utc::now().timestamp();
@@ -4164,68 +4082,12 @@ impl AppState {
                     break;
                 }
             }
-            // v8.5.9: Force pool reserves to match $3000 target price on every startup.
-            // Ghost trades from the supply inflation bug contaminated reserves — rather than
-            // deleting the pool (which re-bootstraps with stale data), we directly correct
-            // the reserve ratio to the authoritative oracle price.
-            {
-                let target_price = 3000.0_f64;
-                // v10.11.106e: STARTUP NEVER REWRITES RESERVES. The pool's reserves belong to its
-                // liquidity providers; forcing them to a $3000 target on boot changed the price
-                // and LP value behind everyone's back (and once pinned reserve1 at u128::MAX).
-                // A drift is now logged and left alone.
-                if pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
-                    tracing::warn!(
-                        "💱 [v10.11.106e] QUG/QUGUSD pool price ${:.2} is outside ±10% of ${:.0}; reserves NOT rewritten (startup is read-only for pools)",
-                        pool_price, target_price
-                    );
-                }
-                const STARTUP_PEG_RESET: bool = false;
-                if STARTUP_PEG_RESET && pool_price > 0.0 && (pool_price < target_price * 0.9 || pool_price > target_price * 1.1) {
-                    // Pool ratio drifted >10% from target — reset reserves
-                    let pool_id = "pool-qug-qugusd-bootstrap".to_string();
-                    if let Some(mut pool_ref) = liquidity_pools_map.get_mut(&pool_id) {
-                        // DashMap RefMut derefs directly to LiquidityPool
-                        let qug_reserve_f64 = pool_ref.reserve0 as f64 / 1e24;
-                        // v10.11.95: CHECKED. `as u128` saturates rather than failing, which is
-                        // precisely how this pool's QUGUSD reserve got pinned at u128::MAX and
-                        // then re-pinned on every restart. Refuse to write what we cannot
-                        // represent instead of silently clamping.
-                        match checked_u128_from_f64(qug_reserve_f64 * target_price * 1e24) {
-                            Some(new_qugusd_reserve) => {
-                                tracing::warn!(
-                                    "💱 [v8.5.9] Pool price ${:.2} drifted from target ${:.0} — resetting reserves (QUG={:.2}, QUGUSD: {:.0} → {:.0})",
-                                    pool_price, target_price, qug_reserve_f64,
-                                    pool_ref.reserve1 as f64 / 1e24, new_qugusd_reserve as f64 / 1e24
-                                );
-                                pool_ref.reserve1 = new_qugusd_reserve;
-                                let new_lp_supply = checked_u128_from_f64(
-                                    (pool_ref.reserve0 as f64 * new_qugusd_reserve as f64).sqrt(),
-                                )
-                                .unwrap_or(pool_ref.lp_token_supply);
-                                pool_ref.lp_token_supply = new_lp_supply;
-                                // Serialize and persist
-                                if let Ok(data) = serde_json::to_vec(&*pool_ref) {
-                                    let _ = storage_engine.save_liquidity_pool(&pool_id, &data).await;
-                                }
-                                pool_price = target_price;
-                            }
-                            None => {
-                                tracing::error!(
-                                    "🚨 [v10.11.95] REFUSING to reset pool {}: QUG reserve {:.2} × ${:.0} \
-                                     does not fit in u128 — the old code saturated here and corrupted the \
-                                     pool. Reserves left UNCHANGED. reserve0 is itself contaminated \
-                                     (bootstrap value is 10,000 QUG) and needs an operator decision, not a \
-                                     derived rewrite.",
-                                    pool_id, qug_reserve_f64, target_price
-                                );
-                            }
-                        }
-                    }
-                    vault_w.qug_price_usd = target_price;
-                    vault_w.last_price_update = chrono::Utc::now().timestamp();
-                }
-            }
+            // v10.11.114: the v8.5.9 startup reset that forced this pool back to $3000 is
+            // gone. Whenever the pool had moved more than 10% from $3000 it rewrote the QUGUSD
+            // reserve to reserve0 × 3000 on boot, so every restart (crash, watchdog, deploy)
+            // created or destroyed QUGUSD nobody had deposited (2026-10-15 10:18: $1,710 →
+            // exactly $3,000.0, ≈ +21 M QUGUSD in the pool). Only swaps and liquidity changes
+            // may move a pool's ratio; the vault price below follows the pool, never the reverse.
             if pool_price > 0.0 && pool_price < 1_000_000.0 {
                 vault_w.qug_price_usd = pool_price;
                 vault_w.last_price_update = chrono::Utc::now().timestamp();
