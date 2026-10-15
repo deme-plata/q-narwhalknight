@@ -15044,7 +15044,8 @@ pub async fn execute_swap(
     // 🔧 v2.9.24-beta: Emit TokenBalanceUpdated SSE for INSTANT "My Tokens" updates
     // This provides immediate UI feedback without waiting for block confirmation or 30s refresh
     // v3.6.15: Use correct token decimals instead of hardcoded QUG_DISPLAY_DIVISOR
-    {
+    // v10.11.114: the block also yields the post-swap balances for the response below.
+    let (resp_from_balance, resp_to_balance) = {
         let wallet_address_str = request.wallet_address.clone();
 
         // v5.5.4: Token balances for custom tokens are stored in 10^(2*decimals) format
@@ -15142,7 +15143,9 @@ pub async fn execute_swap(
                   new_to_balance as f64 / to_divisor,
                   to_divisor);
         }
-    }
+
+        (new_from_balance, new_to_balance)
+    };
 
     // v3.6.10-beta: Convert u128 values to strings to avoid JSON number overflow
     // JSON numbers are f64 which can't represent large u128 values accurately
@@ -15157,7 +15160,16 @@ pub async fn execute_swap(
         "queued_for_block": submission_result.queued_for_block,
         "broadcast_success": submission_result.broadcast_success,
         "pool_id": hex::encode(pool_id_bytes),
-        "message": "Swap transaction submitted for consensus verification. Balance will update when block is finalized."
+        // v10.11.114: the wallet's balances AFTER this swap, as the node now holds them
+        // (24-decimal base units). Clients show these instead of computing
+        // `balance − amount_in` themselves: that sum double-subtracted whenever a
+        // balance update landed while the request was in flight (2026-10-15: 34,289 QUG
+        // shown as 29,289 after a 5,000 QUG swap). The debit is applied by the time this
+        // returns; it does not wait for a block.
+        "new_from_balance": resp_from_balance.to_string(),
+        "new_to_balance": resp_to_balance.to_string(),
+        "balance_decimals": 24,
+        "message": "Swap applied. new_from_balance and new_to_balance are your balances after this swap."
     }))));
 
     // NOTE: Legacy direct state modification code has been removed.
