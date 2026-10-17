@@ -6165,9 +6165,11 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                 warn!("   Cache shows: {} blocks", cached_height);
                 warn!("   Actual highest: {} blocks", actual_height);
                 warn!("   Gap in chain caused contiguous scan to return low value");
-                state.storage_engine.update_height_cache(actual_height).await;
-                state.current_height_atomic.store(actual_height, std::sync::atomic::Ordering::SeqCst);
-                warn!("🔧 [v1.5.0] Height cache and current_height_atomic FIXED to {}", actual_height);
+                // v10.11.116: NOT applied any more. Setting the cache and the API height to the
+                // highest stored block made a syncing node believe it was at the tip with holes
+                // underneath (it then announced and served heights it does not hold, and turbo
+                // sync stopped requesting the holes). Both now follow the contiguous pointer.
+                warn!("🧱 [POINTER CHOKEPOINT v10.11.116] height cache and API height stay at the contiguous height {} (highest stored {} is NOT adopted)", cached_height, actual_height);
             } else if gap > 0 && gap < 10_000 && actual_height > 1000 {
                 info!("🔍 [v10.3.11] Small height gap detected (contiguous={}, tip={}, gap={})",
                       cached_height, actual_height, gap);

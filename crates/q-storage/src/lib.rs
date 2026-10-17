@@ -1038,10 +1038,15 @@ impl QStorage {
                         current_pointer, initial_height, e
                     );
                 } else {
+                    // v10.11.116: the call walks (POINTER CHOKEPOINT) — report where the pointer
+                    // really is, not the candidate. Fragments above a hole stay fragments.
+                    let healed_to: u64 = match storage.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+                        Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8])),
+                        _ => current_pointer,
+                    };
                     warn!(
-                        "🔧 [POINTER-HEAL] qblock:latest healed {} → {} (matches scan_highest_contiguous). \
-                         This unsticks turbo-sync request building after a checkpoint apply.",
-                        current_pointer, initial_height
+                        "🔧 [POINTER-HEAL] qblock:latest {} → {} (scan saw blocks up to {}; the pointer only crosses stored blocks and declared gaps)",
+                        current_pointer, healed_to, initial_height
                     );
                 }
             }
@@ -1057,6 +1062,26 @@ impl QStorage {
             let re_scanned = storage.scan_highest_contiguous_block_internal().await?;
             storage.height_cache.force_set(re_scanned).await;
             info!("✅ Height cache re-initialized to {} after corruption cleanup", re_scanned);
+        }
+
+        // v10.11.116: at boot the height cache MIRRORS the persisted pointer. It used to be left
+        // at the HIGH PROBE result (the highest stored block), i.e. above every hole on a node
+        // that was syncing — and the cache feeds the turbo scan start, HEIGHT RECOVERY, the
+        // safe_floor written every balance tick, and the API height. On a producer the two are
+        // equal (blocks are saved at pointer+1), so this changes nothing there.
+        {
+            let committed: u64 = match storage.hot_db.get(CF_BLOCKS, b"qblock:latest").await? {
+                Some(bytes) if bytes.len() == 8 => u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0u8; 8])),
+                _ => 0,
+            };
+            let cached = storage.height_cache.cached();
+            if committed > 0 && cached > committed {
+                storage.height_cache.force_set(committed).await;
+                warn!(
+                    "🧱 [POINTER CHOKEPOINT v10.11.116] boot: height cache {} lowered to the contiguous pointer {} ({} heights above it are stored fragments or holes; sync will fill them)",
+                    cached, committed, cached - committed
+                );
+            }
         }
 
         // FIX 1.4: STARTUP INTEGRITY CHECK (v0.9.93-beta)
@@ -2320,6 +2345,42 @@ impl QStorage {
         if candidate_height <= current {
             return Ok(false);
         }
+        // v10.11.116 POINTER CHOKEPOINT: never write a height that cannot be reached from the
+        // CURRENT pointer by walking over present heights and declared permanent gaps.
+        //
+        // Until now this function wrote whatever it was handed. Its callers include the boot
+        // POINTER-HEAL (candidate = "highest stored block", found by the HIGH PROBE), the turbo
+        // scan (starting from the height cache), auto-repair and HEIGHT RECOVERY. Under
+        // parallel sync there are always fragments ABOVE the contiguous frontier, so every
+        // restart moved the pointer to the top of the highest fragment and sealed the holes
+        // between them for ever (reproduced 3x on 2026-10-14: 700 / 3,250 heights).
+        //
+        // The walk starts at the current pointer, so its cost is the distance actually
+        // advanced: one probe per block for the producer (P+1), and an immediate stop at the
+        // first hole for a follower with fragments. It never certifies the past and never
+        // refuses forward progress over present blocks, so a database whose history below the
+        // pointer is incomplete (production) keeps working exactly as before. The remainder of
+        // a refused candidate is picked up by tick_contiguity_advance once the blocks land.
+        const MAX_CHOKEPOINT_PROBES: u64 = 1_000_000;
+        let mut reach = current;
+        while reach < candidate_height && reach - current < MAX_CHOKEPOINT_PROBES {
+            let next = self.advance_contiguous_tip(reach).await?;
+            if next <= reach {
+                break;
+            }
+            reach = next;
+        }
+        let target = reach.min(candidate_height);
+        if target < candidate_height {
+            warn!(
+                "🧱 [POINTER CHOKEPOINT v10.11.116] refused {} → {}: walk over stored blocks and declared gaps reaches {} (first missing height {})",
+                current, candidate_height, target, target + 1
+            );
+        }
+        if target <= current {
+            return Ok(false);
+        }
+        let candidate_height = target;
         let height_bytes = candidate_height.to_be_bytes();
         self.hot_db
             .put_sync(CF_BLOCKS, b"qblock:latest", &height_bytes)

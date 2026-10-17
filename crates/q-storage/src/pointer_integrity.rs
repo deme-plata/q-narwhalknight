@@ -506,10 +506,13 @@ impl PointerIntegrityChecker {
                 // v3.9.3-beta: Auto-repair if pointer is BEHIND (safe - blocks already exist)
                 // Only refuse if pointer is AHEAD (dangerous - would point to non-existent blocks)
                 if check_result.actual_highest_height >= check_result.pointer_height {
-                    warn!("   Pointer is behind actual blocks - safe to auto-repair");
-                    self.repair_pointer(check_result.actual_highest_height)?;
-                    info!("✅ Auto-repair successful! Pointer updated: {} → {}",
-                          check_result.pointer_height, check_result.actual_highest_height);
+                    // v10.11.116: a pointer BEHIND the highest stored block is the normal state of
+                    // a node that was syncing (fragments above the contiguous frontier). Raising it
+                    // here sealed the holes between the fragments on every restart (2026-10-14).
+                    // Report only; the pointer advances through the chokepoint as blocks land.
+                    warn!("   Pointer is behind the highest stored block — NOT repaired (v10.11.116): \
+                           stored blocks above it may sit above holes; sync fills them and the pointer \
+                           advances only over stored blocks and declared gaps");
                     Ok(())
                 } else {
                     error!("🚨 Pointer is AHEAD of actual blocks - manual intervention required");
@@ -522,6 +525,13 @@ impl PointerIntegrityChecker {
                        check_result.pointer_height,
                        check_result.actual_highest_height,
                        check_result.actual_highest_height.saturating_sub(check_result.pointer_height));
+                if check_result.actual_highest_height > check_result.pointer_height {
+                    // v10.11.116: same reasoning as Moderate — never raise over possible holes.
+                    warn!("   Pointer is {} behind the highest stored block — NOT raised (v10.11.116); \
+                           the chokepoint advances it over stored blocks and declared gaps only",
+                          check_result.actual_highest_height - check_result.pointer_height);
+                    return Ok(());
+                }
                 error!("🔧 Attempting automatic recovery...");
 
                 self.repair_pointer(check_result.actual_highest_height)?;
