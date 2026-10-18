@@ -1763,7 +1763,13 @@ pub async fn add_liquidity(
     let transaction = q_api_server::transaction_utils::TransactionBuilder::new()
         .from(provider)
         .to([0u8; 32]) // Pool contract address
-        .amount(request.amount0)
+        // v10.11.114a (2026-10-18): the record carries NO QUG. The QUG side has already moved
+        // above (in-memory debit + save_wallet_balance_authoritative + record_dex_qug_debit, so it
+        // also survives a balance rebuild). With `.amount(request.amount0)` this record, once it
+        // reached a block, charged the provider the same QUG a second time — measured live on
+        // 10.11.114: a 1 QUG + 2,173 QUGUSD add cost the wallet 2 QUG while the pool gained 1.
+        // The amounts stay in `data` below, so history still shows what was deposited.
+        .amount(0)
         .fee(0) // No fee for liquidity provision
         .data(
             format!(
