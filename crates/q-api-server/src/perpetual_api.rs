@@ -2624,6 +2624,20 @@ async fn cancel_limit_order(
 // Router
 // ============================================================================
 
+/// v10.11.114a (2026-10-18): every perp WRITE route answers 503 and moves nothing; the reads stay so
+/// the page still renders. The market cannot work as built (u64 amounts in 1e24 base units saturate,
+/// the index price reads u64::MAX) and is not safe to switch on as it stands — rebuild it before
+/// re-adding these routes. Access logs 10-15 → 10-18 show zero writes, so no position is stranded.
+async fn perp_writes_disabled() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "success": false,
+            "error": "Perpetual trading is switched off while it is rebuilt. No position or order can be opened or changed."
+        })),
+    )
+}
+
 /// Create the perpetual futures API router
 pub fn create_perp_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -2632,25 +2646,25 @@ pub fn create_perp_router() -> Router<Arc<AppState>> {
         .route("/markets/:symbol", get(get_market_info))
         .route("/markets/:symbol/funding", get(get_funding_rate))
 
-        // Positions
+        // Positions (writes off since v10.11.114a; handlers kept: open_position, close_position,
+        // add_margin, remove_margin, adjust_leverage)
         .route("/positions/:wallet_address", get(get_positions))
-        .route("/positions/open", post(open_position))
-        .route("/positions/:position_id/close", post(close_position))
-        .route("/positions/:position_id/margin", post(add_margin))
-        // v2.7.8-beta: Position editing endpoints
-        .route("/positions/:position_id/margin/remove", post(remove_margin))
-        .route("/positions/:position_id/leverage", post(adjust_leverage))
+        .route("/positions/open", post(perp_writes_disabled))
+        .route("/positions/:position_id/close", post(perp_writes_disabled))
+        .route("/positions/:position_id/margin", post(perp_writes_disabled))
+        .route("/positions/:position_id/margin/remove", post(perp_writes_disabled))
+        .route("/positions/:position_id/leverage", post(perp_writes_disabled))
 
-        // Orders (market orders)
+        // Orders (market orders; writes off: place_order, cancel_order)
         .route("/orders/:wallet_address", get(get_orders))
-        .route("/orders", post(place_order))
-        .route("/orders/:wallet_address/:order_id", delete(cancel_order))
+        .route("/orders", post(perp_writes_disabled))
+        .route("/orders/:wallet_address/:order_id", delete(perp_writes_disabled))
 
-        // Phase 2: Order Book & Limit Orders
+        // Phase 2: Order Book & Limit Orders (writes off: place_limit_order, cancel_limit_order)
         .route("/orderbook/:symbol", get(get_orderbook_depth))
-        .route("/limit-orders", post(place_limit_order))
+        .route("/limit-orders", post(perp_writes_disabled))
         .route("/limit-orders/:wallet_address", get(get_limit_orders))
-        .route("/limit-orders/:wallet_address/:order_id", delete(cancel_limit_order))
+        .route("/limit-orders/:wallet_address/:order_id", delete(perp_writes_disabled))
 
         // Account & History
         .route("/account/:wallet_address", get(get_account))
