@@ -3,14 +3,16 @@
 //! For each `SignatureContribution`:
 //!   1. Resolve `member_addr` → `Member` via the wallet's member set.
 //!   2. Verify the Ed25519 half over the canonical payload hash.
-//!   3. Verify the Dilithium5 half (using `open` on the signed-message form).
+//!   3. Verify the Dilithium5 half (detached) with `q_types`' shared verifier:
+//!      ML-DSA-87 as published (FIPS 204, what browsers and the MCP sign), then the
+//!      2023 draft `pqcrypto-dilithium` implements. Until 2026-10-19 this checked the
+//!      draft only, so no browser-made co-signature could ever count.
 //!   4. Count this member toward the threshold if BOTH pass.
 //!
 //! A proposal passes only if the count of valid contributions ≥
 //! `proposal.required`. Duplicate signatures from the same member count once.
 
-use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::DetachedSignature as _;
+use q_types::signature_verification::{verify_tx_pq_signature, MLDSA87_SIG_BYTES};
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -61,13 +63,10 @@ pub fn verify_member_signature(
 
     // Dilithium5 verify (post-quantum, detached — matches the P2P hybrid-send
     // convention; see the field doc on `dilithium5_signature`).
-    let sig = dilithium5::DetachedSignature::from_bytes(&contrib.dilithium5_signature)
-        .map_err(|_| VerifyError::Dilithium5BadEncoding(hex::encode(contrib.member_addr)))?;
-    let pk = member
-        .pubkey
-        .dilithium5_pubkey()
-        .map_err(|_| VerifyError::Dilithium5Failed(hex::encode(contrib.member_addr)))?;
-    dilithium5::verify_detached_signature(&sig, &payload, &pk)
+    if contrib.dilithium5_signature.len() != MLDSA87_SIG_BYTES {
+        return Err(VerifyError::Dilithium5BadEncoding(hex::encode(contrib.member_addr)));
+    }
+    verify_tx_pq_signature(&contrib.dilithium5_signature, &member.pubkey.dilithium5, &payload)
         .map_err(|_| VerifyError::Dilithium5Failed(hex::encode(contrib.member_addr)))?;
 
     Ok(())

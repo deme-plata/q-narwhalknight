@@ -11,7 +11,7 @@
 
 use ed25519_dalek::{SigningKey, Signer};
 use pqcrypto_dilithium::dilithium5;
-use pqcrypto_traits::sign::{PublicKey as _, SignedMessage as _};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use rand::rngs::OsRng;
 use rand::TryRngCore;
 
@@ -54,11 +54,13 @@ fn gen_signer(label: &str) -> TestSigner {
 fn sign_proposal(signer: &TestSigner, proposal: &MultisigProposal) -> SignatureContribution {
     let payload = proposal.payload_hash();
     let ed25519_sig = signer.ed25519_sk.sign(&payload);
-    let dilithium5_signed = dilithium5::sign(&payload, &signer.dilithium5_sk);
+    // v10.11.103 made contributions DETACHED; these tests still built the old
+    // signed-message field and had not compiled since (repaired 2026-10-19).
+    let dilithium5_sig = dilithium5::detached_sign(&payload, &signer.dilithium5_sk);
     SignatureContribution {
         member_addr: signer.member.pubkey.member_address(),
         ed25519_sig,
-        dilithium5_signed_msg: dilithium5_signed.as_bytes().to_vec(),
+        dilithium5_signature: dilithium5_sig.as_bytes().to_vec(),
         at_unix: chrono::Utc::now().timestamp(),
     }
 }
@@ -184,11 +186,11 @@ fn forged_ed25519_with_valid_dilithium_still_fails() {
     // Dilithium5 key.
     let payload = proposal.payload_hash();
     let bad_ed25519_sig = attacker_ed25519.sign(&payload); // wrong key!
-    let good_dilithium = dilithium5::sign(&payload, &claude.dilithium5_sk);
+    let good_dilithium = dilithium5::detached_sign(&payload, &claude.dilithium5_sk);
     let contrib = SignatureContribution {
         member_addr: claude.member.pubkey.member_address(),
         ed25519_sig: bad_ed25519_sig,
-        dilithium5_signed_msg: good_dilithium.as_bytes().to_vec(),
+        dilithium5_signature: good_dilithium.as_bytes().to_vec(),
         at_unix: chrono::Utc::now().timestamp(),
     };
     proposal.add_signature(contrib);

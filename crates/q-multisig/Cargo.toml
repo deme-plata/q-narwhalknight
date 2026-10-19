@@ -7,6 +7,10 @@ description = "Post-quantum M-of-N multisig for Quillon Graph — Dilithium5 + E
 [dependencies]
 # Crypto: hybrid PQ + classical (mirrors q-types::ValidatorKeypair).
 pqcrypto-dilithium = { workspace = true }
+# 2026-10-19: the post-quantum half is verified by q-types' shared verifier (ML-DSA-87
+# FIPS 204 final, then the 2023 draft) — the one the send path uses — so the editions
+# a multisig accepts can never drift from the editions a transaction accepts.
+q-types = { path = "../q-types" }
 pqcrypto-traits = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha3 = { workspace = true }
@@ -31,3 +35,7 @@ hex = "0.4"
 # — this was a latent bug since the crate had never actually been compiled as
 # part of q-api-server before now (it was dormant/unwired until this session).
 tokio = { version = "1", features = ["fs", "rt", "macros"] }
+
+[dev-dependencies]
+# 2026-10-19: real ML-DSA-87 (FIPS 204 final) signers for tests/pq_editions.rs.
+fips204 = "0.4"

@@ -39,7 +39,6 @@ use axum::{
     Json, Router,
 };
 use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey};
-use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -172,20 +171,36 @@ pub async fn register_key(Json(request): Json<RegisterKeyRequest>) -> Json<serde
         Ok(b) => b,
         Err(_) => return err("dilithium5_signature is not valid hex"),
     };
-    let dilithium5_pk = match pqcrypto_dilithium::dilithium5::PublicKey::from_bytes(&dilithium5_pk_bytes) {
-        Ok(k) => k,
-        Err(_) => return err("Invalid Dilithium5 public key bytes"),
-    };
-    let dilithium5_sig =
-        match pqcrypto_dilithium::dilithium5::DetachedSignature::from_bytes(&dilithium5_sig_bytes) {
-            Ok(s) => s,
-            Err(_) => return err("Invalid Dilithium5 signature bytes"),
-        };
-    if pqcrypto_dilithium::dilithium5::verify_detached_signature(&dilithium5_sig, &challenge, &dilithium5_pk)
-        .is_err()
-    {
-        tracing::warn!("🚫 [MULTISIG] register-key Dilithium5 verify failed for {}", request.address);
-        return err("Dilithium5 signature verification failed");
+    // 2026-10-19: verify with the shared transaction verifier — ML-DSA-87 as published
+    // (FIPS 204, what the wallet page and the MCP sign), then the 2023 draft. This handler
+    // used to call the draft-only pqcrypto verifier directly, so every browser
+    // registration failed here while the very same signature format passed on sends.
+    match q_types::signature_verification::verify_tx_pq_signature(
+        &dilithium5_sig_bytes,
+        &dilithium5_pk_bytes,
+        &challenge,
+    ) {
+        Ok(variant) => {
+            tracing::debug!("✅ [MULTISIG] register-key {:?} signature verified", variant);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "🚫 [MULTISIG] register-key Dilithium5 verify failed for {} (sig {} B): {}",
+                request.address,
+                dilithium5_sig_bytes.len(),
+                e
+            );
+            // 4,597 B = round-3.1 Dilithium (4,595 B) behind dilithium-crystals' 2-byte
+            // length header: the wallet page cut before 2026-10-19. Say so plainly.
+            if dilithium5_sig_bytes.len() == 4597 {
+                return err(
+                    "Dilithium5 signature verification failed: this page signed with the old \
+                     round-3.1 Dilithium library. Reload quillon.xyz (Ctrl+Shift+R), log in \
+                     again, and register once more.",
+                );
+            }
+            return err(format!("Dilithium5 signature verification failed: {e}"));
+        }
     }
 
     let pubkey = HybridPublicKey {
