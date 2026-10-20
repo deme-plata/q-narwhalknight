@@ -27,6 +27,7 @@ use tracing::{info, warn, error, debug};
 use sha3::{Digest, Sha3_256};
 
 use crate::AppState;
+use crate::wallet_auth::AuthenticatedWallet;
 
 // ============================================================================
 // P2P SYNC MESSAGE TYPES (v2.4.9-beta)
@@ -236,6 +237,12 @@ pub struct DcaOrder {
     #[serde(serialize_with = "q_types::u128_serde::serialize", deserialize_with = "q_types::u128_serde::deserialize")]
     pub total_received: u128,          // Total amount received so far
     pub last_error: Option<String>,    // Last error message if any
+    /// v10.11.114d: true only when THIS node created (or resumed) the order from a request signed
+    /// by the order's own wallet. Only such orders execute. Orders from before 114d were created
+    /// unsigned, and gossip "signatures" verify against a key carried in the same message, so
+    /// both load as false (serde default) and never trade a wallet on their own.
+    #[serde(default)]
+    pub wallet_signed: bool,
 }
 
 /// DCA Order Execution Log
@@ -271,6 +278,23 @@ pub struct CreateDcaRequest {
 fn default_slippage() -> f64 {
     0.03 // 3% default slippage
 }
+
+/// v10.11.114d: every DCA route acts on ONE wallet's orders, so the request must be signed by that
+/// wallet (X-Wallet-Auth). Before 114d anyone could create, list, pause or resume orders for any
+/// address — harmless only because execution never found a pool.
+fn require_owner(auth: &AuthenticatedWallet, wallet_address: &str) -> Result<(), (StatusCode, String)> {
+    match crate::handlers::parse_wallet_address(wallet_address) {
+        Ok(addr) if addr == auth.address => Ok(()),
+        Ok(_) => Err((
+            StatusCode::FORBIDDEN,
+            "Unauthorized: you can only manage the DCA orders of your own wallet".to_string(),
+        )),
+        Err(e) => Err((StatusCode::BAD_REQUEST, format!("Invalid wallet address: {}", e))),
+    }
+}
+
+const UNSIGNED_ORDER_MSG: &str =
+    "Paused: created before DCA orders were signed (v10.11.114d). Resume it to confirm it with your wallet, or cancel it.";
 
 /// Create DCA Order Response
 #[derive(Debug, Serialize)]
@@ -425,8 +449,28 @@ impl Default for DcaStorage {
 /// Create a new DCA order
 pub async fn create_dca_order(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Json(request): Json<CreateDcaRequest>,
 ) -> impl IntoResponse {
+    if let Err((code, message)) = require_owner(&wallet_auth, &request.wallet_address) {
+        warn!("🔐 [DCA] create refused: {}", message);
+        return (
+            code,
+            Json(CreateDcaResponse { success: false, order_id: None, message, next_execution_at: None }),
+        );
+    }
+    if !(request.max_slippage > 0.0 && request.max_slippage <= 0.10) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(CreateDcaResponse {
+                success: false,
+                order_id: None,
+                message: "max_slippage must be above 0 and at most 0.10 (10%)".to_string(),
+                next_execution_at: None,
+            }),
+        );
+    }
+
     info!(
         "📊 [DCA] Creating order: {} {} -> {} every {:?}",
         request.amount_per_execution, request.from_token, request.to_token, request.interval
@@ -500,6 +544,7 @@ pub async fn create_dca_order(
         total_spent: 0,
         total_received: 0,
         last_error: None,
+        wallet_signed: true, // signed by this wallet (require_owner above), on this node
     };
 
     // Store the order
@@ -544,8 +589,18 @@ pub async fn create_dca_order(
 /// Get all DCA orders for a wallet
 pub async fn get_wallet_dca_orders(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Path(wallet_address): Path<String>,
 ) -> impl IntoResponse {
+    // v10.11.114d: a wallet's schedule (amounts, next execution time) is private to its owner —
+    // a public schedule tells a front-runner exactly when to move a thin pool.
+    if let Err((code, message)) = require_owner(&wallet_auth, &wallet_address) {
+        warn!("🔐 [DCA] list refused: {}", message);
+        return (
+            code,
+            Json(DcaOrdersResponse { success: false, orders: vec![], total_active: 0, total_value_locked: 0 }),
+        );
+    }
     if let Some(dca_storage) = &state.dca_storage {
         let orders = dca_storage.orders.read().await;
 
@@ -587,8 +642,12 @@ pub async fn get_wallet_dca_orders(
 /// Cancel a DCA order
 pub async fn cancel_dca_order(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Path((wallet_address, order_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err((code, message)) = require_owner(&wallet_auth, &wallet_address) {
+        return (code, Json(serde_json::json!({ "success": false, "message": message })));
+    }
     if let Some(dca_storage) = &state.dca_storage {
         let mut orders = dca_storage.orders.write().await;
 
@@ -649,8 +708,12 @@ pub async fn cancel_dca_order(
 /// Pause a DCA order
 pub async fn pause_dca_order(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Path((wallet_address, order_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err((code, message)) = require_owner(&wallet_auth, &wallet_address) {
+        return (code, Json(serde_json::json!({ "success": false, "message": message })));
+    }
     if let Some(dca_storage) = &state.dca_storage {
         let mut orders = dca_storage.orders.write().await;
 
@@ -716,8 +779,12 @@ pub async fn pause_dca_order(
 /// Resume a paused DCA order
 pub async fn resume_dca_order(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Path((wallet_address, order_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err((code, message)) = require_owner(&wallet_auth, &wallet_address) {
+        return (code, Json(serde_json::json!({ "success": false, "message": message })));
+    }
     if let Some(dca_storage) = &state.dca_storage {
         let mut orders = dca_storage.orders.write().await;
 
@@ -743,6 +810,10 @@ pub async fn resume_dca_order(
             }
 
             order.status = DcaStatus::Active;
+            // v10.11.114d: the owner just signed this resume on this node — that confirms the order
+            // (the migration path for orders created before signing existed).
+            order.wallet_signed = true;
+            order.last_error = None;
             // Schedule next execution from now
             let now = chrono::Utc::now().timestamp_millis();
             order.next_execution_at = now + order.interval.to_millis();
@@ -789,9 +860,19 @@ pub async fn resume_dca_order(
 /// Get execution history for a DCA order
 pub async fn get_dca_executions(
     State(state): State<Arc<AppState>>,
+    wallet_auth: AuthenticatedWallet,
     Path(order_id): Path<String>,
 ) -> impl IntoResponse {
     if let Some(dca_storage) = &state.dca_storage {
+        // v10.11.114d: executions carry amounts and prices — owner only.
+        let owner = dca_storage.orders.read().await.get(&order_id).map(|o| o.wallet_address.clone());
+        let allowed = match owner {
+            Some(w) => require_owner(&wallet_auth, &w),
+            None => Err((StatusCode::NOT_FOUND, "Order not found".to_string())),
+        };
+        if let Err((code, message)) = allowed {
+            return (code, Json(serde_json::json!({ "success": false, "message": message, "executions": [], "total_executions": 0 })));
+        }
         let executions = dca_storage.executions.read().await;
 
         let order_executions = executions.get(&order_id).cloned().unwrap_or_default();
@@ -847,7 +928,8 @@ pub async fn dca_execution_loop(state: Arc<AppState>) {
                 }
 
                 for (id, order) in orders.iter() {
-                    if order.status == DcaStatus::Active && order.next_execution_at <= now {
+                    // v10.11.114d: only orders the wallet itself signed on this node may trade it.
+                    if order.status == DcaStatus::Active && order.wallet_signed && order.next_execution_at <= now {
                         debug!(
                             "⏰ [DCA] Order {} is due: next_exec={}, now={}, diff={}ms",
                             id, order.next_execution_at, now, now - order.next_execution_at
@@ -876,9 +958,19 @@ pub async fn dca_execution_loop(state: Arc<AppState>) {
             }
 
             // Clean up completed orders
+            let mut parked = Vec::new();
             {
                 let mut orders = dca_storage.orders.write().await;
                 for order in orders.values_mut() {
+                    // v10.11.114d: an Active order nobody signed (pre-114d, or received over gossip)
+                    // is parked with a plain explanation instead of sitting "active" forever.
+                    if order.status == DcaStatus::Active && !order.wallet_signed {
+                        order.status = DcaStatus::Paused;
+                        order.last_error = Some(UNSIGNED_ORDER_MSG.to_string());
+                        info!("⏸️ [DCA] Parked unsigned order {} (created before signed orders)", order.id);
+                        parked.push(order.clone());
+                        continue;
+                    }
                     if order.status == DcaStatus::Active {
                         // Check if should be marked completed
                         if let Some(end_date) = order.end_date {
@@ -894,6 +986,11 @@ pub async fn dca_execution_loop(state: Arc<AppState>) {
                             }
                         }
                     }
+                }
+            }
+            for order in &parked {
+                if let Err(e) = dca_storage.save_order(&state.storage_engine, order).await {
+                    warn!("Failed to persist parked DCA order {}: {}", order.id, e);
                 }
             }
         }
@@ -924,18 +1021,13 @@ async fn execute_dca_order(state: &Arc<AppState>, order_id: &str) -> anyhow::Res
         order_id, amount, from_token, to_token
     );
 
-    // Calculate minimum output based on slippage
-    // For simplicity, we'll use 0 here and let the swap function handle it
-    // In production, you'd want to check current price and calculate min_amount_out
-    let min_amount_out = 0; // Accept any output (slippage handled by execute_swap)
-
-    // Execute the swap using the existing swap function
-    let swap_result = execute_dca_swap(
+    // v10.11.114d: the real DEX swap path (quote + impact cap + min_amount_out), not the old copy.
+    let swap_result = execute_order_via_dex(
         state,
         &from_token,
         &to_token,
         amount,
-        min_amount_out,
+        slippage,
         &wallet_address,
     ).await;
 
@@ -993,8 +1085,14 @@ async fn execute_dca_order(state: &Arc<AppState>, order_id: &str) -> anyhow::Res
             let mut orders = dca_storage.orders.write().await;
             if let Some(order) = orders.get_mut(order_id) {
                 order.last_error = Some(e.to_string());
-                // Still schedule next execution to retry
-                order.next_execution_at = now + order.interval.to_millis();
+                // Still schedule next execution to retry. v10.11.114d: a node that is still syncing
+                // (DEX gate closed) retries in a minute instead of losing a whole interval.
+                let msg = e.to_string();
+                order.next_execution_at = if msg.contains("temporarily disabled") {
+                    now + 60_000
+                } else {
+                    now + order.interval.to_millis()
+                };
 
                 // If 5 consecutive failures, pause the order
                 // (You could track consecutive failures in a separate field)
@@ -1023,6 +1121,129 @@ async fn execute_dca_order(state: &Arc<AppState>, order_id: &str) -> anyhow::Res
             Err(e)
         }
     }
+}
+
+/// v10.11.114d: the names pools and the swap handler agree on — the page sends its token ids
+/// ("qugusd-stable"), pools carry "QUGUSD"; custom tokens are their qnk address either way.
+fn pool_token_name(t: &str) -> String {
+    let u = t.trim().to_uppercase();
+    match u.as_str() {
+        "QUG" | "NATIVE-QUG" => "QUG".to_string(),
+        "QUGUSD" | "QUGUSD-STABLE" => "QUGUSD".to_string(),
+        _ => u,
+    }
+}
+
+/// v10.11.114d: quote ONE purchase on the deepest pool for the pair (in practice the only live
+/// one). Returns (expected output in the out-token's base units, price impact as a fraction incl.
+/// the 0.3 % fee). f64 is enough: the result only sets a floor and a cap — the swap handler
+/// computes the exact amount itself.
+async fn quote_for_order(
+    state: &Arc<AppState>,
+    from_token: &str,
+    to_token: &str,
+    amount: u128,
+) -> anyhow::Result<(u128, f64)> {
+    let (tin, tout) = (pool_token_name(from_token), pool_token_name(to_token));
+    let pools = state.liquidity_pools.read().await;
+    // (reserve_in, reserve_out, dec_in, dec_out, k)
+    let mut best: Option<(f64, f64, u8, u8, f64)> = None;
+    for p in pools.values() {
+        let (t0, t1) = (pool_token_name(&p.token0), pool_token_name(&p.token1));
+        let side = if t0 == tin && t1 == tout {
+            (p.reserve0, p.reserve1, p.token0_decimals, p.token1_decimals)
+        } else if t0 == tout && t1 == tin {
+            (p.reserve1, p.reserve0, p.token1_decimals, p.token0_decimals)
+        } else {
+            continue;
+        };
+        if side.0 == 0 || side.1 == 0 {
+            continue;
+        }
+        let (rin, rout) = (side.0 as f64, side.1 as f64);
+        if best.map_or(true, |b| rin * rout > b.4) {
+            best = Some((rin, rout, side.2 as u8, side.3 as u8, rin * rout));
+        }
+    }
+    drop(pools);
+    let (rin, rout, dec_in, dec_out, _) =
+        best.ok_or_else(|| anyhow::anyhow!("No liquidity pool for {}/{}", from_token, to_token))?;
+    let a = amount as f64;
+    let a_fee = a * 0.997;
+    let mut out = a_fee * rout / (rin + a_fee);
+    let impact = (1.0 - (out / a) / (rout / rin)).max(0.0);
+    if dec_in > dec_out {
+        out /= 10f64.powi((dec_in - dec_out) as i32);
+    } else if dec_out > dec_in {
+        out *= 10f64.powi((dec_out - dec_in) as i32);
+    }
+    if !(out >= 1.0) {
+        return Err(anyhow::anyhow!("Purchase would return nothing at the current pool price"));
+    }
+    Ok((out as u128, impact))
+}
+
+/// v10.11.114d: execute one DCA purchase through the SAME handler as the DEX Swap button
+/// (`handlers::execute_swap`): its dex_ready gate, per-wallet locks, token resolution, the
+/// persisted atomic debit and the swap record. The old in-module copy (`execute_dca_swap`,
+/// still used by limit orders) looked pools up by a name no pool has ("QUGUSD-STABLE_QUG"), so
+/// no DCA order ever bought anything — and had it matched it moved money in memory only.
+/// Checks: quote → refuse when this purchase alone moves the price more than the order allows
+/// → swap with min_amount_out = quote × (1 − max_slippage).
+async fn execute_order_via_dex(
+    state: &Arc<AppState>,
+    from_token: &str,
+    to_token: &str,
+    amount: u128,
+    max_slippage: f64,
+    wallet_address: &str,
+) -> anyhow::Result<(u128, String)> {
+    let wallet_addr = crate::handlers::parse_wallet_address(wallet_address)
+        .map_err(|e| anyhow::anyhow!("Invalid wallet address: {}", e))?;
+    let slip = max_slippage.clamp(0.001, 0.10);
+
+    let (expected_out, impact) = quote_for_order(state, from_token, to_token, amount).await?;
+    if impact > slip {
+        return Err(anyhow::anyhow!(
+            "Skipped: this purchase would move the price {:.2}%, above the order's {:.2}% limit (pool too thin for this amount)",
+            impact * 100.0,
+            slip * 100.0
+        ));
+    }
+    let min_amount_out = (expected_out as f64 * (1.0 - slip)) as u128;
+
+    // The order was signed by this wallet on this node (wallet_signed); the swap runs as that wallet.
+    let auth = AuthenticatedWallet {
+        address: wallet_addr,
+        timestamp: chrono::Utc::now(),
+        scheme: crate::wallet_auth::AuthScheme::Ed25519,
+    };
+    let reply = crate::handlers::execute_swap(
+        State(state.clone()),
+        auth,
+        Json(crate::handlers::SwapRequest {
+            from_token: from_token.to_string(),
+            to_token: to_token.to_string(),
+            amount_in: amount,
+            min_amount_out,
+            wallet_address: wallet_address.to_string(),
+            slippage_tolerance: Some(slip * 100.0),
+        }),
+    )
+    .await
+    .map_err(|code| anyhow::anyhow!("Swap failed: HTTP {}", code))?
+    .0;
+    if !reply.success {
+        return Err(anyhow::anyhow!("{}", reply.error.unwrap_or_else(|| "swap refused".to_string())));
+    }
+    let data = reply.data.ok_or_else(|| anyhow::anyhow!("Swap reply had no data"))?;
+    let amount_out = data
+        .get("estimated_amount_out")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u128>().ok())
+        .ok_or_else(|| anyhow::anyhow!("Swap reply without estimated_amount_out"))?;
+    let tx_id = data.get("transaction_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Ok((amount_out, tx_id))
 }
 
 /// Public wrapper called by limit_order_api.
@@ -1408,6 +1629,21 @@ pub async fn handle_dca_sync_message(state: &Arc<AppState>, data: &[u8]) {
         warn!("❌ [DCA P2P] DCA storage not available");
         return;
     };
+
+    // v10.11.114d: gossip never carries execution authority. validate_full() checks the signature
+    // against a key carried IN the same message, so any peer passes it. A gossiped order is kept as a
+    // record only (wallet_signed = false — the scheduler parks it), and a message about an order its
+    // wallet signed on THIS node (create/resume) is ignored: a peer must not resume, re-time,
+    // re-size or cancel it.
+    let mut message = message;
+    message.order.wallet_signed = false;
+    if dca_storage.orders.read().await.get(&message.order.id).map_or(false, |o| o.wallet_signed) {
+        info!(
+            "🔐 [DCA P2P] Ignoring {:?} for order {} — it was signed by its wallet on this node",
+            message.action, message.order.id
+        );
+        return;
+    }
 
     match message.action {
         DcaSyncAction::Create => {
