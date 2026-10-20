@@ -3867,6 +3867,28 @@ pub async fn process_transaction_batch(state: Arc<AppState>) -> anyhow::Result<(
                         warn!("Failed to emit transaction-confirmed event: {}", e);
                     }
 
+                    // v10.11.114d (2026-10-20): a tx whose own handler ALREADY moved the money must not
+                    // move it again here. The DEX swap / stablecoin-vault handlers apply the balances
+                    // themselves and register their "record" tx in optimistic_applied_txs for exactly
+                    // this dedup (the gossip path honours it, this batch did not). Record txs are
+                    // unsigned: the mempool refuses them but they stay in tx_pool, and the SIMD check
+                    // above skips (does not drop) a tx without a 64-byte signature, so "0/0 valid"
+                    // passed the batch. Measured 19:15 CEST: a 118 QUG swap was debited a second time
+                    // in memory ("NATIVE-QUG MEM-ONLY"), wallet memory 118 QUG below RocksDB. Status and
+                    // history above/below stay; only the balance mutation is skipped.
+                    if state.optimistic_applied_txs.contains_key(&tx.id)
+                        || state.optimistic_applied_txs.contains_key(tx_hash)
+                    {
+                        tracing::info!(
+                            "⏭️ [BATCH v10.11.114d] tx {} already applied by its handler — recorded, balances untouched",
+                            q_log_privacy::mask_hash(&hex::encode(&tx_hash[..8]))
+                        );
+                        if let Err(e) = state.storage_engine.save_transaction(&tx).await {
+                            warn!("Failed to save pre-applied transaction to storage: {}", e);
+                        }
+                        continue;
+                    }
+
                     // CRITICAL: Update balances ONLY after consensus confirmation
                     // This ensures atomic state transitions and prevents double-spending
                     // v1.4.9-beta: Support QUG, QUGUSD, AND custom tokens (TokenTransfer)
@@ -13744,6 +13766,17 @@ pub async fn execute_swap(
     info!(
         "📝 [SWAP TX] Created consensus-verified swap transaction: {}",
         &tx_id_hex[..18]
+    );
+
+    // v10.11.114d: register the record as handler-applied BEFORE submit_transaction puts it in
+    // tx_pool — the batch processor polls tx_pool concurrently (it took the 19:15 record 41 ms
+    // after creation) and must find the id here to skip its balance mutation.
+    state.optimistic_applied_txs.insert(
+        swap_tx.id,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     );
 
     // Step 6: Submit transaction to mempool for block inclusion
