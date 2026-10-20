@@ -26080,6 +26080,27 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         info!("⚔️  [CROWN-ASH] Game tick scheduler task spawned");
     }
 
+    // v10.11.114c: load the multisig store (orgs, registered keys, proposals) BEFORE the API
+    // serves. q_multisig::storage::global() starts empty and load_from_file() had no caller,
+    // so every restart forgot every org — and the next multisig write persisted that empty
+    // state over store.json. A copy of the file as it was at boot is kept beside it first, so
+    // even a load that cannot parse it never lets a later write destroy the only copy.
+    {
+        let path = q_multisig::MultisigStore::wallet_file();
+        if path.exists() {
+            let boot_copy = path.with_extension(format!("json.boot-{}", chrono::Utc::now().timestamp()));
+            if let Err(e) = std::fs::copy(&path, &boot_copy) {
+                warn!("⚠️ [MULTISIG] could not keep a boot copy of {}: {}", path.display(), e);
+            }
+        }
+        let loaded = q_multisig::storage::global().load_from_file().await;
+        if path.exists() && loaded == 0 {
+            error!("🚨 [MULTISIG] {} exists but loaded nothing — the boot copy beside it is the record", path.display());
+        } else {
+            warn!("🏛️ [MULTISIG] store loaded from {}: {} entries", path.display(), loaded);
+        }
+    }
+
     info!("🔍 DEBUG: About to build application router");
 
     // Build the application router
