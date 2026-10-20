@@ -114,6 +114,20 @@ pub struct MultisigProposal {
     /// same bytes regardless of arrival order of partial sigs.
     pub signatures: Vec<SignatureContribution>,
     pub status: ProposalStatus,
+    /// v10.11.114c: who proposed it (ordinary wallet address). `None` on proposals
+    /// stored before 114c. None of the fields below enter `payload_hash`, so adding
+    /// them leaves every existing signature valid.
+    #[serde(default)]
+    pub proposer: Option<Address>,
+    #[serde(default)]
+    pub executed_at_unix: Option<i64>,
+    /// Ordinary address of the member who pressed execute.
+    #[serde(default)]
+    pub executed_by: Option<Address>,
+    #[serde(default)]
+    pub cancelled_at_unix: Option<i64>,
+    #[serde(default)]
+    pub cancelled_by: Option<Address>,
 }
 
 impl MultisigProposal {
@@ -135,6 +149,11 @@ impl MultisigProposal {
             created_at_unix: chrono::Utc::now().timestamp(),
             signatures: Vec::new(),
             status: ProposalStatus::Pending,
+            proposer: None,
+            executed_at_unix: None,
+            executed_by: None,
+            cancelled_at_unix: None,
+            cancelled_by: None,
         }
     }
 

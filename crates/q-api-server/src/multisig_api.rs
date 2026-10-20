@@ -69,6 +69,13 @@ fn store() -> Arc<q_multisig::MultisigStore> {
     q_multisig::storage::global()
 }
 
+/// v10.11.114c: serialises execute and cancel. Without it two members pressing
+/// "Pay out" at once both pass the "not executed yet" check and pay twice.
+fn proposal_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 fn err(msg: impl Into<String>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "success": false, "error": msg.into() }))
 }
@@ -510,13 +517,14 @@ pub async fn propose(
         amount_raw,
         memo: request.memo,
     };
-    let proposal = MultisigProposal::new(
+    let mut proposal = MultisigProposal::new(
         wallet_addr,
         action,
         request.required_override,
         wallet.default_threshold,
         wallet.members.len(),
     );
+    proposal.proposer = Some(auth.address);
     let payload_hash = proposal.payload_hash();
     let proposal_id = proposal.id;
     s.insert_proposal(proposal);
@@ -571,12 +579,58 @@ fn action_to_json(action: &MultisigAction) -> serde_json::Value {
     }
 }
 
+/// v10.11.114c: one row per member — name and ordinary address from the org policy
+/// (what the CEO entered) and whether that member's signature is on the proposal.
+/// Members are matched through their registered key, exactly as sign/execute resolve
+/// them, so the page can show whose turn it is instead of a bare count.
+fn signer_rows(wallet: &MultisigWallet, proposal: &MultisigProposal) -> Vec<serde_json::Value> {
+    let signed_at = |m: &MsAddress| {
+        proposal.signatures.iter().find(|s| &s.member_addr == m).map(|s| s.at_unix)
+    };
+    match store().get_org_policy(&wallet.address) {
+        Some(policy) => policy
+            .members
+            .iter()
+            .map(|pm| {
+                let ordinary = parse_qnk_address(&pm.address_hex).ok();
+                let at = ordinary
+                    .and_then(|a| resolve_member_in_wallet(wallet, &a))
+                    .and_then(|m| signed_at(&m));
+                serde_json::json!({
+                    "address": format!("qnk{}", pm.address_hex),
+                    "name": pm.name,
+                    "signed": at.is_some(),
+                    "signed_at_unix": at,
+                })
+            })
+            .collect(),
+        None => wallet
+            .members
+            .iter()
+            .map(|m| {
+                let at = signed_at(&m.pubkey.member_address());
+                serde_json::json!({
+                    "address": serde_json::Value::Null,
+                    "name": m.label,
+                    "signed": at.is_some(),
+                    "signed_at_unix": at,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn opt_addr(a: &Option<[u8; 32]>) -> serde_json::Value {
+    a.as_ref().map(addr_string).into()
+}
+
 pub async fn list_proposals(Path(addr_str): Path<String>) -> Json<serde_json::Value> {
     let addr = match parse_qnk_address(&addr_str) {
         Ok(a) => a,
         Err(e) => return err(e),
     };
     let s = store();
+    let wallet = s.get_wallet(&addr);
     let proposals = s.proposals_for_wallet(&addr);
     let out: Vec<serde_json::Value> = proposals
         .iter()
@@ -589,6 +643,12 @@ pub async fn list_proposals(Path(addr_str): Path<String>) -> Json<serde_json::Va
                 "status": p.status,
                 "created_at_unix": p.created_at_unix,
                 "payload_hash": hex::encode(p.payload_hash()),
+                "proposer": opt_addr(&p.proposer),
+                "signers": wallet.as_ref().map(|w| signer_rows(w, p)).unwrap_or_default(),
+                "executed_at_unix": p.executed_at_unix,
+                "executed_by": opt_addr(&p.executed_by),
+                "cancelled_at_unix": p.cancelled_at_unix,
+                "cancelled_by": opt_addr(&p.cancelled_by),
             })
         })
         .collect();
@@ -706,6 +766,9 @@ pub async fn execute_proposal(
         Ok(id) => id,
         Err(_) => return err("Invalid proposal_id (must be a UUID)"),
     };
+    // v10.11.114c: one execute/cancel at a time — a second "Pay out" press waits here and
+    // then sees Executed below instead of paying twice.
+    let _serial = proposal_lock().lock().await;
     let s = store();
     let proposal = match s.get_proposal(&proposal_id) {
         Some(p) => p,
@@ -747,26 +810,106 @@ pub async fn execute_proposal(
     if token.to_uppercase() != "QUG" {
         return err("v0 only supports QUG transfers from the treasury; custom-token treasury transfers aren't wired up yet");
     }
-
-    // Move funds — same wallet_balances map every other QUG transfer uses.
-    // No protocol fee is charged on internal treasury moves in v0.
-    {
-        let mut balances = state.wallet_balances.write().await;
-        let treasury_balance = balances.get(&wallet.address).copied().unwrap_or(0);
-        if treasury_balance < amount_raw {
-            return err(format!(
-                "Treasury has {:.8} QUG, proposal asks for {:.8} QUG",
-                treasury_balance as f64 / QUG_DECIMALS_DIVISOR,
-                amount_raw as f64 / QUG_DECIMALS_DIVISOR
-            ));
-        }
-        balances.insert(wallet.address, treasury_balance - amount_raw);
-        let recipient_balance = balances.get(&recipient).copied().unwrap_or(0);
-        balances.insert(recipient, recipient_balance + amount_raw);
+    if recipient == wallet.address {
+        return err("The treasury cannot pay itself");
     }
 
+    // v10.11.114c: the payout is written to RocksDB FIRST — both balances and a paid-marker
+    // in one storage batch, read-modify-write in the same `wallet_balance_<hex>` keys block
+    // apply uses — and only then mirrored into memory. 114b and earlier changed only the
+    // in-memory map: the payout vanished at the next restart, and a DEX swap's reload from
+    // disk gave the treasury its QUG back while a brand-new recipient kept theirs.
+    // No protocol fee on internal treasury moves in v0. Nothing goes to the mempool (a record
+    // tx through the mempool is what charged LP providers twice, 833588cd8).
+    let marker = format!("multisig_executed:{}", proposal_id);
+    let (t_hex, r_hex) = (hex::encode(wallet.address), hex::encode(recipient));
+    let (new_treasury, new_recipient) = {
+        // Held across the DB write: serialises with the other balance handlers and with the
+        // in-memory half of block apply. The block producer's later DISK save does not take
+        // it — that is what the "memory ahead of disk" check below is for.
+        let mut mem = state.wallet_balances.write().await;
+        let dbtx = match state.storage_engine.begin_transaction().await {
+            Ok(t) => t,
+            Err(e) => return err(format!("Could not open a storage transaction: {}", e)),
+        };
+        let t_mem = mem.get(&wallet.address).copied().unwrap_or(0);
+        let r_mem = mem.get(&recipient).copied().unwrap_or(0);
+        let (new_t, new_r) =
+            match plan_payout(&dbtx, &marker, &t_hex, &r_hex, t_mem, r_mem, amount_raw).await {
+                Ok(v) => v,
+                Err(msg) => {
+                    let _ = dbtx.rollback().await;
+                    return err(msg);
+                }
+            };
+        let puts: [(String, Vec<u8>); 3] = [
+            (format!("wallet_balance_{}", t_hex), new_t.to_le_bytes().to_vec()),
+            (format!("wallet_balance_{}", r_hex), new_r.to_le_bytes().to_vec()),
+            (marker.clone(), chrono::Utc::now().timestamp().to_le_bytes().to_vec()),
+        ];
+        let mut staged: anyhow::Result<()> = Ok(());
+        for (key, value) in &puts {
+            if let Err(e) = dbtx.put(q_storage::CF_MANIFEST, key.as_bytes(), value).await {
+                staged = Err(e);
+                break;
+            }
+        }
+        // The batch only reaches disk at commit(); a failed put rolls back with nothing written.
+        let written = match staged {
+            Ok(()) => dbtx.commit().await,
+            Err(e) => {
+                let _ = dbtx.rollback().await;
+                Err(e)
+            }
+        };
+        if let Err(e) = written {
+            tracing::error!("🚫 [MULTISIG EXECUTE] storage commit failed for proposal {}: {} — nothing moved", proposal_id, e);
+            return err(format!("Could not save the payout — nothing moved: {}", e));
+        }
+        // Mirror the same deltas into memory (memory never ahead of disk here, see above).
+        mem.insert(wallet.address, t_mem.saturating_sub(amount_raw));
+        mem.insert(recipient, r_mem.saturating_add(amount_raw));
+        (new_t, new_r)
+    };
+
+    // History entry for both wallets — history only (CF_TRANSACTIONS + wallet indexes), no
+    // balance keys, no mempool. Same construction as email_api's QUG transfers.
+    let tx_id: [u8; 32] = *blake3::hash(format!("multisig_execute:{}", proposal_id).as_bytes()).as_bytes();
+    let memo_text = match &memo {
+        Some(m) if !m.trim().is_empty() => format!("{} treasury: {}", wallet.label, m.trim()),
+        _ => format!("{} treasury payout", wallet.label),
+    };
+    let history_tx = q_types::Transaction {
+        id: tx_id,
+        from: wallet.address,
+        to: recipient,
+        amount: amount_raw,
+        fee: 0,
+        nonce: 0,
+        signature: Vec::new(),
+        timestamp: chrono::Utc::now(),
+        data: format!("multisig_execute:{}", proposal_id).into_bytes(),
+        token_type: q_types::TokenType::QUG,
+        fee_token_type: q_types::TokenType::QUG,
+        tx_type: q_types::TransactionType::Transfer,
+        pqc_signature: None,
+        signature_phase: q_types::TxSignaturePhase::Phase0Ed25519,
+        pqc_public_key: None,
+        zk_proof_bundle: None,
+        privacy_level: q_types::TransactionPrivacyLevel::default(),
+        bulletproof: None,
+        nullifier: None,
+        memo: Some(memo_text),
+    };
+    if let Err(e) = state.storage_engine.save_transaction(&history_tx).await {
+        tracing::warn!("⚠️ [MULTISIG EXECUTE] payout saved, history entry failed: {}", e);
+    }
+
+    let now = chrono::Utc::now().timestamp();
     s.update_proposal(&proposal_id, |p| {
         p.status = ProposalStatus::Executed;
+        p.executed_at_unix = Some(now);
+        p.executed_by = Some(auth.address);
     });
     s.clone().spawn_persist();
 
@@ -785,7 +928,122 @@ pub async fn execute_proposal(
         "executed": true,
         "amount_qug": amount_raw as f64 / QUG_DECIMALS_DIVISOR,
         "recipient": addr_string(&recipient),
+        "tx_hash": hex::encode(tx_id),
+        "treasury_balance_qug": new_treasury as f64 / QUG_DECIMALS_DIVISOR,
+        "recipient_balance_qug": new_recipient as f64 / QUG_DECIMALS_DIVISOR,
     }))
+}
+
+/// Every check a payout must pass, read inside the storage transaction that will write it.
+/// Returns the new (treasury, recipient) disk balances, or the refusal shown to the member.
+async fn plan_payout(
+    dbtx: &q_storage::transaction::QTransaction,
+    marker: &str,
+    t_hex: &str,
+    r_hex: &str,
+    t_mem: u128,
+    r_mem: u128,
+    amount_raw: u128,
+) -> Result<(u128, u128), String> {
+    match dbtx.get(q_storage::CF_MANIFEST, marker.as_bytes()).await {
+        Ok(Some(_)) => return Err("This proposal has already paid out".into()),
+        Ok(None) => {}
+        Err(e) => return Err(format!("Could not read storage: {}", e)),
+    }
+    let t_db = read_balance(dbtx, t_hex)
+        .await
+        .map_err(|e| format!("Could not read the treasury balance: {}", e))?;
+    let r_db = read_balance(dbtx, r_hex)
+        .await
+        .map_err(|e| format!("Could not read the recipient balance: {}", e))?;
+    // Memory ahead of disk = a credit the block producer has applied in memory but not yet
+    // saved; it will save an absolute value computed before this payout (max-wins), which
+    // would undo the debit. Wait for it rather than race it.
+    if t_mem > t_db || r_mem > r_db {
+        return Err("A payment to the treasury or the recipient is still being saved — press Pay out again in a few seconds.".into());
+    }
+    let available = t_db.min(t_mem);
+    if available < amount_raw {
+        return Err(format!(
+            "Treasury has {:.8} QUG, proposal asks for {:.8} QUG",
+            available as f64 / QUG_DECIMALS_DIVISOR,
+            amount_raw as f64 / QUG_DECIMALS_DIVISOR
+        ));
+    }
+    let new_r = r_db.checked_add(amount_raw).ok_or("Recipient balance would overflow")?;
+    Ok((t_db - amount_raw, new_r))
+}
+
+/// A `wallet_balance_<hex>` value as block apply stores it: u128 LE (16 bytes), or the
+/// legacy u64 (8 bytes, 8 decimals → 24). Missing = 0.
+async fn read_balance(dbtx: &q_storage::transaction::QTransaction, hex_addr: &str) -> anyhow::Result<u128> {
+    let raw = dbtx
+        .get(q_storage::CF_MANIFEST, format!("wallet_balance_{}", hex_addr).as_bytes())
+        .await?;
+    Ok(match raw {
+        Some(b) if b.len() == 16 => u128::from_le_bytes(b[..16].try_into()?),
+        Some(b) if b.len() == 8 => (u64::from_le_bytes(b[..8].try_into()?) as u128) * 10u128.pow(16),
+        Some(b) => anyhow::bail!("unexpected balance encoding ({} bytes)", b.len()),
+        None => 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// POST /cancel
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CancelRequest {
+    pub proposal_id: String,
+}
+
+/// v10.11.114c: withdraw a proposal that has not paid out. Moves no funds. The
+/// proposer may cancel their own; a proposal stored before 114c (no proposer
+/// recorded) may be cancelled by any member.
+pub async fn cancel_proposal(
+    auth: AuthenticatedWallet,
+    Json(request): Json<CancelRequest>,
+) -> Json<serde_json::Value> {
+    let proposal_id = match request.proposal_id.parse() {
+        Ok(id) => id,
+        Err(_) => return err("Invalid proposal_id (must be a UUID)"),
+    };
+    let _guard = proposal_lock().lock().await;
+    let s = store();
+    let proposal = match s.get_proposal(&proposal_id) {
+        Some(p) => p,
+        None => return err("Proposal not found"),
+    };
+    match proposal.status {
+        ProposalStatus::Executed => return err("This proposal has already paid out — it cannot be cancelled."),
+        ProposalStatus::Cancelled => return err("Proposal was already cancelled"),
+        _ => {}
+    }
+    let wallet = match s.get_wallet(&proposal.wallet_addr) {
+        Some(w) => w,
+        None => return err("Proposal references a wallet that no longer exists"),
+    };
+    if resolve_member_in_wallet(&wallet, &auth.address).is_none() {
+        return err("You are not a registered member of this organization");
+    }
+    if let Some(proposer) = proposal.proposer {
+        if proposer != auth.address {
+            return err("Only the member who proposed it can cancel this proposal.");
+        }
+    }
+    let now = chrono::Utc::now().timestamp();
+    s.update_proposal(&proposal_id, |p| {
+        p.status = ProposalStatus::Cancelled;
+        p.cancelled_at_unix = Some(now);
+        p.cancelled_by = Some(auth.address);
+    });
+    s.clone().spawn_persist();
+    tracing::warn!(
+        "🗑️ [MULTISIG] Proposal {} cancelled by {}",
+        proposal_id,
+        &addr_string(&auth.address)[..16],
+    );
+    ok(serde_json::json!({ "proposal_id": proposal_id.to_string(), "cancelled": true }))
 }
 
 // ---------------------------------------------------------------------------
@@ -803,4 +1061,5 @@ pub fn create_multisig_router() -> Router<Arc<AppState>> {
         .route("/proposals/:addr", get(list_proposals))
         .route("/sign", post(sign_proposal))
         .route("/execute", post(execute_proposal))
+        .route("/cancel", post(cancel_proposal))
 }
