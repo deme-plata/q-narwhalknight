@@ -1134,6 +1134,15 @@ fn pool_token_name(t: &str) -> String {
     }
 }
 
+/// v10.11.114d: the names execute_swap's balance step recognises: "QUG", "QUGUSD", or the custom token as stored.
+fn swap_token_name(t: &str) -> String {
+    match pool_token_name(t).as_str() {
+        "QUG" => "QUG".to_string(),
+        "QUGUSD" => "QUGUSD".to_string(),
+        _ => t.trim().to_string(),
+    }
+}
+
 /// v10.11.114d: quote ONE purchase on the deepest pool for the pair (in practice the only live
 /// one). Returns (expected output in the out-token's base units, price impact as a fraction incl.
 /// the 0.3 % fee). f64 is enough: the result only sets a floor and a cap — the swap handler
@@ -1222,8 +1231,10 @@ async fn execute_order_via_dex(
         State(state.clone()),
         auth,
         Json(crate::handlers::SwapRequest {
-            from_token: from_token.to_string(),
-            to_token: to_token.to_string(),
+            // v10.11.114d: the swap handler's canonical names (orders store the page's ids "qugusd-stable",
+            // "native-qug"); custom tokens keep their qnk address exactly as stored
+            from_token: swap_token_name(from_token),
+            to_token: swap_token_name(to_token),
             amount_in: amount,
             min_amount_out,
             wallet_address: wallet_address.to_string(),

@@ -12725,8 +12725,18 @@ mod swap_decimal_regression_tests {
 pub async fn execute_swap(
     State(state): State<Arc<AppState>>,
     wallet_auth: AuthenticatedWallet, // ✅ ADD AUTHENTICATION
-    Json(request): Json<SwapRequest>,
+    Json(mut request): Json<SwapRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+    // v10.11.114d SECURITY: one spelling per native token from here on. The page's ids "qugusd-stable" /
+    // "native-qug" were recognised by the pricing step but not by the balance step (QUGUSD debit/credit
+    // skipped), the decimals step (8 instead of 24) or the USD valuation (QUGUSD priced as QUG).
+    for t in [&mut request.from_token, &mut request.to_token] {
+        match t.trim().to_uppercase().as_str() {
+            "QUGUSD" | "QUGUSD-STABLE" => *t = "QUGUSD".to_string(),
+            "QUG" | "NATIVE-QUG" => *t = "QUG".to_string(),
+            _ => {}
+        }
+    }
     // v10.3.1: DEX SAFETY GATE — block swaps until node is fully synced and reconciled.
     // WHY: On restart, balance_consensus replays chain data and overwrites balances.
     // DEX swap deductions are off-chain (RocksDB only), so they get lost during replay.
@@ -14149,12 +14159,19 @@ pub async fn execute_swap(
     // causing users to lose their swapped tokens until block confirmation (which didn't work for custom tokens)
     {
         // Determine from/to token addresses
-        let from_is_qug = request.from_token.to_uppercase() == "QUG";
-        let to_is_qug = request.to_token.to_uppercase() == "QUG";
+        // v10.11.114d SECURITY: accept the same spellings as the pricing step above (from/to_is_qugusd near the top of
+        // this handler). Only "QUG"/"QUGUSD" were recognised here, so a swap naming a side "qugusd-stable" (the DEX
+        // page's token id; what DCA orders store) priced and moved the pool but SKIPPED the wallet's QUGUSD debit or
+        // credit (the silent hex::decode path below) — a holder could sell the same QUGUSD for QUG again and again.
+        // Measured on the rig 2026-10-21 (114c and 114d alike): 30,001 "qugusd-stable" -> 9.96 QUG, QUGUSD unchanged.
+        let from_u = request.from_token.to_uppercase();
+        let to_u = request.to_token.to_uppercase();
+        let from_is_qug = from_u == "QUG" || from_u == "NATIVE-QUG";
+        let to_is_qug = to_u == "QUG" || to_u == "NATIVE-QUG";
         // v4.0.3: Handle QUGUSD as a known token (not a custom hex-encoded token)
         // Previously hex::decode("QUGUSD") failed silently, causing balance credits/debits to be skipped
-        let from_is_qugusd = request.from_token.to_uppercase() == "QUGUSD";
-        let to_is_qugusd = request.to_token.to_uppercase() == "QUGUSD";
+        let from_is_qugusd = from_u == "QUGUSD" || from_u == "QUGUSD-STABLE";
+        let to_is_qugusd = to_u == "QUGUSD" || to_u == "QUGUSD-STABLE";
 
         // Update token balances
         let mut token_balances = state.token_balances.write().await;
