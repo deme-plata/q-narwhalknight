@@ -1189,6 +1189,23 @@ pub const BLOCK_PACK_EXTRA_PERMITS: usize = 32;
 /// the CUBIC gate can lower the effective cap for weaker peers.
 pub const CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER: usize = 16;
 
+/// v10.11.114f-sync2 (SIGIL rule: count concurrency in REQUESTS and keep it small — sigil-node
+/// `SIGIL_FETCH_INFLIGHT`). `Q_CLIENT_INFLIGHT_PER_PEER` lowers the per-peer cap (1..=16); default 16 = unchanged.
+pub fn client_inflight_per_peer() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("Q_CLIENT_INFLIGHT_PER_PEER").ok().and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER).clamp(1, CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER))
+}
+
+/// v10.11.114f-sync2: how long a block-pack request may wait for its reply before the permit is released.
+/// Was a fixed 30 s: a slow-but-alive archive peer then had EVERY reply thrown away and re-asked (a retry storm
+/// that feeds its own backlog). `Q_P2P_RESPONSE_WAIT_SECS` (5..=600), default 30 = unchanged.
+pub fn client_response_wait() -> Duration {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    Duration::from_secs(*V.get_or_init(|| std::env::var("Q_P2P_RESPONSE_WAIT_SECS").ok()
+        .and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(30).clamp(5, 600)))
+}
+
 /// v10.9.27: Marker substring used by the chunk scheduler in `turbo_sync.rs`
 /// to recognise a client-throttle error and avoid consuming its retry budget.
 /// Any error returned because the per-peer client semaphore is exhausted must
@@ -3048,7 +3065,7 @@ impl UnifiedNetworkManager {
     /// effective cap on failures.
     pub fn effective_per_peer_inflight(&self, peer: &PeerId) -> u32 {
         self.per_peer_cwnd(peer)
-            .min(CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER as u32)
+            .min(client_inflight_per_peer() as u32)
             .max(1)
     }
 
@@ -7060,7 +7077,7 @@ impl UnifiedNetworkManager {
                         .client_block_pack_semaphores
                         .entry(peer)
                         .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(
-                            CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER,
+                            client_inflight_per_peer(),
                         )))
                         .clone();
                     // v10.9.44: keep a non-consuming handle on the semaphore so we can
@@ -7159,7 +7176,7 @@ impl UnifiedNetworkManager {
                         // timeout (~10s) which will trigger OutboundFailure and drop
                         // `internal_tx`, but if something is wedged we never want to
                         // pin a permit beyond 30s.
-                        match tokio::time::timeout(Duration::from_secs(30), internal_rx).await {
+                        match tokio::time::timeout(client_response_wait(), internal_rx).await {
                             Ok(Ok(blocks)) => {
                                 info!("✅ [TURBO SYNC DIRECT] Received {} blocks via request-response", blocks.len());
                                 // v10.9.44: success → CUBIC additive-increase + EWMV update.
@@ -7178,7 +7195,7 @@ impl UnifiedNetworkManager {
                                 let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response channel closed")));
                             }
                             Err(_) => {
-                                warn!("⏰ [TURBO SYNC DIRECT] Response wait exceeded 30s safety timeout — releasing client semaphore permit");
+                                warn!("⏰ [TURBO SYNC DIRECT] Response wait exceeded {:?} safety timeout — releasing client semaphore permit", client_response_wait());
                                 // v10.9.44: timeout → CUBIC multiplicative-decrease.
                                 cubic_for_task.lock().on_loss(&peer);
                                 let _ = response_tx_clone.send(Err(anyhow::anyhow!("Request-response timeout (30s safety cap)")));

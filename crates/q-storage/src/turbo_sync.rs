@@ -6482,6 +6482,9 @@ impl TurboSyncManager {
                     rtt_timeout
                 }
             };
+            // v10.11.114f-sync2: a floor under the adaptive chunk timeout (`Q_SYNC_CHUNK_TIMEOUT_FLOOR_SECS`, default 0 = off).
+            // The 5-30 s adaptive value gave up on every reply of a slow-but-alive archive peer.
+            let dynamic_timeout = dynamic_timeout.max(sync_chunk_timeout_floor());
             info!("⏱️  [ADAPTIVE TIMEOUT] Using {:?} for chunk {}..={} (v3.4.7+KALMAN blend)",
                    dynamic_timeout, start_height, end_height);
 
@@ -6711,6 +6714,11 @@ impl TurboSyncManager {
                         let mut timeout_calc = self.adaptive_timeout.write().await;
                         timeout_calc.record_timeout();
                     }
+                    // v10.11.114f-sync2 (SIGIL rule: "this peer is bad" is usually "this peer was busy" —
+                    // sigil-node never bans a peer for being slow). A timeout widens the adaptive timeout (above) but no
+                    // longer lowers the peer's score; with ONE archive peer that score turned it into a 'last resort'
+                    // and sync collapsed (Stockholm 2026-10-30: 55 -> 0 blk/s). `Q_SYNC_TIMEOUT_PENALTY=1` restores it.
+                    if sync_timeout_penalizes_peer() {
                     {
                         let mut tracker = self.progress_tracker.write().await;
                         tracker.record_failure(&peer.to_string()).await;
@@ -6718,6 +6726,7 @@ impl TurboSyncManager {
                     // 🌍 v1.0.2-SLINGSHOT: Penalty for gravity-assist momentum
                     if self.config.enable_apollo_gravity_assist {
                         self.apollo_peer_momentum.record_failure(&peer.to_string());
+                    }
                     }
                     // 🔭 v1.0.2-KALMAN: Feed loss=1.0 on timeout
                     if self.config.enable_apollo_kalman {
@@ -6965,7 +6974,7 @@ impl TurboSyncManager {
                 // retry_count branch, so it still fires when a chunk loops only on
                 // ClientThrottle responses (which intentionally do NOT increment
                 // retry_count). This is the safety net for the throttle path.
-                let chunk_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+                let chunk_deadline = tokio::time::Instant::now() + sync_chunk_deadline();
                 // v10.2.10: Per-chunk peer exclusion — avoid retrying same slow peer
                 // on transport/timeout failures. Validation failures go through AEGIS.
                 let mut excluded_peers: HashSet<String> = HashSet::new();
@@ -7063,6 +7072,10 @@ impl TurboSyncManager {
                             if is_transport_failure {
                                 excluded_peers.insert(peer.to_string());
                             }
+                            // v10.11.114f-sync2 (SIGIL `peer_pick::retry_hold`): a failed chunk waits 250 ms, 500 ms,
+                            // 1 s, 2 s, 4 s, 8 s before its next try. Retrying at once turns one stall into a storm
+                            // that is then indistinguishable from the fault that started it.
+                            tokio::time::sleep(sync_retry_hold(retry_count)).await;
 
                             if retry_count >= max_retries {
                                 // v10.4.6: If ALL peers explicitly say "No blocks found" the
@@ -9018,3 +9031,26 @@ mod tests {
     }
 }
 
+// ── v10.11.114f-sync2: SIGIL backfill rules as settings (see sigil-node lib.rs ~2008-2250) ──
+fn sync_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(default)
+}
+/// Floor under the adaptive per-chunk timeout. `Q_SYNC_CHUNK_TIMEOUT_FLOOR_SECS`, default 0 (off), max 600.
+fn sync_chunk_timeout_floor() -> Duration {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    Duration::from_secs(*V.get_or_init(|| sync_env_u64("Q_SYNC_CHUNK_TIMEOUT_FLOOR_SECS", 0).min(600)))
+}
+/// Wall-clock budget for one chunk incl. retries. `Q_SYNC_CHUNK_DEADLINE_SECS`, default 120 (unchanged), 30..=1800.
+fn sync_chunk_deadline() -> Duration {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    Duration::from_secs(*V.get_or_init(|| sync_env_u64("Q_SYNC_CHUNK_DEADLINE_SECS", 120).clamp(30, 1800)))
+}
+/// Does a chunk TIMEOUT lower the peer's score? Default NO (SIGIL rule). `Q_SYNC_TIMEOUT_PENALTY=1` = old behaviour.
+fn sync_timeout_penalizes_peer() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| sync_env_u64("Q_SYNC_TIMEOUT_PENALTY", 0) == 1)
+}
+/// SIGIL `peer_pick::retry_hold`: 250 ms * 2^n, capped at 8 s.
+fn sync_retry_hold(consecutive_failures: u32) -> Duration {
+    Duration::from_millis(250u64.saturating_mul(1u64 << consecutive_failures.min(5)))
+}
