@@ -61,7 +61,7 @@ pub const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage cal
 pub const DEV_FEE_PERCENT: f64 = 0.01;
 
 /// Founder wallet address (receives 1% dev fee) - Quillon Bank Master Account
-pub const FOUNDER_WALLET: &str = "qnkefca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+pub const FOUNDER_WALLET: &str = "qnkc55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
 /// Balance update operation
 #[derive(Debug, Clone, PartialEq, Eq)]

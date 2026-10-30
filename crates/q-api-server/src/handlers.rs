@@ -18,6 +18,50 @@ use crate::swap_indexer::ConsensusSwapRecord; // v3.5.8-beta: For unified wallet
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+// ───────────────────────────────────────────────────────────────
+// v10.11.114e ADMINISTRATIVE FREEZE (2026-10-21)
+// Refuse any value-moving transaction whose SENDER is on an operator hold list.
+// The list is read ONCE from the Q_FROZEN_WALLETS env var (comma-separated qnk/hex
+// addresses); unset or empty => no freeze and no behaviour change. This is a PURE
+// REJECTION taken before any processing -- it writes no balances and alters no
+// consensus rule (CLAUDE.md balance-integrity safety). Reversible WITHOUT a
+// recompile: edit Q_FROZEN_WALLETS in the service drop-in and restart.
+static FROZEN_WALLETS: std::sync::OnceLock<std::collections::HashSet<[u8; 32]>> =
+    std::sync::OnceLock::new();
+
+fn frozen_wallets() -> &'static std::collections::HashSet<[u8; 32]> {
+    FROZEN_WALLETS.get_or_init(|| {
+        let mut set = std::collections::HashSet::new();
+        if let Ok(raw) = std::env::var("Q_FROZEN_WALLETS") {
+            for entry in raw.split(',') {
+                let e = entry.trim();
+                let hexpart = e.strip_prefix("qnk").unwrap_or(e);
+                if hexpart.len() == 64 {
+                    if let Ok(bytes) = hex::decode(hexpart) {
+                        if bytes.len() == 32 {
+                            let mut a = [0u8; 32];
+                            a.copy_from_slice(&bytes);
+                            set.insert(a);
+                        }
+                    }
+                }
+            }
+        }
+        if !set.is_empty() {
+            warn!(
+                "🧊 [FREEZE v10.11.114e] {} wallet(s) under administrative hold (Q_FROZEN_WALLETS)",
+                set.len()
+            );
+        }
+        set
+    })
+}
+
+/// True if `addr` is on the operator freeze list and may NOT send funds.
+fn is_frozen_sender(addr: &[u8; 32]) -> bool {
+    frozen_wallets().contains(addr)
+}
+
 /// Custom deserializer for u64 that handles:
 /// - Plain integers
 /// - Scientific notation (1e15)
@@ -1188,7 +1232,7 @@ pub async fn node_status(
     // ✅ v0.9.30-beta: Get master account (dev fee wallet) balance for node status display
     // Master account receives 1% of all mining rewards as development fee
     const MASTER_ACCOUNT_HEX: &str =
-        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
     let balance = {
         // Check in-memory balances first (updated in real-time during mining)
         let balances = state.wallet_balances.read().await;
@@ -4889,6 +4933,17 @@ async fn send_transaction_inner(
         hasher.finalize().into()
     };
 
+    // v10.11.114e: administrative freeze -- refuse spend from a held wallet (Q_FROZEN_WALLETS).
+    if is_frozen_sender(&from_address) {
+        warn!(
+            "🧊 [FREEZE] refused spend from frozen wallet {}",
+            q_log_privacy::mask_addr(&hex::encode(from_address))
+        );
+        return Ok(Json(ApiResponse::error(
+            "Account frozen: this wallet is under an administrative hold and cannot send funds.".to_string(),
+        )));
+    }
+
     // SECURITY: Verify authenticated wallet matches transaction sender
     // This prevents authenticated user A from sending transactions on behalf of user B
     if from_address != auth_wallet.address {
@@ -6002,6 +6057,17 @@ pub async fn send_transaction_signed(
         )));
     }
 
+    // v10.11.114e: administrative freeze -- refuse spend from a held wallet (Q_FROZEN_WALLETS).
+    if is_frozen_sender(&from_address) {
+        warn!(
+            "🧊 [FREEZE] refused spend from frozen wallet {}",
+            q_log_privacy::mask_addr(&hex::encode(from_address))
+        );
+        return Ok(Json(ApiResponse::error(
+            "Account frozen: this wallet is under an administrative hold and cannot send funds.".to_string(),
+        )));
+    }
+
     // 3. Amount sanity
     if request.amount == 0 {
         return Ok(Json(ApiResponse::error("Amount must be > 0".to_string())));
@@ -6526,6 +6592,16 @@ pub async fn send_transactions_batch(
     }
 
     // ─── 2. Batch-size sanity ─────────────────────────────────────────
+    // v10.11.114e: administrative freeze -- refuse spend from a held wallet (Q_FROZEN_WALLETS).
+    if is_frozen_sender(&from_address) {
+        warn!(
+            "🧊 [FREEZE] refused spend from frozen wallet {}",
+            q_log_privacy::mask_addr(&hex::encode(from_address))
+        );
+        return Ok(Json(ApiResponse::error(
+            "Account frozen: this wallet is under an administrative hold and cannot send funds.".to_string(),
+        )));
+    }
     let n = request.transactions.len();
     if n == 0 {
         return Ok(Json(ApiResponse::error("Empty batch".to_string())));
@@ -10163,6 +10239,17 @@ pub async fn send_private_transaction(
         )));
     }
 
+    // v10.11.114e: administrative freeze -- refuse spend from a held wallet (Q_FROZEN_WALLETS).
+    if is_frozen_sender(&from_address) {
+        warn!(
+            "🧊 [FREEZE] refused spend from frozen wallet {}",
+            q_log_privacy::mask_addr(&hex::encode(from_address))
+        );
+        return Ok(Json(ApiResponse::error(
+            "Account frozen: this wallet is under an administrative hold and cannot send funds.".to_string(),
+        )));
+    }
+
     // 2026-06-24 (rocky) SECURITY — reject self-send through the mixer.
     // complete_mixing_process snapshots old_recipient BEFORE writing the sender debit,
     // so for from==to the credit insert clobbers the debit insert and the wallet ends at
@@ -12779,6 +12866,17 @@ pub async fn execute_swap(
         );
         return Ok(Json(ApiResponse::error(
             "Unauthorized: You can only swap from your own wallet".to_string(),
+        )));
+    }
+
+    // v10.11.114e: administrative freeze -- refuse spend from a held wallet (Q_FROZEN_WALLETS).
+    if is_frozen_sender(&wallet_addr) {
+        warn!(
+            "🧊 [FREEZE] refused spend from frozen wallet {}",
+            q_log_privacy::mask_addr(&hex::encode(wallet_addr))
+        );
+        return Ok(Json(ApiResponse::error(
+            "Account frozen: this wallet is under an administrative hold and cannot send funds.".to_string(),
         )));
     }
 

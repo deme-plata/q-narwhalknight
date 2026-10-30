@@ -1893,7 +1893,7 @@ async fn get_dev_fee_status(
 
     const DEV_FEE_PERCENT: f64 = 0.01; // 1%
     const FOUNDER_WALLET_HEX: &str =
-        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
     let status = DevFeeStatus {
         enabled: true,
@@ -1922,7 +1922,7 @@ async fn get_dev_fee_stats(
     info!("📊 Fetching development fee statistics");
 
     const FOUNDER_WALLET_HEX: &str =
-        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
     // Decode founder wallet
     let founder_wallet_bytes = match hex::decode(FOUNDER_WALLET_HEX) {
@@ -1987,7 +1987,7 @@ async fn get_founder_wallet_info(
     info!("📊 Fetching founder wallet information");
 
     const FOUNDER_WALLET_HEX: &str =
-        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
     // Decode founder wallet
     let founder_wallet_bytes = match hex::decode(FOUNDER_WALLET_HEX) {

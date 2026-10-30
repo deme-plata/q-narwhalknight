@@ -1493,7 +1493,7 @@ impl BlockProducer {
         let dev_fee_bps_val = self.dev_fee_bps.load(std::sync::atomic::Ordering::Relaxed) as u128;
         const BPS_DIVISOR: u128 = 10_000; // Basis points divisor for percentage calculation
         const FOUNDER_WALLET_HEX: &str =
-            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+            "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
         // v10.11.81 CO-FOUNDER SPLIT (operator-approved 2026-07-09): the founder
         // share of the dev fee is split 50/50 with the co-founder wallet as a
         // SEPARATE coinbase tx minted alongside the founder tx. Producer-side

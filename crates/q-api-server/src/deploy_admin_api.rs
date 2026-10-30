@@ -1385,7 +1385,7 @@ pub async fn admin_dev_fee_status(
     let fee_bps = state.dev_fee_bps.load(std::sync::atomic::Ordering::Relaxed);
 
     // Get founder wallet balance
-    const FOUNDER_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const FOUNDER_HEX: &str = "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
     let founder_balance = {
         let balances = state.wallet_balances.read().await;
         let mut addr = [0u8; 32];

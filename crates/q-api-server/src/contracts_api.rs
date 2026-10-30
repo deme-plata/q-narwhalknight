@@ -15,6 +15,20 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::AppState;
+
+// v10.11.114f: contract-ownership remap. The compromised founder wallet's deployer authority
+// (mint / airdrop / burn / fee-config) moves to the new master wallet. Forward-only: affects only
+// authorization and the mint-credit destination, never historical state or block validation.
+fn effective_owner(addr: [u8; 32]) -> [u8; 32] {
+    const OLD_HEX: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+    const NEW_HEX: &str = "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
+    if hex::encode(addr) == OLD_HEX {
+        if let Ok(b) = hex::decode(NEW_HEX) {
+            if b.len() == 32 { let mut n=[0u8;32]; n.copy_from_slice(&b); return n; }
+        }
+    }
+    addr
+}
 use crate::ContractEventRecord;
 use crate::wallet_auth::AuthenticatedWallet;
 use crate::transaction_utils::{TransactionBuilder, submit_transaction};
@@ -2169,14 +2183,14 @@ pub async fn mint_tokens(
 
     // v10.11.106e SECURITY: only the contract's deployer may mint (same rule as airdrop_tokens). This
     // route had NO auth: anyone could mint unlimited supply of any mintable token, or burn a deployer's.
-    if contract.deployer != auth_wallet.address {
+    if effective_owner(contract.deployer) != auth_wallet.address {
         return Ok(Json(ApiResponse::error(
             "Unauthorized: only the contract deployer can mint this contract's tokens".to_string(),
         )));
     }
 
     // Mint tokens to the contract owner
-    let owner = contract.deployer;
+    let owner = effective_owner(contract.deployer);
     let new_balance = {
         let mut token_balances = state.token_balances.write().await;
         let current_balance = token_balances
@@ -2294,13 +2308,13 @@ pub async fn burn_tokens(
 
     // Burn tokens from the contract owner
     // v10.11.106e SECURITY: only the contract's deployer may burn (it burns FROM the deployer).
-    if contract.deployer != auth_wallet.address {
+    if effective_owner(contract.deployer) != auth_wallet.address {
         return Ok(Json(ApiResponse::error(
             "Unauthorized: only the contract deployer can burn this contract's tokens".to_string(),
         )));
     }
 
-    let owner = contract.deployer;
+    let owner = effective_owner(contract.deployer);
     let new_balance = {
         let mut token_balances = state.token_balances.write().await;
         let current_balance = token_balances
@@ -2399,7 +2413,7 @@ pub async fn airdrop_tokens(
             "Contract not found: {}", request.contract_address
         )))),
     };
-    if contract.deployer != auth_wallet.address {
+    if effective_owner(contract.deployer) != auth_wallet.address {
         tracing::warn!(
             "🚨 [AIRDROP v10.9.46] Unauthorized airdrop attempt: contract deployer={} auth={}",
             hex::encode(&contract.deployer[..8]),
@@ -2485,7 +2499,7 @@ pub async fn airdrop_tokens(
     let total_amount = amount_per_recipient.saturating_mul(recipient_addrs.len() as u128);
 
     // Check if owner has sufficient balance
-    let owner = contract.deployer;
+    let owner = effective_owner(contract.deployer);
     let (new_owner_balance, recipient_balances) = {
         let mut token_balances = state.token_balances.write().await;
         let owner_balance = token_balances
@@ -3492,7 +3506,7 @@ pub async fn update_fee_config(
         None => return Ok(Json(ApiResponse::error("Contract not found".to_string()))),
     };
 
-    if contract.deployer != wallet_addr {
+    if effective_owner(contract.deployer) != wallet_addr {
         return Ok(Json(ApiResponse::error("Only contract owner can update fee config".to_string())));
     }
 

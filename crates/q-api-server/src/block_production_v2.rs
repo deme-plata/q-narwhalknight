@@ -272,7 +272,7 @@ async fn production_loop(
 
                         // Dev fee wallet gets special label
                         const MASTER_ACCOUNT_HEX: &str =
-                            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                            "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
                         if wallet_addr_hex == MASTER_ACCOUNT_HEX && change_reason == "coinbase" {
                             change_reason = "development_fee".to_string();
                         } else if change_reason == "coinbase" {

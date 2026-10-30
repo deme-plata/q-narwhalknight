@@ -4276,7 +4276,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
     // v8.8.1: Log founder wallet balance for diagnostics (no modification).
     // Balance restoration deferred — need to determine correct QUG amount from chain data.
     {
-        let founder_hex = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+        let founder_hex = "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
         let founder_bytes = hex::decode(founder_hex).expect("valid founder hex");
         let mut addr = [0u8; 32];
         addr.copy_from_slice(&founder_bytes);
@@ -6854,7 +6854,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                     let op_wallet = {
                         let w = admin_wallet_clone.clone();
                         const FOUNDER_WALLET_HEX: &str =
-                            "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                            "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
                         if w.is_empty() || w == FOUNDER_WALLET_HEX {
                             None
                         } else {
@@ -18784,7 +18784,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                     // Founder wallet hex for SSE display
                     const FOUNDER_WALLET_HEX: &str =
-                        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
                     let mut balance_updates = Vec::with_capacity(batch_size);
                     let founder_hex = FOUNDER_WALLET_HEX.to_string();
@@ -19404,7 +19404,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                 {
                                     let local_wallet_hex = app_state_mining.admin_wallet.clone();
                                     const FOUNDER_WALLET_HEX: &str =
-                                        "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                                        "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
                                     if !local_wallet_hex.is_empty()
                                         && local_wallet_hex != FOUNDER_WALLET_HEX
                                         && !seen_wallets.contains(&local_wallet_hex)
@@ -20826,7 +20826,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
                                             let op_wallet_immediate = {
                                                 let w = app_state_mining.admin_wallet.clone();
                                                 const FOUNDER_WALLET_HEX: &str =
-                                                    "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                                                    "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
                                                 if w.is_empty() || w == FOUNDER_WALLET_HEX {
                                                     None
                                                 } else {
@@ -21994,7 +21994,7 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
 
                             // v3.4.2-beta: Use the provided change_reason, with special handling for dev fee
                             const MASTER_ACCOUNT_HEX: &str =
-                                "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+                                "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
                             // Label master-account coinbase as development_fee for frontend compatibility.
                             if wallet_addr_hex == MASTER_ACCOUNT_HEX && change_reason == "coinbase" {
                                 change_reason = "development_fee".to_string();

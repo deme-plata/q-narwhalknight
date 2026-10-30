@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 /// Founder wallet address (hardcoded for security)
-pub const FOUNDER_WALLET: &str = "efca1e8c1f46e91013b4073898c771bb3d566453537ccf87e834505925e50723";
+pub const FOUNDER_WALLET: &str = "c55b79e3cd5350297bdf9608adcc6114f2518e15c9bc6507434e08e6a17ce8d7";
 
 /// Maximum allowed time difference for timestamp validation (5 minutes)
 const MAX_TIMESTAMP_DIFF: i64 = 300; // seconds
