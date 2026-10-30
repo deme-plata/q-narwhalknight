@@ -7112,7 +7112,10 @@ impl UnifiedNetworkManager {
                     // the effective cap based on observed failure rate.
                     let effective_cap = self.effective_per_peer_inflight(&peer);
                     let static_available = client_sem_for_read.available_permits() as u32;
-                    let in_flight_now = (CLIENT_INFLIGHT_BLOCK_PACK_PER_PEER as u32)
+                    // v10.11.114f-sync3: the semaphore holds client_inflight_per_peer() slots, not the 16-slot constant.
+                    // sync2 computed 16 - free here, so with the cap at 4 one request read as 13 in flight and the gate
+                    // refused every request forever (rig S2A 2026-10-30: 0 replies in 8 min).
+                    let in_flight_now = (client_inflight_per_peer() as u32)
                         .saturating_sub(static_available);
                     if in_flight_now > effective_cap {
                         debug!(
