@@ -131,6 +131,22 @@ pub trait KVStore: Send + Sync {
         Ok(None)
     }
 
+    /// v10.11.111: presence probe for many keys at once. `probes[i] = (bytes, is_prefix)`;
+    /// `out[i]` is true iff `cf` holds a key equal to `bytes` (is_prefix = false) or starting
+    /// with it (is_prefix = true). Values are never copied. The RocksDB impl runs every probe
+    /// on ONE iterator inside ONE blocking task; this default is the per-probe fallback.
+    async fn probe_keys(&self, cf: &str, probes: &[(Vec<u8>, bool)]) -> Result<Vec<bool>> {
+        let mut out = Vec::with_capacity(probes.len());
+        for (bytes, is_prefix) in probes {
+            let hit = self.seek_first_with_prefix(cf, bytes, bytes).await?;
+            out.push(match hit {
+                Some((k, _)) => *is_prefix || k == *bytes,
+                None => false,
+            });
+        }
+        Ok(out)
+    }
+
     /// v10.3.7: Forward iterate DAG blocks from start_height using lazy iterator.
     /// Returns (height, key_bytes, value_bytes) tuples sorted by numeric height.
     /// Default: returns empty (sled/Windows). RocksDB impl uses raw iterator.
@@ -1973,6 +1989,33 @@ impl KVStore for RocksDBKV {
         })
         .await
         .map_err(|e| anyhow::anyhow!("seek_first_with_prefix blocking task failed: {}", e))?
+    }
+
+    async fn probe_keys(&self, cf: &str, probes: &[(Vec<u8>, bool)]) -> Result<Vec<bool>> {
+        // v10.11.111: one blocking task, one raw iterator, one seek per probe. key() is read,
+        // value() never is — so a probe over a sparse historical window costs seeks, not block copies.
+        let db = self.db.clone();
+        let cf = cf.to_string();
+        let probes = probes.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let cf_handle = db
+                .cf_handle(&cf)
+                .ok_or_else(|| anyhow::anyhow!("Column family not found: {}", cf))?;
+            let mut iter = db.raw_iterator_cf(&cf_handle);
+            let mut out = Vec::with_capacity(probes.len());
+            for (bytes, is_prefix) in &probes {
+                iter.seek(bytes);
+                let hit = iter.valid()
+                    && iter.key().map_or(false, |k| {
+                        if *is_prefix { k.starts_with(bytes) } else { k == bytes.as_slice() }
+                    });
+                out.push(hit);
+            }
+            iter.status().context("Iterator error in probe_keys")?;
+            Ok::<_, anyhow::Error>(out)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("probe_keys blocking task failed: {}", e))?
     }
 
     async fn get_dag_blocks_forward(

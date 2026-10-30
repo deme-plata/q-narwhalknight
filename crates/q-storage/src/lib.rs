@@ -206,6 +206,7 @@ pub mod aegis_sync; // v0.9.14-beta: AEGIS-QL signed P2P sync
 pub mod archive_guard; // v10.11.109: self-detection, loop-guard header, negative cache for the Format-4 archive fallback
 pub mod balance_root; // v10.11.109: balance_root_v1 as a pure fn — shared by the node and snapshot verification
 pub mod log_ratelimit; // v10.11.109: "log at most once per interval" gate for hot-path warnings
+pub mod block_key_probe; // v10.11.111: exact presence probes over the three block key formats
 #[cfg(not(target_os = "windows"))]
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_checkpoint; // v10.4.12: Hardcoded Epsilon balance snapshot — idempotent one-time import
@@ -2763,6 +2764,25 @@ impl QStorage {
               blocks.len(), keys.len(), elapsed, rate, missing_count, dag_found);
 
         Ok(blocks)
+    }
+
+    /// v10.11.111: which of `candidates` hold a block entry in ANY of the three key formats
+    /// (1: `qblock:height:N` exact, 2: `qblock:dag:N:*`, 3: `N.to_be_bytes()++hash`). Pure
+    /// presence — nothing is decoded and no value is copied. Returned heights keep the input order.
+    ///
+    /// This is the exact counterpart of `get_qblocks_forward`, which walks only the first 100,000
+    /// `qblock:dag:` keys in STRING order and so can name a "next block" millions of heights past
+    /// the real one: a gap declared from it can contain blocks. Measured 2026-10-02: a fresh node
+    /// sat 14 h at 26,000 behind "26,001-100,440 gone" while the top of that range holds format-1
+    /// blocks (09-26 census).
+    /// READ-ONLY.
+    pub async fn heights_with_any_block_key(&self, candidates: &[u64]) -> Result<Vec<u64>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let probes = block_key_probe::block_key_probes(candidates);
+        let hit = self.hot_db.probe_keys(CF_BLOCKS, &probes).await?;
+        block_key_probe::heights_from_probe_hits(candidates, &hit)
     }
 
     /// v10.3.7: Forward-seek block serving for sparse DAG ranges.
