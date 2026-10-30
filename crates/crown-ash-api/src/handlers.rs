@@ -5,8 +5,9 @@
 //! write operations (`submit_action`, `join_game`) acquire a write lock.
 
 use axum::{
-    extract::{Json, Path, State},
-    http::StatusCode,
+    body::Bytes,
+    extract::{Json, OriginalUri, Path, State},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -285,13 +286,29 @@ pub async fn get_province_history(
 
 /// `POST /action` — Queue a game action for the current turn.
 ///
-/// The action is validated for basic correctness (wallet must own a realm)
-/// and then appended to the action queue.  The simulation tick will process
-/// it when the next turn resolves.
+/// The order must be signed by the wallet it names (see [`crate::auth`]); the
+/// wallet must own a realm. The action is appended to the action queue and the
+/// simulation tick processes it when the next turn resolves.
 pub async fn submit_action(
     State(state): State<SharedGameState>,
-    Json(body): Json<SubmitActionRequest>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    raw_body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let (mut body, signer) = match crate::auth::authorize_order::<SubmitActionRequest>(
+        &headers,
+        uri.path(),
+        &raw_body,
+        |b| &b.wallet,
+    ) {
+        Ok(ok) => ok,
+        Err((status, msg)) => {
+            warn!(error = %msg, "Action rejected: signature");
+            return Ok((status, ApiResponse::<ActionQueuedResponse>::err(msg)));
+        }
+    };
+    body.wallet = signer;
+
     let mut gs = state.write().await;
 
     // Validate: the wallet must own a realm (check both realm.owner_wallet and faction.player_wallet).
@@ -350,10 +367,27 @@ pub async fn submit_action(
 /// - The faction ID is valid (0 .. MAX_FACTIONS)
 /// - The faction is not already claimed by another player
 /// - The wallet does not already own a different realm
+/// - The request is signed by that wallet (see [`crate::auth`])
 pub async fn join_game(
     State(state): State<SharedGameState>,
-    Json(body): Json<JoinGameRequest>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    raw_body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let (mut body, signer) = match crate::auth::authorize_order::<JoinGameRequest>(
+        &headers,
+        uri.path(),
+        &raw_body,
+        |b| &b.wallet,
+    ) {
+        Ok(ok) => ok,
+        Err((status, msg)) => {
+            warn!(error = %msg, "Join rejected: signature");
+            return Ok((status, ApiResponse::<JoinGameResponse>::err(msg)));
+        }
+    };
+    body.wallet = signer;
+
     let mut gs = state.write().await;
 
     // World must be initialized.

@@ -4319,12 +4319,17 @@ dependencies = [
  "crown-ash-narrative",
  "crown-ash-sim",
  "crown-ash-types",
+ "ed25519-dalek",
  "futures",
+ "hex",
+ "http-body-util",
  "q-storage",
  "serde",
  "serde_json",
+ "sha3 0.10.8",
  "tokio",
  "tokio-stream",
+ "tower 0.4.13",
  "tracing",
 ]
 
