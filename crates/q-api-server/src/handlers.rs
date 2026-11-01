@@ -8226,23 +8226,19 @@ pub async fn hashpower_security_metrics(
     // Full attack cost now includes staking at risk
     let hashrate_based_cost = expected_hardware_loss + sustained_electricity_cost + expected_legal_cost + staking_security_usd;
 
-    // v6.2.3: Network economic security floor
-    // Even if hashrate is low (testnet), the network secures real economic value.
-    // An attacker must overcome BOTH hashrate AND economic barriers.
-    // Economic floor = 5% of (market cap + TVL) — what an attacker needs to profit.
-    let tvl_usd = {
+    // v10.11.114i: pool value ("TVL") counts each pool by its native side — twice its QUG side at the QUG
+    // price, else twice its QUGUSD side at $1; pools with neither are not priced (security_value.rs).
+    // Until 114i it was (r0 + r1) × QUG price for every pool, which counted each QUGUSD and custom token
+    // as a whole QUG: $32,169 B on 2026-11-01 for pools worth about $1.65 B.
+    let (tvl_usd, tvl_pools_valued, tvl_pools_unpriced) = {
         let pools = state.liquidity_pools.read().await;
         let vault_read = state.collateral_vault.read().await;
         let qug_price = vault_read.qug_price_usd;
         drop(vault_read);
-        let mut total_tvl = 0.0f64;
-        for pool in pools.values() {
-            // Both reserves are in 24-decimal format
-            let r0 = pool.reserve0 as f64 / 1e24;
-            let r1 = pool.reserve1 as f64 / 1e24;
-            total_tvl += (r0 + r1) * qug_price;
-        }
-        total_tvl
+        crate::security_value::total_pool_value_usd(
+            pools.values().map(|p| (p.token0.as_str(), p.token1.as_str(), p.reserve0, p.reserve1)),
+            qug_price,
+        )
     };
 
     // Get preliminary market cap for economic floor calculation
@@ -8255,15 +8251,17 @@ pub async fn hashpower_security_metrics(
         price * supply_qug
     };
 
+    // What an attack could put at risk. v10.11.114i: reported BESIDE the cost, no longer used as it — until
+    // 114i the cost was max(hashrate cost, 5 % of this value), so a network one GPU could outmine showed
+    // "Total Security $1,615 B". An attacker pays for hashrate (and stake), not for the value at risk.
     let economic_value_at_stake = prelim_market_cap + tvl_usd;
-    let economic_security_floor = economic_value_at_stake * 0.05; // 5% of network value
 
-    let full_economic_attack_cost = f64::max(hashrate_based_cost, economic_security_floor);
+    let full_economic_attack_cost = hashrate_based_cost;
 
     // Legacy double_spend_cost for backwards compatibility
     let double_spend_cost = full_economic_attack_cost * 0.1; // 10% of full cost for 6-conf attack
 
-    // For display: show the TOTAL capital required (economic floor applied)
+    // For display: the capital an attacker needs (hardware + electricity + legal risk + stake)
     let total_attack_capital = full_economic_attack_cost;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -8379,18 +8377,22 @@ pub async fn hashpower_security_metrics(
                 "electricity_24h": format_cost(sustained_electricity_cost)
             },
             "tier_3_full_economic": {
-                "name": "Full Economic Cost",
+                "name": "Full Attack Cost",
                 "cost": format_cost(full_economic_attack_cost),
                 "cost_raw": full_economic_attack_cost,
-                "description": "Hashrate + economic value at stake (market cap + TVL)",
+                "description": "What an attacker spends: hardware + 24h electricity + expected legal cost + stake at risk. The value an attack could put at risk is in value_at_stake and is not a cost.",
                 "components": {
                     "hashrate_based": format_cost(hashrate_based_cost),
-                    "economic_value_at_stake": format_cost(economic_value_at_stake),
-                    "economic_security_floor": format_cost(economic_security_floor),
-                    "market_cap": format_cost(prelim_market_cap),
-                    "tvl": format_cost(tvl_usd),
                     "staking_at_risk": format_cost(staking_security_usd),
                     "detection_probability": format!("{:.0}%", detection_probability * 100.0)
+                },
+                "value_at_stake": {
+                    "total": format_cost(economic_value_at_stake),
+                    "market_cap": format_cost(prelim_market_cap),
+                    "pool_value": format_cost(tvl_usd),
+                    "pools_valued": tvl_pools_valued,
+                    "pools_unpriced": tvl_pools_unpriced,
+                    "note": "Market cap uses the QUG price of the on-chain QUG/QUGUSD pool, not an exchange price. Each pool counts twice its QUG (or QUGUSD) side; pools with neither are not priced."
                 }
             }
         },
@@ -8523,16 +8525,17 @@ pub async fn hashpower_security_metrics(
             "quantum_computer_resistance": {
                 "classical_attack_cost": format_cost(full_economic_attack_cost),
                 "quantum_attack_feasibility": "Infeasible",
-                "reason": "Dilithium5 + Kyber1024 + SHA3-256 provide 128-256 bit post-quantum security. Current quantum computers have ~1000 qubits; breaking this requires millions of stable qubits.",
+                "reason": "Dilithium5 + Kyber1024 (NIST level 5) protect node-to-node connections; breaking them would take millions of stable qubits, today's machines have about a thousand. Post-quantum crypto does not raise the cost of a 51% attack: that needs hashrate, not a quantum computer.",
                 "years_until_threat": "15-30+ years (optimistic quantum timeline)",
-                "protection_level": "NIST Security Level 5 (highest)"
+                "protection_level": "NIST Security Level 5 (node connections)"
             },
             "comparison_to_bitcoin": {
                 "bitcoin_asic_efficiency": "~100 TH/s per $3,000 ASIC",
                 "qnk_gpu_efficiency": "~1.5 GH/s per $1,600 GPU",
-                "relative_attack_cost": "66,000x more expensive per hash on Q-NarwhalKnight",
-                "bitcoin_is_vulnerable_to": ["ASIC manufacturers", "Quantum computers (ECDSA)", "51% hashrate attacks"],
-                "qnk_is_resistant_to": ["ASIC attacks (SHA3)", "Quantum attacks (Dilithium5/Kyber)", "Parallel VDF attacks"]
+                "relative_attack_cost": format!("Not comparable per hash (different hash functions). Matching Bitcoin's hashrate takes billions of dollars of hardware; matching Quillon's takes {} GPU(s) today ({}).", gpus_required, format_cost(instant_attack_cost)),
+                "bitcoin_is_vulnerable_to": ["Quantum computers (ECDSA signatures)", "Mining concentrated in a few ASIC makers"],
+                "qnk_is_resistant_to": ["Quantum attacks on node connections (Dilithium5/Kyber1024)", "Parallel speed-ups of the VDF time-lock (each step needs the previous one)"],
+                "qnk_is_vulnerable_to": ["51% attacks while network hashrate is small", "BLAKE3 ASICs (they exist for other coins); mining is GPU-based today"]
             }
         },
         // v1.4.11-beta: HYBRID PoW/PoS SECURITY MODEL
