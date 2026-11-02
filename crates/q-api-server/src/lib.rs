@@ -286,6 +286,7 @@ pub mod limit_order_api; // ✅ v10.4.9 - Price-triggered one-shot swaps (limit 
 pub mod perpetual_api; // ✅ v2.5.0-beta - Perpetual futures with 10x leverage (long/short)
 pub mod handlers;
 pub mod security_value; // v10.11.114i: honest pool value for the security panel
+pub mod bank_amounts; // v10.11.114j: bank amounts by their digits, interest in whole base units
 pub mod balance_proof_api; // 2026-08-17 - light-client Merkle proof endpoint for balance_root_v2
 pub mod startup_progress; // ✅ v1.4.15-beta - Startup progress tracker for frontend UI
 pub mod adaptive_confirmations; // ✅ v1.4.4-beta - ML-adaptive confirmation with retail-first instant finality

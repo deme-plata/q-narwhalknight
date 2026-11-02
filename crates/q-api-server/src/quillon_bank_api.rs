@@ -754,7 +754,9 @@ pub struct LoanApplication {
 #[derive(Debug, serde::Deserialize)]
 pub struct ApplyLoanRequest {
     pub wallet_address: String,
-    #[serde(deserialize_with = "q_types::u128_serde::deserialize")]
+    // v10.11.114j: read by its digits — a bare JSON number above u64::MAX used to arrive
+    // as the nearest f64 (1,140 QUGUSD → …064625836032). See bank_amounts.rs.
+    #[serde(deserialize_with = "crate::bank_amounts::exact_u128")]
     pub loan_amount: u128,
     pub collateral_amount: f64,
     pub collateral_type: String,
@@ -770,7 +772,11 @@ async fn get_loan_applications(
         .map(|loan| {
             // Sanitize f64 values — NaN/Infinity causes serde_json::json! to panic
             let safe_f64 = |v: f64| if v.is_finite() { v } else { 0.0 };
+            // v10.11.114j: what closes the loan, exact, as strings (u128-safe) — pay this.
+            let owed = crate::bank_amounts::total_owed_units(loan.loan_amount, loan.interest_rate, loan.term_months).ok();
             serde_json::json!({
+                "total_owed": owed.map(|v| v.to_string()),
+                "remaining_owed": owed.map(|v| v.saturating_sub(loan.amount_paid).to_string()),
                 "loan_id": loan.loan_id,
                 "borrower_address": loan.borrower_address,
                 "loan_amount": loan.loan_amount.to_string(),
@@ -1274,10 +1280,20 @@ pub async fn apply_loan(
     let term_premium = (request.term_months as f64 / 6.0) * 0.005; // +0.5% per 6 months
     let interest_rate = (base_rate - collateral_discount + term_premium).max(0.01); // Min 1% APR
 
-    // 4. Calculate monthly payment
-    let total_interest = loan_amount_f64 * interest_rate * (request.term_months as f64 / 12.0);
-    let total_repayment = loan_amount_f64 + total_interest;
-    let monthly_payment = total_repayment / request.term_months as f64;
+    // 4. Calculate monthly payment — v10.11.114j: from the same whole-base-unit total the
+    // payback path charges (bank_amounts::total_owed_units), so the shown due closes the loan.
+    let total_repayment_units = match crate::bank_amounts::total_owed_units(
+        request.loan_amount,
+        interest_rate * 100.0,
+        request.term_months,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Cannot price loan application: {}", e);
+            return Ok(Json(ApiResponse::error(format!("Cannot price this loan: {}", e))));
+        }
+    };
+    let monthly_payment = (total_repayment_units as f64 / 1e24) / request.term_months as f64;
 
     // 5. Create LoanApplication with UUID
     let loan_id = uuid::Uuid::new_v4().to_string();
@@ -1358,7 +1374,7 @@ pub async fn apply_loan(
 pub struct PaybackLoanRequest {
     pub wallet_address: String,
     pub loan_id: String,
-    #[serde(deserialize_with = "q_types::u128_serde::deserialize")]
+    #[serde(deserialize_with = "crate::bank_amounts::exact_u128")] // v10.11.114j: by its digits
     pub payment_amount: u128, // QUGUSD amount in base units
 }
 
@@ -1410,12 +1426,19 @@ pub async fn payback_loan(
 
     // 5. Calculate total amount owed (principal + interest) using u128
     let principal = loan.loan_amount; // Keep as u128, no truncation
-    let interest_rate = loan.interest_rate / 100.0;
-    let total_interest_f64 = (principal as f64) * interest_rate * (loan.term_months as f64 / 12.0);
-    let total_interest = total_interest_f64 as u128;
-    let total_owed = principal + total_interest;
+    // v10.11.114j: interest in whole base units from the rate's digits (bank_amounts), not
+    // `principal as f64 * rate` — so paying exactly `remaining_owed` closes the loan, no dust.
+    let total_owed = match crate::bank_amounts::total_owed_units(principal, loan.interest_rate, loan.term_months) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Cannot price loan {}: {}", request.loan_id, e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let total_interest = total_owed - principal;
     let remaining_owed = total_owed.saturating_sub(loan.amount_paid); // Account for prior payments
-    let payment_amount = request.payment_amount;
+    // v10.11.114j: never burn more than is owed — a rounded-up payment takes only the remainder.
+    let payment_amount = request.payment_amount.min(remaining_owed);
 
     info!(
         "📊 Loan payback details: Principal: {:.4}, Interest: {:.4}, Total Owed: {:.4}, Already Paid: {:.4}, Remaining: {:.4}, Payment: {:.4}",
