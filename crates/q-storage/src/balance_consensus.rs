@@ -51,6 +51,92 @@ pub fn active_genesis_timestamp() -> u64 {
     }
 }
 
+// =========================================================================
+// 🔐 v10.11.114f-sync4 (2026-10-30): ONE "already paid?" mark per block, shared by
+// EVERY writer of wallet_balance_*.
+//
+// Measured on the Stockholm follower: at the tip a block is paid by the gossip
+// path (BalanceConsensusEngine, sets processed_balance_block:<hash>) and again,
+// seconds later, by the turbo-sync chunk path's StateApplicator legacy bridge,
+// which never read or wrote that flag → supply grew 1.99× what the headers mint.
+// Both writers now go through the same two checks: the persistent flag (survives
+// restarts) and an in-process claim (closes the window before the flag commits).
+// =========================================================================
+
+/// The block identity used for balance dedup — the exact bytes
+/// `BalanceConsensusEngine` has always hashed, so existing flags stay valid.
+pub fn balance_block_hash(block: &QBlock) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+
+    // Hash block header
+    hasher.update(&block.header.height.to_be_bytes());
+    hasher.update(&block.header.timestamp.to_be_bytes());
+    hasher.update(&block.header.prev_block_hash);
+    hasher.update(&block.header.solutions_root);
+
+    // CRITICAL SECURITY FIX: Hash mining solutions to prevent collision attacks
+    // Without this, two blocks with same header but different solutions would have SAME hash
+    // This would allow attackers to censor legitimate miners
+    for solution in &block.mining_solutions {
+        hasher.update(&solution.miner_address);
+        hasher.update(&solution.nonce.to_be_bytes());
+        hasher.update(&solution.difficulty_target);  // Already [u8; 32]
+        hasher.update(&solution.timestamp.to_be_bytes());
+        hasher.update(&solution.hash);  // Already [u8; 32]
+    }
+
+    // CRITICAL SECURITY FIX: Hash transactions to prevent collision attacks
+    // Ensures blocks with different transaction sets cannot collide
+    for tx in &block.transactions {
+        // Use postcard serialization for deterministic byte representation
+        if let Ok(tx_bytes) = postcard::to_allocvec(tx) {
+            hasher.update(&tx_bytes);
+        }
+    }
+
+    let hash = hasher.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash);
+    result
+}
+
+/// CF_MANIFEST key of the persistent "this block's balances are applied" flag.
+pub fn processed_balance_key(block_hash: &[u8; 32]) -> String {
+    format!("processed_balance_block:{}", hex::encode(block_hash))
+}
+
+/// 2^18 blocks ≈ 16 days at today's ~16 k blocks/day; an evicted claim is still
+/// covered by its persistent flag, which commits within seconds of the claim.
+const BLOCK_CREDIT_CLAIMS_CAP: usize = 1 << 18;
+
+fn block_credit_claims() -> &'static std::sync::Mutex<LruCache<[u8; 32], ()>> {
+    static CLAIMS: std::sync::OnceLock<std::sync::Mutex<LruCache<[u8; 32], ()>>> =
+        std::sync::OnceLock::new();
+    CLAIMS.get_or_init(|| {
+        std::sync::Mutex::new(LruCache::new(
+            NonZeroUsize::new(BLOCK_CREDIT_CLAIMS_CAP).expect("non-zero cap"),
+        ))
+    })
+}
+
+/// Take the right to apply this block's balances in this process. `true` exactly
+/// once per block hash; every later caller (any path) gets `false` and must not
+/// write wallet_balance_* for that block.
+pub fn claim_block_credit(block_hash: &[u8; 32]) -> bool {
+    let mut claims = block_credit_claims().lock().unwrap_or_else(|e| e.into_inner());
+    if claims.contains(block_hash) {
+        return false;
+    }
+    claims.put(*block_hash, ());
+    true
+}
+
+/// Give a claim back when the claimer's write failed, so another path may pay.
+pub fn release_block_credit(block_hash: &[u8; 32]) {
+    let mut claims = block_credit_claims().lock().unwrap_or_else(|e| e.into_inner());
+    claims.pop(block_hash);
+}
+
 // v1.4.5-beta: Use integer basis points instead of floating-point for cross-platform determinism
 // 100 basis points = 1% (10_000 bps = 100%)
 pub const DEV_FEE_BPS: u128 = 190; // 1.9% = 190 basis points (mainnet)
@@ -312,6 +398,12 @@ impl BalanceConsensusEngine {
                 return Ok(Vec::new());
             }
             processed.put(block_hash, true);
+            // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
+            if !claim_block_credit(&block_hash) {
+                debug!("⏭️ Block {} already being paid by another path (height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
+                return Ok(Vec::new());
+            }
         }
 
         // =========================================================================
@@ -868,6 +960,12 @@ impl BalanceConsensusEngine {
                 return Ok(Vec::new());
             }
             processed.put(block_hash, true);
+            // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
+            if !claim_block_credit(&block_hash) {
+                debug!("⏭️ Block {} already being paid by another path (TX, height {}), skipping",
+                       &block_hash_hex[..16], block.header.height);
+                return Ok(Vec::new());
+            }
         }
 
         // v1.3.10-beta: Reduced to trace! to avoid log spam during sync
@@ -1330,6 +1428,10 @@ impl BalanceConsensusEngine {
                 return Ok(Vec::new());
             }
             processed.put(block_hash, true);
+            // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
+            if !claim_block_credit(&block_hash) {
+                return Ok(Vec::new());
+            }
         }
 
         // Track ALL blocks for emission rate calculation (critical for correct emission)
@@ -1750,38 +1852,7 @@ impl BalanceConsensusEngine {
     /// - Previously only hashed header, allowing blocks with different solutions to collide
     /// - Now includes mining solutions and transactions for complete uniqueness
     fn calculate_block_hash(&self, block: &QBlock) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-
-        // Hash block header
-        hasher.update(&block.header.height.to_be_bytes());
-        hasher.update(&block.header.timestamp.to_be_bytes());
-        hasher.update(&block.header.prev_block_hash);
-        hasher.update(&block.header.solutions_root);
-
-        // CRITICAL SECURITY FIX: Hash mining solutions to prevent collision attacks
-        // Without this, two blocks with same header but different solutions would have SAME hash
-        // This would allow attackers to censor legitimate miners
-        for solution in &block.mining_solutions {
-            hasher.update(&solution.miner_address);
-            hasher.update(&solution.nonce.to_be_bytes());
-            hasher.update(&solution.difficulty_target);  // Already [u8; 32]
-            hasher.update(&solution.timestamp.to_be_bytes());
-            hasher.update(&solution.hash);  // Already [u8; 32]
-        }
-
-        // CRITICAL SECURITY FIX: Hash transactions to prevent collision attacks
-        // Ensures blocks with different transaction sets cannot collide
-        for tx in &block.transactions {
-            // Use postcard serialization for deterministic byte representation
-            if let Ok(tx_bytes) = postcard::to_allocvec(tx) {
-                hasher.update(&tx_bytes);
-            }
-        }
-
-        let hash = hasher.finalize();
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&hash);
-        result
+        balance_block_hash(block)
     }
 
     /// Get consensus statistics (for monitoring)

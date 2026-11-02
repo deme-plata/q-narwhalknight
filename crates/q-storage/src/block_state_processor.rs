@@ -165,6 +165,36 @@ impl BlockStateProcessor {
     /// 4. Returns the processing result
     pub fn process_block_with_bridge(&self, block: &QBlock, bridge_legacy: bool) -> Result<BlockProcessingResult> {
         let height = block.header.height;
+
+        // v10.11.114f-sync4: the chunk path is the "sole legacy writer" only while
+        // nothing else has paid this block. At the tip the gossip path's
+        // BalanceConsensusEngine pays it first, and turbo-sync re-downloads it seconds
+        // later (measured on Stockholm 2026-10-30: supply grew 1.99× the headers).
+        // So the bridge pays only if the block carries no persistent paid flag AND it
+        // wins the in-process claim; when it pays, it writes the flag in the same batch.
+        let mut bridge_legacy = bridge_legacy;
+        let mut credit_claim: Option<[u8; 32]> = None;
+        if bridge_legacy {
+            let block_hash = crate::balance_consensus::balance_block_hash(block);
+            let flag_key = crate::balance_consensus::processed_balance_key(&block_hash);
+            let already_paid = match self.db.cf_handle(crate::CF_MANIFEST) {
+                Some(cf) => match self.db.get_cf(&cf, flag_key.as_bytes()) {
+                    Ok(v) => v.is_some(),
+                    Err(e) => {
+                        warn!("⚠️ [PAID-ONCE] flag read failed at height {}: {} — relying on the in-process claim", height, e);
+                        false
+                    }
+                },
+                None => false,
+            };
+            if already_paid || !crate::balance_consensus::claim_block_credit(&block_hash) {
+                debug!("⏭️ [PAID-ONCE] block {} already paid by another path — legacy bridge off for it", height);
+                bridge_legacy = false;
+            } else {
+                credit_claim = Some(block_hash);
+            }
+        }
+
         let mut all_changes: Vec<StateChange> = Vec::new();
         let mut tx_results: Vec<TxProcessingResult> = Vec::new();
         let mut total_gas_used: u64 = 0;
@@ -259,8 +289,18 @@ impl BlockStateProcessor {
         // Apply all state changes atomically
         let changes_count = all_changes.len();
         if !all_changes.is_empty() {
-            self.applicator.apply_changes_with_bridge(&all_changes, height, bridge_legacy)
-                .context(format!("Failed to apply {} state changes for block {}", changes_count, height))?;
+            let paid_flag = credit_claim.map(|h| crate::balance_consensus::processed_balance_key(&h));
+            if let Err(e) = self.applicator.apply_changes_with_bridge_marked(
+                &all_changes, height, bridge_legacy, paid_flag.as_deref(),
+            ) {
+                if let Some(h) = credit_claim {
+                    crate::balance_consensus::release_block_credit(&h);
+                }
+                return Err(e).context(format!("Failed to apply {} state changes for block {}", changes_count, height));
+            }
+        } else if let Some(h) = credit_claim {
+            // Nothing was written, so nothing was paid: leave the block to the engine.
+            crate::balance_consensus::release_block_credit(&h);
         }
 
         // Compute state root (placeholder - will implement sparse Merkle trie)

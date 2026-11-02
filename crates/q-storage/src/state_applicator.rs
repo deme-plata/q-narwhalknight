@@ -130,11 +130,31 @@ impl StateApplicator {
         block_height: u64,
         bridge_legacy: bool,
     ) -> Result<()> {
+        self.apply_changes_with_bridge_marked(changes, block_height, bridge_legacy, None)
+    }
+
+    /// v10.11.114f-sync4: like `apply_changes_with_bridge`, and when the bridge is
+    /// ON also writes `paid_flag_key` (the block's `processed_balance_block:<hash>`)
+    /// into CF_MANIFEST in the SAME WriteBatch as the legacy credits — so the
+    /// BalanceConsensusEngine sees the block as paid exactly when the money landed.
+    pub fn apply_changes_with_bridge_marked(
+        &self,
+        changes: &[StateChange],
+        block_height: u64,
+        bridge_legacy: bool,
+        paid_flag_key: Option<&str>,
+    ) -> Result<()> {
         let mut batch = WriteBatch::default();
         let mut overlay = BatchOverlay::default();
 
         for change in changes {
             self.apply_single_change(&mut batch, &mut overlay, bridge_legacy, change)?;
+        }
+
+        if let (true, Some(key)) = (bridge_legacy, paid_flag_key) {
+            let manifest_cf = self.db.cf_handle(CF_MANIFEST)
+                .ok_or_else(|| anyhow::anyhow!("CF_MANIFEST not found (paid flag)"))?;
+            batch.put_cf(&manifest_cf, key.as_bytes(), b"1");
         }
 
         // Write the batch atomically
