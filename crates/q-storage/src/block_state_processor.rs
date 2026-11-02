@@ -187,7 +187,7 @@ impl BlockStateProcessor {
                 },
                 None => false,
             };
-            if already_paid || !crate::balance_consensus::claim_block_credit(&block_hash) {
+            if already_paid || !crate::balance_consensus::claim_block_credit_at(&block_hash, height) {
                 debug!("⏭️ [PAID-ONCE] block {} already paid by another path — legacy bridge off for it", height);
                 bridge_legacy = false;
             } else {

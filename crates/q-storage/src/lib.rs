@@ -211,6 +211,7 @@ pub mod block_key_probe; // v10.11.111: exact presence probes over the three blo
 pub mod async_engine; // ✅ v1.0.2-beta: AsyncStorageEngine with micro-batching to eliminate mining stalls
 pub mod balance_checkpoint; // v10.4.12: Hardcoded Epsilon balance snapshot — idempotent one-time import
 pub mod balance_consensus;
+pub mod authority_import; // v10.11.114f-sync5: follower = authority at height H from a snapshot file + credit floor
 pub mod balance_smt; // v10.9.16: Sparse Merkle Tree for balance_root_v2 (IVC SNARK Blueprint 1A)
 pub mod hot_wallet_cache; // Hot-wallet SMT proof prefetch LRU (10K entries, ~80 MB worst-case)
 pub mod batch_sync;

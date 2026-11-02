@@ -131,6 +131,35 @@ pub fn claim_block_credit(block_hash: &[u8; 32]) -> bool {
     true
 }
 
+/// v10.11.114f-sync5 — the CREDIT FLOOR. After an authority import (crate::authority_import)
+/// the node's balances ARE the authority's balances at height H, so every block at or below H
+/// is already inside them. Paying such a block again (it may still arrive by gossip or sync
+/// after the restart) would credit it twice. The floor is persisted beside the import marker
+/// (`authority_import_credit_floor`, u64 LE in CF_MANIFEST) and loaded at boot before any
+/// block is applied. 0 = no floor (every node that never imported).
+static CREDIT_FLOOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// CF_MANIFEST key of the persisted credit floor (u64, little-endian).
+pub const CREDIT_FLOOR_KEY: &[u8] = b"authority_import_credit_floor";
+
+pub fn set_credit_floor(height: u64) {
+    CREDIT_FLOOR.store(height, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn credit_floor() -> u64 {
+    CREDIT_FLOOR.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `claim_block_credit` with the floor in front: a block at or below the floor is already
+/// paid (it is inside the imported state) and is refused without taking a claim.
+pub fn claim_block_credit_at(block_hash: &[u8; 32], height: u64) -> bool {
+    let floor = credit_floor();
+    if floor > 0 && height <= floor {
+        return false;
+    }
+    claim_block_credit(block_hash)
+}
+
 /// Give a claim back when the claimer's write failed, so another path may pay.
 pub fn release_block_credit(block_hash: &[u8; 32]) {
     let mut claims = block_credit_claims().lock().unwrap_or_else(|e| e.into_inner());
@@ -399,7 +428,7 @@ impl BalanceConsensusEngine {
             }
             processed.put(block_hash, true);
             // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
-            if !claim_block_credit(&block_hash) {
+            if !claim_block_credit_at(&block_hash, block.header.height) {
                 debug!("⏭️ Block {} already being paid by another path (height {}), skipping",
                        &block_hash_hex[..16], block.header.height);
                 return Ok(Vec::new());
@@ -961,7 +990,7 @@ impl BalanceConsensusEngine {
             }
             processed.put(block_hash, true);
             // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
-            if !claim_block_credit(&block_hash) {
+            if !claim_block_credit_at(&block_hash, block.header.height) {
                 debug!("⏭️ Block {} already being paid by another path (TX, height {}), skipping",
                        &block_hash_hex[..16], block.header.height);
                 return Ok(Vec::new());
@@ -1429,7 +1458,7 @@ impl BalanceConsensusEngine {
             }
             processed.put(block_hash, true);
             // v10.11.114f-sync4: shared with the turbo-sync legacy bridge (see claim_block_credit).
-            if !claim_block_credit(&block_hash) {
+            if !claim_block_credit_at(&block_hash, block.header.height) {
                 return Ok(Vec::new());
             }
         }

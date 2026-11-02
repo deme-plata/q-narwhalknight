@@ -4467,6 +4467,55 @@ DOWNLOAD: wget https://quillon.xyz/downloads/q-api-server-v8.5.9"
         warn!("🚨 [Q_PURGE_WALLET_BALANCES] Purged {} wallet entries. Balances will import from Q_BALANCE_AUTHORITY_PEER.", deleted);
     }
 
+    // v10.11.114f-sync5: CREDIT FLOOR + AUTHORITY IMPORT (q_storage::authority_import).
+    // The floor loads on EVERY boot (0 = this node never imported) before any block is applied:
+    // a block at or below it is already inside the imported state and is never paid again.
+    // Q_AUTHORITY_IMPORT_FILE=<the authority's /api/v1/sync/full-state export> together with
+    // Q_AUTHORITY_IMPORT_SHA256=<that file's sha256> makes this FOLLOWER's balances the authority's
+    // at the file's height, once (a second boot with the same file is a no-op). Refused on the
+    // authority itself and on any host that carries Epsilon's production database (CLAUDE.md Rule 3).
+    match state.storage_engine.load_credit_floor().await {
+        Ok(0) => {}
+        Ok(f) => info!("🧾 [AUTHORITY IMPORT] credit floor {} armed — blocks at or below it are inside the imported state", f),
+        Err(e) => warn!("🧾 [AUTHORITY IMPORT] could not read the credit floor: {}", e),
+    }
+    if let Ok(import_path) = std::env::var("Q_AUTHORITY_IMPORT_FILE") {
+        use sha2::Digest;
+        let standalone = std::env::var("Q_AUTHORITATIVE_STANDALONE").map(|v| v == "1" || v == "true").unwrap_or(false);
+        let prod_db = std::env::var("Q_DB_PATH").map(|p| p.contains("data-mainnet-genesis")).unwrap_or(false)
+            || std::path::Path::new("/home/orobit/data-mainnet-genesis").is_dir();
+        if standalone || prod_db {
+            anyhow::bail!("Q_AUTHORITY_IMPORT_FILE refused: this is the authority node or the production database host (CLAUDE.md Rule 3)");
+        }
+        let bytes = std::fs::read(&import_path)
+            .map_err(|e| anyhow::anyhow!("Q_AUTHORITY_IMPORT_FILE {}: {}", import_path, e))?;
+        let sha = hex::encode(sha2::Sha256::digest(&bytes));
+        let want = std::env::var("Q_AUTHORITY_IMPORT_SHA256").unwrap_or_default().to_lowercase();
+        if want != sha {
+            anyhow::bail!("Q_AUTHORITY_IMPORT_SHA256 mismatch: {} has sha256 {}, the operator confirmed {:?} — refusing", import_path, sha, want);
+        }
+        let snap = q_storage::authority_import::AuthoritySnapshot::from_full_state_json(&bytes)?;
+        let network = std::env::var("Q_NETWORK_ID").unwrap_or_else(|_| "mainnet-genesis".to_string());
+        let rep = state.storage_engine.apply_authority_import(&snap, &sha, &network).await?;
+        if rep.already_applied {
+            info!("🧾 [AUTHORITY IMPORT] {} already applied (height {}) — nothing to do", &sha[..16], rep.height);
+        } else {
+            warn!("🧾 [AUTHORITY IMPORT] APPLIED: {}", serde_json::to_string(&rep).unwrap_or_default());
+            let fresh = state.storage_engine.load_wallet_balances().await?;
+            {
+                let mut wb = state.wallet_balances.write().await;
+                wb.clear();
+                wb.extend(fresh.into_iter());
+            }
+            let tokens = state.storage_engine.load_token_balances().await?;
+            {
+                let mut tb = state.token_balances.write().await;
+                tb.clear();
+                tb.extend(tokens.into_iter());
+            }
+        }
+    }
+
     // v10.9.55 (2026-05-18): startup `safe_batched_convergence_v103` call REMOVED.
     //
     // This block invoked the convergence migration when chain_rebuild_enabled
